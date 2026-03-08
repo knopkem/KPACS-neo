@@ -1,0 +1,43 @@
+<UserControl xmlns="https://github.com/avaloniaui"
+             xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+             x:Class="KPACS.Viewer.Controls.DicomViewPanel"
+             Focusable="True">
+
+    <Grid x:Name="RootGrid" Background="Black" ClipToBounds="True">
+
+        <!-- DICOM image display -->
+        <Image x:Name="DicomImage"
+               Stretch="None"
+               HorizontalAlignment="Left"
+               VerticalAlignment="Top"
+               RenderOptions.BitmapInterpolationMode="HighQuality" />
+
+        <!-- Overlay text: 4 corners like a DICOM viewer -->
+        <TextBlock x:Name="OverlayTopLeft"
+                   Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="13"
+                   VerticalAlignment="Top" HorizontalAlignment="Left"
+                   Margin="10" IsHitTestVisible="False" />
+
+        <TextBlock x:Name="OverlayTopRight"
+                   Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="13"
+                   VerticalAlignment="Top" HorizontalAlignment="Right"
+                   Margin="10" IsHitTestVisible="False" TextAlignment="Right" />
+
+        <TextBlock x:Name="OverlayBottomLeft"
+                   Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="13"
+                   VerticalAlignment="Bottom" HorizontalAlignment="Left"
+                   Margin="10" IsHitTestVisible="False" />
+
+        <TextBlock x:Name="OverlayBottomRight"
+                   Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="13"
+                   VerticalAlignment="Bottom" HorizontalAlignment="Right"
+                   Margin="10" IsHitTestVisible="False" TextAlignment="Right" />
+
+        <!-- "No image" placeholder -->
+        <TextBlock x:Name="PlaceholderText"
+                   Text="Drop a DICOM file here or use File → Open"
+                   Foreground="#FF666666" FontSize="16"
+                   HorizontalAlignment="Center" VerticalAlignment="Center"
+                   IsHitTestVisible="False" />
+    </Grid>
+</UserControl>

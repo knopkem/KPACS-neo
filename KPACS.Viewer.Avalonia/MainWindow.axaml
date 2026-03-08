@@ -1,0 +1,69 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        xmlns:controls="clr-namespace:KPACS.Viewer.Controls"
+        x:Class="KPACS.Viewer.MainWindow"
+        Title="K-PACS Viewer"
+        Width="1024" Height="768"
+        MinWidth="400" MinHeight="300"
+        WindowStartupLocation="CenterScreen"
+        DragDrop.AllowDrop="True"
+        Background="#FF1E1E1E">
+
+    <DockPanel>
+
+        <!-- ==================== Toolbar (StackPanel replaces WPF ToolBar) ==================== -->
+        <Border DockPanel.Dock="Top" Background="#FF2D2D30" Padding="4,3">
+            <StackPanel Orientation="Horizontal" Spacing="2">
+                <Button Content=" Open " Click="OnOpenClick"
+                        ToolTip.Tip="Open DICOM file (Ctrl+O)"
+                        Foreground="White" Padding="6,3" />
+
+                <Border Width="1" Background="#FF555555" Margin="4,2" />
+
+                <Button Content=" Fit " Click="OnFitClick"
+                        ToolTip.Tip="Fit to window (F)"
+                        Foreground="White" Padding="6,3" />
+                <Button Content=" 1:1 " Click="OnOriginalClick"
+                        ToolTip.Tip="Original size (1)"
+                        Foreground="White" Padding="6,3" />
+                <Button Content="  +  " Click="OnZoomInClick"
+                        ToolTip.Tip="Zoom in (+)"
+                        Foreground="White" Padding="6,3" FontWeight="Bold" />
+                <Button Content="  −  " Click="OnZoomOutClick"
+                        ToolTip.Tip="Zoom out (−)"
+                        Foreground="White" Padding="6,3" FontWeight="Bold" />
+
+                <Border Width="1" Background="#FF555555" Margin="4,2" />
+
+                <Button Content=" Reset W/L " Click="OnResetWLClick"
+                        ToolTip.Tip="Reset window/level (R)"
+                        Foreground="White" Padding="6,3" />
+
+                <Border Width="1" Background="#FF555555" Margin="4,2" />
+
+                <TextBlock Text="LUT:" Foreground="#FFB0B0B0"
+                           VerticalAlignment="Center" Margin="4,0" />
+                <ComboBox x:Name="CmbColorScheme" Width="120" Margin="2,0"
+                          SelectionChanged="OnColorSchemeChanged">
+                    <ComboBoxItem Content="Grayscale" Tag="1" IsSelected="True" />
+                    <ComboBoxItem Content="Inverted" Tag="-1" />
+                    <ComboBoxItem Content="Hot Iron" Tag="2" />
+                    <ComboBoxItem Content="Rainbow" Tag="3" />
+                    <ComboBoxItem Content="Gold" Tag="5" />
+                    <ComboBoxItem Content="Bone" Tag="10" />
+                </ComboBox>
+            </StackPanel>
+        </Border>
+
+        <!-- ==================== Status Bar ==================== -->
+        <Border DockPanel.Dock="Bottom" Background="#FF2D2D30" Padding="8,4">
+            <TextBlock x:Name="TxtStatus"
+                       Text="Ready — drag a DICOM file or click Open"
+                       Foreground="#FFB0B0B0" FontFamily="Consolas" FontSize="12" />
+        </Border>
+
+        <!-- ==================== Viewer ==================== -->
+        <controls:DicomViewPanel x:Name="ViewPanel" />
+
+    </DockPanel>
+</Window>
