@@ -6,10 +6,13 @@
     <Grid x:Name="RootGrid" Background="Black" ClipToBounds="True">
 
         <!-- DICOM image display -->
+        <!-- RenderTransformOrigin must be 0,0 (top-left) to match WPF behavior.
+             Avalonia defaults to 0.5,0.5 (center), which breaks the zoom/pan math. -->
         <Image x:Name="DicomImage"
                Stretch="None"
                HorizontalAlignment="Left"
                VerticalAlignment="Top"
+               RenderTransformOrigin="0%,0%"
                RenderOptions.BitmapInterpolationMode="HighQuality" />
 
         <!-- Overlay text: 4 corners like a DICOM viewer -->

@@ -82,6 +82,12 @@ public partial class DicomViewPanel : UserControl
     private readonly ScaleTransform _zoomTransform = new ScaleTransform(1, 1);
     private readonly TranslateTransform _panTransform = new TranslateTransform();
 
+    // Shadow fields for pan position — avoids reading back from the Avalonia
+    // transform object, which can introduce tiny precision drift that accumulates
+    // during rapid incremental operations like edge-zoom.
+    private double _panX;
+    private double _panY;
+
     // ==============================================================================================
     // Mouse interaction state (ported from TdView: gXStart, gYStart, gFastSlope, gFastCen, etc.)
     // ==============================================================================================
@@ -438,8 +444,10 @@ public partial class DicomViewPanel : UserControl
         double displayWidth = _imageWidth * _zoomFactor;
         double displayHeight = _imageHeight * _zoomFactor;
 
-        _panTransform.X = (canvasWidth - displayWidth) / 2.0;
-        _panTransform.Y = (canvasHeight - displayHeight) / 2.0;
+        _panX = (canvasWidth - displayWidth) / 2.0;
+        _panY = (canvasHeight - displayHeight) / 2.0;
+        _panTransform.X = _panX;
+        _panTransform.Y = _panY;
     }
 
     /// <summary>
@@ -552,8 +560,8 @@ public partial class DicomViewPanel : UserControl
             }
             else
             {
-                _startPanX = _panTransform.X;
-                _startPanY = _panTransform.Y;
+                _startPanX = _panX;
+                _startPanY = _panY;
                 Cursor = new Cursor(StandardCursorType.Hand);
             }
 
@@ -627,8 +635,10 @@ public partial class DicomViewPanel : UserControl
                 double cx = RootGrid.Bounds.Width / 2.0;
                 double cy = RootGrid.Bounds.Height / 2.0;
                 double ratio = newZoom / _zoomFactor;
-                _panTransform.X = cx - ratio * (cx - _panTransform.X);
-                _panTransform.Y = cy - ratio * (cy - _panTransform.Y);
+                _panX = cx - ratio * (cx - _panX);
+                _panY = cy - ratio * (cy - _panY);
+                _panTransform.X = _panX;
+                _panTransform.Y = _panY;
 
                 _zoomFactor = newZoom;
                 _fitToWindow = false;
@@ -645,8 +655,10 @@ public partial class DicomViewPanel : UserControl
             double dx = pos.X - _mouseDownPos.X;
             double dy = pos.Y - _mouseDownPos.Y;
 
-            _panTransform.X = _startPanX + dx;
-            _panTransform.Y = _startPanY + dy;
+            _panX = _startPanX + dx;
+            _panY = _startPanY + dy;
+            _panTransform.X = _panX;
+            _panTransform.Y = _panY;
             _fitToWindow = false;
         }
         else if (!_isRightDragging && !_isLeftDragging && _rawPixelData != null)
@@ -680,8 +692,10 @@ public partial class DicomViewPanel : UserControl
 
         // Zoom centered on mouse position
         double ratio = newZoom / oldZoom;
-        _panTransform.X = mousePos.X - ratio * (mousePos.X - _panTransform.X);
-        _panTransform.Y = mousePos.Y - ratio * (mousePos.Y - _panTransform.Y);
+        _panX = mousePos.X - ratio * (mousePos.X - _panX);
+        _panY = mousePos.Y - ratio * (mousePos.Y - _panY);
+        _panTransform.X = _panX;
+        _panTransform.Y = _panY;
 
         _zoomFactor = newZoom;
         _fitToWindow = false;
