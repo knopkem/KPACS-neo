@@ -13,11 +13,13 @@
 // in this basic port.
 // ------------------------------------------------------------------------------------------------
 
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using System.Windows.Media;
-using System.Windows.Media.Imaging;
+using System.Runtime.InteropServices;
+using Avalonia;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Media;
+using Avalonia.Media.Imaging;
+using Avalonia.Platform;
 using FellowOakDicom;
 using FellowOakDicom.Imaging;
 using FellowOakDicom.Imaging.Codec;
@@ -77,6 +79,10 @@ public partial class DicomViewPanel : UserControl
     private byte[] _lutG = new byte[256];
     private byte[] _lutB = new byte[256];
 
+    // Transforms (managed in code-behind for cross-platform reliability)
+    private readonly ScaleTransform _zoomTransform = new ScaleTransform(1, 1);
+    private readonly TranslateTransform _panTransform = new TranslateTransform(0, 0);
+
     // ==============================================================================================
     // Mouse interaction state (ported from TdView: gXStart, gYStart, gFastSlope, gFastCen, etc.)
     // ==============================================================================================
@@ -92,6 +98,9 @@ public partial class DicomViewPanel : UserControl
     // Center zone = inner area → drag to pan
     private bool _isEdgeZoom;        // locked at mouse-down: true = zoom mode, false = pan mode
     private int _lastMouseY;         // for incremental edge-zoom tracking
+
+    // Pointer capture tracking
+    private IPointer? _capturedPointer;
 
     // ==============================================================================================
     // Public properties
@@ -117,6 +126,9 @@ public partial class DicomViewPanel : UserControl
     public bool IsImageLoaded => _rawPixelData != null;
     public int CurrentColorScheme => _colorScheme;
 
+    /// <summary>Last error message from LoadFile, or null on success.</summary>
+    public string? LastError { get; private set; }
+
     // ==============================================================================================
     // Events
     // ==============================================================================================
@@ -134,6 +146,18 @@ public partial class DicomViewPanel : UserControl
         InitializeComponent();
         SetColorLutInternal(1);
         SizeChanged += OnSizeChanged;
+
+        // Set up render transforms on the image element
+        var group = new TransformGroup();
+        group.Children.Add(_zoomTransform);
+        group.Children.Add(_panTransform);
+        DicomImage.RenderTransform = group;
+
+        // Register pointer events on the grid
+        RootGrid.PointerPressed += OnPointerPressed;
+        RootGrid.PointerReleased += OnPointerReleased;
+        RootGrid.PointerMoved += OnPointerMoved;
+        RootGrid.PointerWheelChanged += OnPointerWheelChanged;
     }
 
     // ==============================================================================================
@@ -142,9 +166,11 @@ public partial class DicomViewPanel : UserControl
 
     /// <summary>
     /// Loads a DICOM file for display. Extracts pixel data, metadata, and window presets.
+    /// Returns true on success; false on failure with LastError set.
     /// </summary>
     public bool LoadFile(string filePath)
     {
+        LastError = null;
         try
         {
             var file = DicomFile.Open(filePath);
@@ -177,14 +203,12 @@ public partial class DicomViewPanel : UserControl
             // --- Extract pixel data ---
             if (!dataset.Contains(DicomTag.PixelData))
             {
-                MessageBox.Show("This DICOM file contains no pixel data.",
-                    "No Image", MessageBoxButton.OK, MessageBoxImage.Warning);
+                LastError = "This DICOM file contains no pixel data.";
                 return false;
             }
 
             // Transcode compressed transfer syntaxes (JPEG, JPEG2000, RLE, etc.)
             // to raw uncompressed pixels before extraction.
-            // We know the expected raw size from the header (Columns × Rows × BytesPerPixel).
             var syntax = file.Dataset.InternalTransferSyntax;
             if (syntax.IsEncapsulated)
             {
@@ -197,21 +221,18 @@ public partial class DicomViewPanel : UserControl
             var frame = pixelData.GetFrame(0);
             _rawPixelData = frame.Data;
 
-            // Sanity check: verify decompressed buffer matches expected size from header
+            // Sanity check: verify decompressed buffer matches expected size
             int expectedBytes = _imageWidth * _imageHeight * _samplesPerPixel * (_bitsAllocated / 8);
             if (_rawPixelData.Length < expectedBytes)
             {
-                MessageBox.Show(
-                    $"Pixel data size mismatch: got {_rawPixelData.Length} bytes, " +
-                    $"expected {expectedBytes} bytes ({_imageWidth}×{_imageHeight}, " +
-                    $"{_bitsAllocated}-bit, {_samplesPerPixel} spp).\n\n" +
-                    "The file may use an unsupported compressed transfer syntax.",
-                    "Decode Error", MessageBoxButton.OK, MessageBoxImage.Warning);
+                LastError = $"Pixel data size mismatch: got {_rawPixelData.Length} bytes, " +
+                    $"expected {expectedBytes} ({_imageWidth}×{_imageHeight}, " +
+                    $"{_bitsAllocated}-bit, {_samplesPerPixel} spp). " +
+                    "The file may use an unsupported compressed transfer syntax.";
                 return false;
             }
 
             // --- Window Center / Width ---
-            // Try DICOM preset first; fall back to auto-compute from pixel range
             double wc = dataset.GetSingleValueOrDefault<double>(DicomTag.WindowCenter, 0);
             double ww = dataset.GetSingleValueOrDefault<double>(DicomTag.WindowWidth, 0);
 
@@ -236,12 +257,14 @@ public partial class DicomViewPanel : UserControl
 
             // --- Create display bitmap at native resolution ---
             _displayBitmap = new WriteableBitmap(
-                _imageWidth, _imageHeight, 96, 96,
-                PixelFormats.Bgra32, null);
+                new PixelSize(_imageWidth, _imageHeight),
+                new Vector(96, 96),
+                PixelFormat.Bgra8888,
+                AlphaFormat.Unpremul);
             DicomImage.Source = _displayBitmap;
 
             // Hide placeholder
-            PlaceholderText.Visibility = Visibility.Collapsed;
+            PlaceholderText.IsVisible = false;
 
             // Render the image
             RenderImage();
@@ -260,10 +283,9 @@ public partial class DicomViewPanel : UserControl
         }
         catch (Exception ex)
         {
-            MessageBox.Show($"Error loading DICOM file:\n\n{ex.Message}\n\n" +
-                "If the image uses compressed transfer syntax (JPEG, JPEG2000),\n" +
-                "you may need to install fo-dicom codec packages.",
-                "Load Error", MessageBoxButton.OK, MessageBoxImage.Error);
+            LastError = $"Error loading DICOM file: {ex.Message}\n" +
+                "If the image uses a compressed transfer syntax (JPEG, JPEG2000), " +
+                "ensure fo-dicom codec packages are installed.";
             return false;
         }
     }
@@ -290,11 +312,10 @@ public partial class DicomViewPanel : UserControl
             _isMonochrome1,
             outputBgra);
 
-        _displayBitmap.WritePixels(
-            new Int32Rect(0, 0, _imageWidth, _imageHeight),
-            outputBgra,
-            _imageWidth * 4,
-            0);
+        using var fb = _displayBitmap.Lock();
+        int rowSize = _imageWidth * 4;
+        for (int y = 0; y < _imageHeight; y++)
+            Marshal.Copy(outputBgra, y * rowSize, IntPtr.Add(fb.Address, y * fb.RowBytes), rowSize);
     }
 
     // ==============================================================================================
@@ -331,8 +352,8 @@ public partial class DicomViewPanel : UserControl
     {
         if (_imageWidth == 0 || _imageHeight == 0) return;
 
-        double canvasWidth = RootGrid.ActualWidth;
-        double canvasHeight = RootGrid.ActualHeight;
+        double canvasWidth = RootGrid.Bounds.Width;
+        double canvasHeight = RootGrid.Bounds.Height;
         if (canvasWidth <= 0 || canvasHeight <= 0) return;
 
         double scaleX = canvasWidth / _imageWidth;
@@ -358,7 +379,7 @@ public partial class DicomViewPanel : UserControl
     }
 
     /// <summary>
-    /// Zooms in by 10% (ported from TdView.dcmZoomIn: gTempZoomPct := 105).
+    /// Zooms in by 10% (ported from TdView.dcmZoomIn).
     /// </summary>
     public void ZoomIn()
     {
@@ -369,7 +390,7 @@ public partial class DicomViewPanel : UserControl
     }
 
     /// <summary>
-    /// Zooms out by 10% (ported from TdView.dcmZoomOut: gTempZoomPct := 95).
+    /// Zooms out by 10% (ported from TdView.dcmZoomOut).
     /// </summary>
     public void ZoomOut()
     {
@@ -392,29 +413,27 @@ public partial class DicomViewPanel : UserControl
 
     private void ApplyZoomTransform()
     {
-        ZoomTransform.ScaleX = _zoomFactor;
-        ZoomTransform.ScaleY = _zoomFactor;
+        _zoomTransform.ScaleX = _zoomFactor;
+        _zoomTransform.ScaleY = _zoomFactor;
 
-        // Switch interpolation: NearestNeighbor for zoomed-in pixel inspection,
-        // HighQuality for zoomed-out overview
-        RenderOptions.SetBitmapScalingMode(DicomImage,
-            _zoomFactor > 2.0 ? BitmapScalingMode.NearestNeighbor : BitmapScalingMode.HighQuality);
+        // NearestNeighbor for zoomed-in pixel inspection, HighQuality for overview
+        RenderOptions.SetBitmapInterpolationMode(DicomImage,
+            _zoomFactor > 2.0 ? BitmapInterpolationMode.None : BitmapInterpolationMode.HighQuality);
     }
 
     private void CenterImage()
     {
-        double canvasWidth = RootGrid.ActualWidth;
-        double canvasHeight = RootGrid.ActualHeight;
+        double canvasWidth = RootGrid.Bounds.Width;
+        double canvasHeight = RootGrid.Bounds.Height;
         double displayWidth = _imageWidth * _zoomFactor;
         double displayHeight = _imageHeight * _zoomFactor;
 
-        PanTransform.X = (canvasWidth - displayWidth) / 2.0;
-        PanTransform.Y = (canvasHeight - displayHeight) / 2.0;
+        _panTransform.X = (canvasWidth - displayWidth) / 2.0;
+        _panTransform.Y = (canvasHeight - displayHeight) / 2.0;
     }
 
     /// <summary>
     /// Resets window center/width to the DICOM default or auto-computed values.
-    /// Ported from TdView.ResetWindowValues.
     /// </summary>
     public void ResetWindowLevel()
     {
@@ -464,107 +483,83 @@ public partial class DicomViewPanel : UserControl
     }
 
     // ==============================================================================================
-    // Mouse Handlers — Window/Level (ported from TdView.ImageMouseMove kContrast tool)
+    // Pointer Handlers — unified press/release/move/wheel (replaces WPF mouse events)
     // ==============================================================================================
 
-    private void OnMouseRightDown(object sender, MouseButtonEventArgs e)
+    private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        _isRightDragging = true;
-        _mouseDownPos = e.GetPosition(RootGrid);
-        _startWindowCenter = _windowCenter;
-        _startWindowWidth = _windowWidth;
-        RootGrid.CaptureMouse();
-        Cursor = Cursors.Cross;
-        e.Handled = true;
+        var props = e.GetCurrentPoint(RootGrid).Properties;
+        var pos = e.GetPosition(RootGrid);
+
+        if (props.IsRightButtonPressed)
+        {
+            _isRightDragging = true;
+            _mouseDownPos = pos;
+            _startWindowCenter = _windowCenter;
+            _startWindowWidth = _windowWidth;
+            e.Pointer.Capture(RootGrid);
+            _capturedPointer = e.Pointer;
+            Cursor = new Cursor(StandardCursorType.Cross);
+            e.Handled = true;
+        }
+        else if (props.IsLeftButtonPressed)
+        {
+            if (e.ClickCount == 2)
+            {
+                // Double-click: fit to window (ported from TdView.SetFitInZoom)
+                _fitToWindow = true;
+                ApplyFitToWindow();
+                UpdateOverlay();
+                e.Handled = true;
+                return;
+            }
+
+            _isLeftDragging = true;
+            _mouseDownPos = pos;
+
+            // Lock zone at click time (ported from FZoomRegion := IsCursorInZoomRegion)
+            _isEdgeZoom = IsCursorInZoomRegion(pos);
+
+            if (_isEdgeZoom)
+            {
+                _lastMouseY = (int)pos.Y;
+                Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
+            }
+            else
+            {
+                _startPanX = _panTransform.X;
+                _startPanY = _panTransform.Y;
+                Cursor = new Cursor(StandardCursorType.Hand);
+            }
+
+            e.Pointer.Capture(RootGrid);
+            _capturedPointer = e.Pointer;
+            e.Handled = true;
+        }
     }
 
-    private void OnMouseRightUp(object sender, MouseButtonEventArgs e)
+    private void OnPointerReleased(object? sender, PointerReleasedEventArgs e)
     {
-        if (_isRightDragging)
+        if (e.InitialPressMouseButton == MouseButton.Right && _isRightDragging)
         {
             _isRightDragging = false;
-            RootGrid.ReleaseMouseCapture();
+            _capturedPointer?.Capture(null);
+            _capturedPointer = null;
             UpdateZoneCursor(e.GetPosition(RootGrid));
             e.Handled = true;
         }
-    }
-
-    // ==============================================================================================
-    // Mouse Handlers — Integrated Pan/Zoom (ported from TdView.ImageMouseMove kMoveImage tool)
-    // Edge zone (outer 1/6th) = zoom by dragging up/down
-    // Center zone (inner area) = pan by dragging
-    // Zone is locked at mouse-down time (FZoomRegion in original)
-    // ==============================================================================================
-
-    /// <summary>
-    /// Determines if the mouse is in the edge (zoom) region.
-    /// Ported from TdView.IsCursorInZoomRegion: outer 1/6th of each dimension.
-    /// </summary>
-    private bool IsCursorInZoomRegion(Point pos)
-    {
-        double frameW = RootGrid.ActualWidth / 6.0;
-        double frameH = RootGrid.ActualHeight / 6.0;
-
-        return pos.X < frameW
-            || pos.X > RootGrid.ActualWidth - frameW
-            || pos.Y < frameH
-            || pos.Y > RootGrid.ActualHeight - frameH;
-    }
-
-    private void OnMouseLeftDown(object sender, MouseButtonEventArgs e)
-    {
-        if (e.ClickCount == 2)
-        {
-            // Double-click: fit to window (ported from TdView.SetFitInZoom)
-            _fitToWindow = true;
-            ApplyFitToWindow();
-            UpdateOverlay();
-            e.Handled = true;
-            return;
-        }
-
-        _isLeftDragging = true;
-        _mouseDownPos = e.GetPosition(RootGrid);
-
-        // Lock the zone at click time (ported from FZoomRegion := IsCursorInZoomRegion)
-        _isEdgeZoom = IsCursorInZoomRegion(_mouseDownPos);
-
-        if (_isEdgeZoom)
-        {
-            // Edge zoom mode: track vertical movement
-            _lastMouseY = (int)_mouseDownPos.Y;
-            Cursor = Cursors.SizeNS;  // vertical resize cursor for zoom
-        }
-        else
-        {
-            // Center pan mode
-            _startPanX = PanTransform.X;
-            _startPanY = PanTransform.Y;
-            Cursor = Cursors.Hand;
-        }
-
-        RootGrid.CaptureMouse();
-        e.Handled = true;
-    }
-
-    private void OnMouseLeftUp(object sender, MouseButtonEventArgs e)
-    {
-        if (_isLeftDragging)
+        else if (e.InitialPressMouseButton == MouseButton.Left && _isLeftDragging)
         {
             _isLeftDragging = false;
             _isEdgeZoom = false;
-            RootGrid.ReleaseMouseCapture();
-            // Restore zone-appropriate cursor
+            _capturedPointer?.Capture(null);
+            _capturedPointer = null;
             UpdateZoneCursor(e.GetPosition(RootGrid));
             e.Handled = true;
         }
     }
 
-    // ==============================================================================================
-    // Mouse Move — Dispatch to windowing, edge-zoom, or center-pan
-    // ==============================================================================================
-
-    private void OnMouseMove(object sender, MouseEventArgs e)
+    private void OnPointerMoved(object? sender, PointerEventArgs e)
     {
         Point pos = e.GetPosition(RootGrid);
 
@@ -587,30 +582,26 @@ public partial class DicomViewPanel : UserControl
         {
             // Edge zone: drag up = zoom in, drag down = zoom out
             // Ported from TdView.ImageMouseMove FZoomRegion path.
-            // Step size scales with current zoom: Round(FImageZoomPct/100 + 1)
             int currentY = (int)pos.Y;
             if (currentY != _lastMouseY)
             {
                 double zoomPct = _zoomFactor * 100.0;
                 double step = Math.Max(1.0, zoomPct / 100.0 + 1.0);
-                double tempZoomPct;
-
-                if (currentY < _lastMouseY)
-                    tempZoomPct = 100.0 + step;  // drag up = zoom in
-                else
-                    tempZoomPct = 100.0 - step;  // drag down = zoom out
+                double tempZoomPct = currentY < _lastMouseY
+                    ? 100.0 + step   // drag up = zoom in
+                    : 100.0 - step;  // drag down = zoom out
 
                 tempZoomPct = Math.Clamp(tempZoomPct, 5.0, 1000.0);
 
-                // Apply zoom centered on viewport center (not mouse — original dView behavior)
                 double factor = tempZoomPct / 100.0;
                 double newZoom = Math.Clamp(_zoomFactor * factor, 0.01, 20.0);
 
-                double cx = RootGrid.ActualWidth / 2.0;
-                double cy = RootGrid.ActualHeight / 2.0;
+                // Zoom centered on viewport center (original dView behavior)
+                double cx = RootGrid.Bounds.Width / 2.0;
+                double cy = RootGrid.Bounds.Height / 2.0;
                 double ratio = newZoom / _zoomFactor;
-                PanTransform.X = cx - ratio * (cx - PanTransform.X);
-                PanTransform.Y = cy - ratio * (cy - PanTransform.Y);
+                _panTransform.X = cx - ratio * (cx - _panTransform.X);
+                _panTransform.Y = cy - ratio * (cy - _panTransform.Y);
 
                 _zoomFactor = newZoom;
                 _fitToWindow = false;
@@ -623,50 +614,32 @@ public partial class DicomViewPanel : UserControl
         }
         else if (_isLeftDragging && !_isEdgeZoom)
         {
-            // Center zone: pan — direct 1:1 pixel mapping
+            // Center zone: pan
             double dx = pos.X - _mouseDownPos.X;
             double dy = pos.Y - _mouseDownPos.Y;
 
-            PanTransform.X = _startPanX + dx;
-            PanTransform.Y = _startPanY + dy;
+            _panTransform.X = _startPanX + dx;
+            _panTransform.Y = _startPanY + dy;
             _fitToWindow = false;
         }
         else if (!_isRightDragging && !_isLeftDragging && _rawPixelData != null)
         {
-            // No button pressed: update cursor based on zone
-            // Ported from TdView.ImageMouseMove cursor tracking
             UpdateZoneCursor(pos);
         }
     }
 
-    /// <summary>
-    /// Updates the cursor to reflect whether the mouse is in the edge (zoom) or center (pan) zone.
-    /// Ported from TdView: crZoom in edge zone, crPan in center zone.
-    /// </summary>
-    private void UpdateZoneCursor(Point pos)
-    {
-        if (IsCursorInZoomRegion(pos))
-            Cursor = Cursors.SizeNS;  // zoom indicator (vertical resize)
-        else
-            Cursor = Cursors.Hand;    // pan indicator
-    }
-
-    // ==============================================================================================
-    // Mouse Wheel — Zoom at cursor position (ported from TdView.ImageZoom)
-    // ==============================================================================================
-
-    private void OnMouseWheel(object sender, MouseWheelEventArgs e)
+    private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
         Point mousePos = e.GetPosition(RootGrid);
 
         double oldZoom = _zoomFactor;
-        double zoomDelta = e.Delta > 0 ? 1.1 : 1.0 / 1.1;
+        double zoomDelta = e.Delta.Y > 0 ? 1.1 : 1.0 / 1.1;
         double newZoom = Math.Clamp(_zoomFactor * zoomDelta, 0.01, 20.0);
 
         // Zoom centered on mouse position (ported from TdView.ImageZoom FUseScrollZoom path)
         double ratio = newZoom / oldZoom;
-        PanTransform.X = mousePos.X - ratio * (mousePos.X - PanTransform.X);
-        PanTransform.Y = mousePos.Y - ratio * (mousePos.Y - PanTransform.Y);
+        _panTransform.X = mousePos.X - ratio * (mousePos.X - _panTransform.X);
+        _panTransform.Y = mousePos.Y - ratio * (mousePos.Y - _panTransform.Y);
 
         _zoomFactor = newZoom;
         _fitToWindow = false;
@@ -678,10 +651,36 @@ public partial class DicomViewPanel : UserControl
     }
 
     // ==============================================================================================
+    // Zone cursor helpers
+    // ==============================================================================================
+
+    /// <summary>
+    /// Determines if the mouse is in the edge (zoom) region.
+    /// Ported from TdView.IsCursorInZoomRegion: outer 1/6th of each dimension.
+    /// </summary>
+    private bool IsCursorInZoomRegion(Point pos)
+    {
+        double frameW = RootGrid.Bounds.Width / 6.0;
+        double frameH = RootGrid.Bounds.Height / 6.0;
+
+        return pos.X < frameW
+            || pos.X > RootGrid.Bounds.Width - frameW
+            || pos.Y < frameH
+            || pos.Y > RootGrid.Bounds.Height - frameH;
+    }
+
+    private void UpdateZoneCursor(Point pos)
+    {
+        Cursor = IsCursorInZoomRegion(pos)
+            ? new Cursor(StandardCursorType.SizeNorthSouth)
+            : new Cursor(StandardCursorType.Hand);
+    }
+
+    // ==============================================================================================
     // Resize handler
     // ==============================================================================================
 
-    private void OnSizeChanged(object sender, SizeChangedEventArgs e)
+    private void OnSizeChanged(object? sender, SizeChangedEventArgs e)
     {
         if (_fitToWindow && _rawPixelData != null)
             ApplyFitToWindow();
@@ -689,3 +688,4 @@ public partial class DicomViewPanel : UserControl
         UpdateOverlay();
     }
 }
+
