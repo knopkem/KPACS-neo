@@ -4,10 +4,10 @@
 // ------------------------------------------------------------------------------------------------
 
 using System.IO;
-using System.Windows;
-using System.Windows.Controls;
-using System.Windows.Input;
-using Microsoft.Win32;
+using Avalonia.Controls;
+using Avalonia.Input;
+using Avalonia.Interactivity;
+using Avalonia.Platform.Storage;
 
 namespace KPACS.Viewer;
 
@@ -20,32 +20,47 @@ public partial class MainWindow : Window
         ViewPanel.WindowChanged += UpdateStatusBar;
         ViewPanel.ZoomChanged += UpdateStatusBar;
         ViewPanel.ImageLoaded += OnImageLoaded;
+
+        // Drag & drop
+        AddHandler(DragDrop.DragOverEvent, OnDragOver);
+        AddHandler(DragDrop.DropEvent, OnFileDrop);
+        DragDrop.SetAllowDrop(this, true);
+
+        KeyDown += OnKeyDown;
     }
 
     // ==============================================================================================
     // Toolbar Handlers
     // ==============================================================================================
 
-    private void OnOpenClick(object sender, RoutedEventArgs e)
+    private async void OnOpenClick(object? sender, RoutedEventArgs e)
     {
-        var dlg = new OpenFileDialog
+        var files = await StorageProvider.OpenFilePickerAsync(new FilePickerOpenOptions
         {
             Title = "Open DICOM File",
-            Filter = "DICOM Files (*.dcm)|*.dcm|All Files (*.*)|*.*",
-            Multiselect = false
-        };
+            AllowMultiple = false,
+            FileTypeFilter = new[]
+            {
+                new FilePickerFileType("DICOM Files") { Patterns = new[] { "*.dcm" } },
+                new FilePickerFileType("All Files") { Patterns = new[] { "*" } }
+            }
+        });
 
-        if (dlg.ShowDialog() == true)
-            LoadFile(dlg.FileName);
+        if (files.Count > 0)
+        {
+            var path = files[0].TryGetLocalPath();
+            if (path != null)
+                LoadFile(path);
+        }
     }
 
-    private void OnFitClick(object sender, RoutedEventArgs e) => ViewPanel.ApplyFitToWindow();
-    private void OnOriginalClick(object sender, RoutedEventArgs e) => ViewPanel.ZoomToOriginal();
-    private void OnZoomInClick(object sender, RoutedEventArgs e) => ViewPanel.ZoomIn();
-    private void OnZoomOutClick(object sender, RoutedEventArgs e) => ViewPanel.ZoomOut();
-    private void OnResetWLClick(object sender, RoutedEventArgs e) => ViewPanel.ResetWindowLevel();
+    private void OnFitClick(object? sender, RoutedEventArgs e) => ViewPanel.ApplyFitToWindow();
+    private void OnOriginalClick(object? sender, RoutedEventArgs e) => ViewPanel.ZoomToOriginal();
+    private void OnZoomInClick(object? sender, RoutedEventArgs e) => ViewPanel.ZoomIn();
+    private void OnZoomOutClick(object? sender, RoutedEventArgs e) => ViewPanel.ZoomOut();
+    private void OnResetWLClick(object? sender, RoutedEventArgs e) => ViewPanel.ResetWindowLevel();
 
-    private void OnColorSchemeChanged(object sender, SelectionChangedEventArgs e)
+    private void OnColorSchemeChanged(object? sender, SelectionChangedEventArgs e)
     {
         if (ViewPanel == null || !ViewPanel.IsImageLoaded) return;
         if (CmbColorScheme.SelectedItem is ComboBoxItem item && item.Tag is string tagStr)
@@ -55,27 +70,15 @@ public partial class MainWindow : Window
         }
     }
 
-    /// <summary>
-    /// Hides the overflow button on the toolbar (cosmetic).
-    /// </summary>
-    private void OnToolBarLoaded(object sender, RoutedEventArgs e)
-    {
-        if (sender is ToolBar toolBar)
-        {
-            var overflow = toolBar.Template.FindName("OverflowGrid", toolBar) as FrameworkElement;
-            if (overflow != null) overflow.Visibility = Visibility.Collapsed;
-        }
-    }
-
     // ==============================================================================================
     // Keyboard Shortcuts
     // ==============================================================================================
 
-    private void OnKeyDown(object sender, KeyEventArgs e)
+    private void OnKeyDown(object? sender, KeyEventArgs e)
     {
         switch (e.Key)
         {
-            case Key.O when Keyboard.Modifiers == ModifierKeys.Control:
+            case Key.O when e.KeyModifiers == KeyModifiers.Control:
                 OnOpenClick(sender, e);
                 e.Handled = true;
                 break;
@@ -85,7 +88,7 @@ public partial class MainWindow : Window
                 e.Handled = true;
                 break;
 
-            case Key.D1 when Keyboard.Modifiers == ModifierKeys.None:
+            case Key.D1 when e.KeyModifiers == KeyModifiers.None:
                 ViewPanel.ZoomToOriginal();
                 e.Handled = true;
                 break;
@@ -113,26 +116,22 @@ public partial class MainWindow : Window
     // Drag & Drop
     // ==============================================================================================
 
-    private void OnDragOver(object sender, DragEventArgs e)
+    private void OnDragOver(object? sender, DragEventArgs e)
     {
-        if (e.Data.GetDataPresent(DataFormats.FileDrop))
-        {
-            e.Effects = DragDropEffects.Copy;
-            e.Handled = true;
-        }
-        else
-        {
-            e.Effects = DragDropEffects.None;
-        }
+        e.DragEffects = e.Data.Contains(DataFormats.Files)
+            ? DragDropEffects.Copy
+            : DragDropEffects.None;
+        e.Handled = true;
     }
 
-    private void OnFileDrop(object sender, DragEventArgs e)
+    private void OnFileDrop(object? sender, DragEventArgs e)
     {
-        if (e.Data.GetDataPresent(DataFormats.FileDrop))
+        if (e.Data.Contains(DataFormats.Files))
         {
-            string[]? files = e.Data.GetData(DataFormats.FileDrop) as string[];
-            if (files is { Length: > 0 })
-                LoadFile(files[0]);
+            var first = e.Data.GetFiles()?.FirstOrDefault();
+            var path = first?.TryGetLocalPath();
+            if (path != null)
+                LoadFile(path);
         }
     }
 
@@ -151,7 +150,7 @@ public partial class MainWindow : Window
         }
         else
         {
-            TxtStatus.Text = "Load failed.";
+            TxtStatus.Text = $"Error: {ViewPanel.LastError ?? "Load failed."}";
         }
     }
 
@@ -159,10 +158,7 @@ public partial class MainWindow : Window
     // Status Bar
     // ==============================================================================================
 
-    private void OnImageLoaded()
-    {
-        UpdateStatusBar();
-    }
+    private void OnImageLoaded() => UpdateStatusBar();
 
     private void UpdateStatusBar()
     {
@@ -174,3 +170,4 @@ public partial class MainWindow : Window
                           $"Zoom: {ViewPanel.ZoomFactor * 100:F0}%";
     }
 }
+

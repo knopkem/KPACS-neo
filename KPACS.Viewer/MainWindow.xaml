@@ -1,61 +1,52 @@
-<Window x:Class="KPACS.Viewer.MainWindow"
-        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+<Window xmlns="https://github.com/avaloniaui"
         xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
         xmlns:controls="clr-namespace:KPACS.Viewer.Controls"
+        x:Class="KPACS.Viewer.MainWindow"
         Title="K-PACS Viewer"
         Width="1024" Height="768"
         MinWidth="400" MinHeight="300"
         WindowStartupLocation="CenterScreen"
-        AllowDrop="True"
-        Drop="OnFileDrop"
-        DragOver="OnDragOver"
-        Background="#FF1E1E1E"
-        KeyDown="OnKeyDown">
+        Background="#1E1E1E">
 
     <DockPanel>
 
         <!-- ==================== Toolbar ==================== -->
-        <ToolBarTray DockPanel.Dock="Top" Background="#FF2D2D30" IsLocked="True">
-            <ToolBar Band="1" BandIndex="1" Background="#FF2D2D30"
-                     Loaded="OnToolBarLoaded">
-                <Button Content=" Open " Click="OnOpenClick" ToolTip="Open DICOM file (Ctrl+O)"
-                        Foreground="White" Padding="6,3" Margin="2" />
-                <Separator />
-
-                <Button Content=" Fit " Click="OnFitClick" ToolTip="Fit to window (F)"
-                        Foreground="White" Padding="6,3" Margin="2" />
-                <Button Content=" 1:1 " Click="OnOriginalClick" ToolTip="Original size (1)"
-                        Foreground="White" Padding="6,3" Margin="2" />
-                <Button Content="  +  " Click="OnZoomInClick" ToolTip="Zoom in (+)"
-                        Foreground="White" Padding="6,3" Margin="2" FontWeight="Bold" />
-                <Button Content="  −  " Click="OnZoomOutClick" ToolTip="Zoom out (−)"
-                        Foreground="White" Padding="6,3" Margin="2" FontWeight="Bold" />
-                <Separator />
-
-                <Button Content=" Reset W/L " Click="OnResetWLClick" ToolTip="Reset window/level (R)"
-                        Foreground="White" Padding="6,3" Margin="2" />
-                <Separator />
-
-                <TextBlock Text="LUT:" Foreground="#FFB0B0B0" VerticalAlignment="Center" Margin="4,0" />
+        <Border DockPanel.Dock="Top" Background="#2D2D30" Padding="4,3">
+            <StackPanel Orientation="Horizontal">
+                <Button Content=" Open " Click="OnOpenClick" ToolTip.Tip="Open DICOM file (Ctrl+O)"
+                        Padding="6,3" Margin="2" />
+                <Border Width="1" Background="#555555" Margin="4,2" VerticalAlignment="Stretch" />
+                <Button Content=" Fit " Click="OnFitClick" ToolTip.Tip="Fit to window (F)"
+                        Padding="6,3" Margin="2" />
+                <Button Content=" 1:1 " Click="OnOriginalClick" ToolTip.Tip="Original size (1)"
+                        Padding="6,3" Margin="2" />
+                <Button Content="  +  " Click="OnZoomInClick" ToolTip.Tip="Zoom in (+)"
+                        Padding="6,3" Margin="2" FontWeight="Bold" />
+                <Button Content="  −  " Click="OnZoomOutClick" ToolTip.Tip="Zoom out (−)"
+                        Padding="6,3" Margin="2" FontWeight="Bold" />
+                <Border Width="1" Background="#555555" Margin="4,2" VerticalAlignment="Stretch" />
+                <Button Content=" Reset W/L " Click="OnResetWLClick" ToolTip.Tip="Reset window/level (R)"
+                        Padding="6,3" Margin="2" />
+                <Border Width="1" Background="#555555" Margin="4,2" VerticalAlignment="Stretch" />
+                <TextBlock Text="LUT:" Foreground="#B0B0B0" VerticalAlignment="Center" Margin="4,0" />
                 <ComboBox x:Name="CmbColorScheme" Width="110" Margin="2"
+                          SelectedIndex="0"
                           SelectionChanged="OnColorSchemeChanged">
-                    <ComboBoxItem Content="Grayscale" Tag="1" IsSelected="True" />
+                    <ComboBoxItem Content="Grayscale" Tag="1" />
                     <ComboBoxItem Content="Inverted" Tag="-1" />
                     <ComboBoxItem Content="Hot Iron" Tag="2" />
                     <ComboBoxItem Content="Rainbow" Tag="3" />
                     <ComboBoxItem Content="Gold" Tag="5" />
                     <ComboBoxItem Content="Bone" Tag="10" />
                 </ComboBox>
-            </ToolBar>
-        </ToolBarTray>
+            </StackPanel>
+        </Border>
 
         <!-- ==================== Status Bar ==================== -->
-        <StatusBar DockPanel.Dock="Bottom" Background="#FF2D2D30" Foreground="#FFB0B0B0"
-                   FontFamily="Consolas" FontSize="12">
-            <StatusBarItem>
-                <TextBlock x:Name="TxtStatus" Text="Ready — drag a DICOM file or click Open" />
-            </StatusBarItem>
-        </StatusBar>
+        <Border DockPanel.Dock="Bottom" Background="#2D2D30" Padding="8,4">
+            <TextBlock x:Name="TxtStatus" Text="Ready — drag a DICOM file or click Open"
+                       Foreground="#B0B0B0" FontFamily="Consolas" FontSize="12" />
+        </Border>
 
         <!-- ==================== Viewer ==================== -->
         <controls:DicomViewPanel x:Name="ViewPanel" />

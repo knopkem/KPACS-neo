@@ -1,11 +1,8 @@
-<Application x:Class="KPACS.Viewer.App"
-             xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+<Application xmlns="https://github.com/avaloniaui"
              xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-             StartupUri="MainWindow.xaml">
-    <Application.Resources>
-        <!-- Dark theme base styles -->
-        <SolidColorBrush x:Key="BackgroundBrush" Color="#FF1E1E1E" />
-        <SolidColorBrush x:Key="ToolbarBrush" Color="#FF2D2D30" />
-        <SolidColorBrush x:Key="ForegroundBrush" Color="#FFD4D4D4" />
-    </Application.Resources>
+             x:Class="KPACS.Viewer.App"
+             RequestedThemeVariant="Dark">
+    <Application.Styles>
+        <FluentTheme />
+    </Application.Styles>
 </Application>
