@@ -1,69 +1,282 @@
 <Window xmlns="https://github.com/avaloniaui"
-        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
-        xmlns:controls="clr-namespace:KPACS.Viewer.Controls"
-        x:Class="KPACS.Viewer.MainWindow"
-        Title="K-PACS Viewer"
-        Width="1024" Height="768"
-        MinWidth="400" MinHeight="300"
-        WindowStartupLocation="CenterScreen"
-        DragDrop.AllowDrop="True"
-        Background="#FF1E1E1E">
+                xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+                x:Class="KPACS.Viewer.MainWindow"
+                Title="K-PACS Study Browser"
+                Width="1480" Height="940"
+                MinWidth="1180" MinHeight="780"
+                WindowStartupLocation="CenterScreen"
+                Background="#FFD0D0D0">
+        <Window.Styles>
+                <Style Selector="Button.action">
+                        <Setter Property="Background" Value="#FF22A7DA" />
+                        <Setter Property="Foreground" Value="White" />
+                        <Setter Property="Padding" Value="10,8" />
+                        <Setter Property="MinHeight" Value="38" />
+                </Style>
+                <Style Selector="TextBox">
+                        <Setter Property="Background" Value="#FFF7F7F7" />
+                        <Setter Property="Foreground" Value="#FF202020" />
+                        <Setter Property="BorderBrush" Value="#FF8C8C8C" />
+                        <Setter Property="Height" Value="30" />
+                </Style>
+                <Style Selector="ComboBox">
+                        <Setter Property="Background" Value="#FFF7F7F7" />
+                        <Setter Property="Foreground" Value="#FF202020" />
+                        <Setter Property="BorderBrush" Value="#FF8C8C8C" />
+                        <Setter Property="MinHeight" Value="30" />
+                </Style>
+                <Style Selector="CheckBox.modality-filter">
+                        <Setter Property="Margin" Value="0,0,8,6" />
+                        <Setter Property="MinWidth" Value="44" />
+                </Style>
+                <Style Selector="Border.section">
+                        <Setter Property="Background" Value="#FFE3E3E3" />
+                        <Setter Property="BorderBrush" Value="#FF9E9E9E" />
+                        <Setter Property="BorderThickness" Value="1" />
+                </Style>
+                <Style Selector="DataGrid">
+                        <Setter Property="Background" Value="#FFF9F9F9" />
+                        <Setter Property="Foreground" Value="#FF202020" />
+                        <Setter Property="BorderBrush" Value="#FF9E9E9E" />
+                </Style>
+        </Window.Styles>
 
-    <DockPanel>
+        <DockPanel>
+                <Border DockPanel.Dock="Top" Background="#FFCFCFCF" BorderBrush="#FF9E9E9E" BorderThickness="0,0,0,1" Padding="8">
+                        <Grid ColumnDefinitions="4.8*,2.2*">
+                                <Border Classes="section" Padding="8">
+                                        <Grid ColumnDefinitions="104,170,170,170,178" RowDefinitions="Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                                                <TextBlock Grid.Row="0" Grid.ColumnSpan="5" Text="Search filter" FontWeight="Bold" Foreground="#FF333333" />
 
-        <!-- ==================== Toolbar (StackPanel replaces WPF ToolBar) ==================== -->
-        <Border DockPanel.Dock="Top" Background="#FF2D2D30" Padding="4,3">
-            <StackPanel Orientation="Horizontal" Spacing="2">
-                <Button Content=" Open " Click="OnOpenClick"
-                        ToolTip.Tip="Open DICOM file (Ctrl+O)"
-                        Foreground="White" Padding="6,3" />
+                                                <StackPanel Grid.Row="1" Grid.RowSpan="3" Grid.Column="0" Spacing="8">
+                                                        <Button Classes="action" Width="96" Content="Search" Click="OnSearchClick" />
+                                                        <Button Width="96" Height="30" Content="Today" Click="OnTodayClick" />
+                                                        <Button Width="96" Height="30" Content="Yesterday" Click="OnYesterdayClick" />
+                                                        <Button Width="96" Height="30" Content="Clear entries" Click="OnClearClick" />
+                                                </StackPanel>
 
-                <Border Width="1" Background="#FF555555" Margin="4,2" />
+                                                <StackPanel Grid.Row="1" Grid.Column="1" Spacing="2">
+                                                        <TextBlock Text="Patient ID" Foreground="#FF333333" />
+                                                        <TextBox x:Name="PatientIdBox" Width="170" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="1" Grid.Column="2" Spacing="2">
+                                                        <TextBlock Text="Patient name" Foreground="#FF333333" />
+                                                        <TextBox x:Name="PatientNameBox" Width="170" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="1" Grid.Column="3" Spacing="2">
+                                                        <TextBlock Text="Referring physician" Foreground="#FF333333" />
+                                                        <TextBox x:Name="ReferringPhysicianBox" Width="170" />
+                                                </StackPanel>
+                                                <Border Grid.Row="1" Grid.RowSpan="3" Grid.Column="4" BorderBrush="#FF9E9E9E" BorderThickness="1" Padding="8,6">
+                                                        <StackPanel Spacing="6">
+                                                                <TextBlock Text="Modality filter" Foreground="#FF333333" FontWeight="SemiBold" />
+                                                                <Grid ColumnDefinitions="*,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="2">
+                                                                        <CheckBox Grid.Row="0" Grid.Column="0" x:Name="ModalityUsCheckBox" Classes="modality-filter" Content="US" />
+                                                                        <CheckBox Grid.Row="0" Grid.Column="1" x:Name="ModalityCtCheckBox" Classes="modality-filter" Content="CT" />
+                                                                        <CheckBox Grid.Row="1" Grid.Column="0" x:Name="ModalityMrCheckBox" Classes="modality-filter" Content="MR" />
+                                                                        <CheckBox Grid.Row="1" Grid.Column="1" x:Name="ModalityDrCheckBox" Classes="modality-filter" Content="DR" />
+                                                                        <CheckBox Grid.Row="2" Grid.Column="0" x:Name="ModalityOtCheckBox" Classes="modality-filter" Content="OT" />
+                                                                        <CheckBox Grid.Row="2" Grid.Column="1" x:Name="ModalityScCheckBox" Classes="modality-filter" Content="SC" />
+                                                                        <CheckBox Grid.Row="3" Grid.Column="0" x:Name="ModalitySrCheckBox" Classes="modality-filter" Content="SR" />
+                                                                        <CheckBox Grid.Row="3" Grid.Column="1" x:Name="ModalityRfCheckBox" Classes="modality-filter" Content="RF" />
+                                                                        <CheckBox Grid.Row="4" Grid.Column="0" x:Name="ModalityNmCheckBox" Classes="modality-filter" Content="NM" />
+                                                                        <CheckBox Grid.Row="4" Grid.Column="1" x:Name="ModalityCrCheckBox" Classes="modality-filter" Content="CR" />
+                                                                        <CheckBox Grid.Row="5" Grid.Column="0" x:Name="ModalityXaCheckBox" Classes="modality-filter" Content="XA" />
+                                                                        <CheckBox Grid.Row="5" Grid.Column="1" x:Name="ModalityMgCheckBox" Classes="modality-filter" Content="MG" />
+                                                                </Grid>
+                                                                <StackPanel Orientation="Horizontal" Spacing="8">
+                                                                        <Button Width="72" Height="30" Content="All" Click="OnAllModalitiesClick" />
+                                                                        <Button Width="72" Height="30" Content="Clear" Click="OnClearModalitiesClick" />
+                                                                </StackPanel>
+                                                        </StackPanel>
+                                                </Border>
 
-                <Button Content=" Fit " Click="OnFitClick"
-                        ToolTip.Tip="Fit to window (F)"
-                        Foreground="White" Padding="6,3" />
-                <Button Content=" 1:1 " Click="OnOriginalClick"
-                        ToolTip.Tip="Original size (1)"
-                        Foreground="White" Padding="6,3" />
-                <Button Content="  +  " Click="OnZoomInClick"
-                        ToolTip.Tip="Zoom in (+)"
-                        Foreground="White" Padding="6,3" FontWeight="Bold" />
-                <Button Content="  −  " Click="OnZoomOutClick"
-                        ToolTip.Tip="Zoom out (−)"
-                        Foreground="White" Padding="6,3" FontWeight="Bold" />
+                                                <StackPanel Grid.Row="2" Grid.Column="1" Spacing="2">
+                                                        <TextBlock Text="Accession no." Foreground="#FF333333" />
+                                                        <TextBox x:Name="AccessionBox" Width="170" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="2" Grid.Column="2" Spacing="2">
+                                                        <TextBlock Text="Study description" Foreground="#FF333333" />
+                                                        <TextBox x:Name="StudyDescriptionBox" Width="170" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="2" Grid.Column="3" Spacing="2">
+                                                        <TextBlock Text="Quick search" Foreground="#FF333333" />
+                                                        <TextBox x:Name="QuickSearchBox" Width="170" />
+                                                </StackPanel>
 
-                <Border Width="1" Background="#FF555555" Margin="4,2" />
+                                                <StackPanel Grid.Row="3" Grid.Column="1" Spacing="2">
+                                                        <TextBlock Text="From study date" Foreground="#FF333333" />
+                                                        <TextBox x:Name="FromDateBox" Width="170" Watermark="dd.MM.yyyy" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="3" Grid.Column="2" Spacing="2">
+                                                        <TextBlock Text="To study date" Foreground="#FF333333" />
+                                                        <TextBox x:Name="ToDateBox" Width="170" Watermark="dd.MM.yyyy" />
+                                                </StackPanel>
+                                                <StackPanel Grid.Row="3" Grid.Column="3" Spacing="2">
+                                                        <TextBlock Text="Patient birth date" Foreground="#FF333333" />
+                                                        <TextBox x:Name="PatientBirthDateBox" Width="170" Watermark="dd.MM.yyyy" />
+                                                </StackPanel>
 
-                <Button Content=" Reset W/L " Click="OnResetWLClick"
-                        ToolTip.Tip="Reset window/level (R)"
-                        Foreground="White" Padding="6,3" />
+                                        </Grid>
+                                </Border>
 
-                <Border Width="1" Background="#FF555555" Margin="4,2" />
+                                <Grid Grid.Column="1" RowDefinitions="Auto,*" Margin="8,0,0,0">
+                                        <Border Classes="section" Padding="6" Margin="0,0,0,8">
+                                                <Grid ColumnDefinitions="*,Auto,Auto">
+                                                        <StackPanel>
+                                                                <TextBlock Text="Query" FontWeight="Bold" Foreground="#FF333333" />
+                                                                <TextBlock x:Name="DatabaseStatsText" Foreground="#FF5F5F5F" Margin="0,4,0,0" />
+                                                        </StackPanel>
+                                                        <Button Grid.Column="1" Width="56" Classes="action" Content="Cfg" />
+                                                        <Button Grid.Column="2" Width="56" Classes="action" Content="Info" />
+                                                </Grid>
+                                        </Border>
 
-                <TextBlock Text="LUT:" Foreground="#FFB0B0B0"
-                           VerticalAlignment="Center" Margin="4,0" />
-                <ComboBox x:Name="CmbColorScheme" Width="120" Margin="2,0"
-                          SelectionChanged="OnColorSchemeChanged">
-                    <ComboBoxItem Content="Grayscale" Tag="1" IsSelected="True" />
-                    <ComboBoxItem Content="Inverted" Tag="-1" />
-                    <ComboBoxItem Content="Hot Iron" Tag="2" />
-                    <ComboBoxItem Content="Rainbow" Tag="3" />
-                    <ComboBoxItem Content="Gold" Tag="5" />
-                    <ComboBoxItem Content="Bone" Tag="10" />
-                </ComboBox>
-            </StackPanel>
-        </Border>
+                                        <Border Classes="section" Padding="6">
+                                                <TabControl x:Name="BrowserModeTabs" SelectionChanged="OnBrowserModeChanged">
+                                                        <TabItem Header="Network">
+                                                                <TextBlock Margin="8" Text="Network functions are deferred for now." Foreground="#FF555555" />
+                                                        </TabItem>
+                                                        <TabItem Header="Database">
+                                                                <TextBlock Margin="8" Text="SQLite-backed K-PACS imagebox." Foreground="#FF555555" />
+                                                        </TabItem>
+                                                        <TabItem Header="Filesystem">
+                                                                <TextBlock Margin="8" Text="Import folders or DICOMDIR media into the imagebox." Foreground="#FF555555" />
+                                                        </TabItem>
+                                                        <TabItem Header="Email">
+                                                                <TextBlock Margin="8" Text="Email/export workflow is not implemented yet." Foreground="#FF555555" />
+                                                        </TabItem>
+                                                </TabControl>
+                                        </Border>
+                                </Grid>
+                        </Grid>
+                </Border>
 
-        <!-- ==================== Status Bar ==================== -->
-        <Border DockPanel.Dock="Bottom" Background="#FF2D2D30" Padding="8,4">
-            <TextBlock x:Name="TxtStatus"
-                       Text="Ready — drag a DICOM file or click Open"
-                       Foreground="#FFB0B0B0" FontFamily="Consolas" FontSize="12" />
-        </Border>
+                <Border DockPanel.Dock="Bottom" Background="#FFC7C7C7" BorderBrush="#FF9E9E9E" BorderThickness="0,1,0,0" Padding="8,4">
+                        <TextBlock x:Name="StatusText" FontFamily="Consolas" Foreground="#FF222222" />
+                </Border>
 
-        <!-- ==================== Viewer ==================== -->
-        <controls:DicomViewPanel x:Name="ViewPanel" />
+                <Grid Margin="8" ColumnDefinitions="74,220,*" RowDefinitions="*,190">
+                        <Border Grid.RowSpan="2" Classes="section" Padding="6">
+                                <StackPanel Spacing="8">
+                                        <TextBlock Text="Actions" FontWeight="Bold" Foreground="#FF333333" HorizontalAlignment="Center" Margin="0,0,0,4" />
+                                        <Button Classes="action" Content="View" Click="OnOpenViewerClick" />
+                                        <Button x:Name="ImportActionButton" Classes="action" Content="Import" Click="OnImportSelectedClick" />
+                                        <Button x:Name="BrowseFilesystemButton" Classes="action" Content="Browse" Click="OnBrowseFilesystemRootClick" />
+                                        <Button x:Name="ModifyActionButton" Classes="action" Content="Modify" Click="OnPseudonymizeClick" />
+                                        <Button Classes="action" Content="Refresh" Click="OnRefreshClick" />
+                                </StackPanel>
+                        </Border>
 
-    </DockPanel>
+                        <Border Grid.Column="1" Classes="section" Padding="4" Margin="8,0,8,8">
+                                <Grid>
+                                        <Grid x:Name="PatientPanel" RowDefinitions="Auto,*">
+                                                <TextBlock Text="Patients" FontWeight="Bold" Foreground="#FF333333" Margin="4" />
+                                                <DataGrid x:Name="PatientGrid" Grid.Row="1"
+                                                                  AutoGenerateColumns="False"
+                                                                  CanUserResizeColumns="True"
+                                                                  CanUserSortColumns="True"
+                                                                  GridLinesVisibility="All"
+                                                                  HeadersVisibility="Column"
+                                                                  IsReadOnly="True"
+                                                                  SelectionMode="Single"
+                                                                  SelectionChanged="OnPatientSelectionChanged">
+                                                        <DataGrid.Columns>
+                                                                <DataGridTextColumn Header="Patient name" Binding="{Binding PatientName}" Width="*" />
+                                                                <DataGridTextColumn Header="DOB" Binding="{Binding PatientBirthDate}" Width="92" />
+                                                                <DataGridTextColumn Header="Studies" Binding="{Binding StudyCount}" Width="64" />
+                                                        </DataGrid.Columns>
+                                                </DataGrid>
+                                        </Grid>
+
+                                        <Grid x:Name="FilesystemPanel" IsVisible="False" RowDefinitions="Auto,Auto,*">
+                                                <TextBlock Text="Filesystem" FontWeight="Bold" Foreground="#FF333333" Margin="4,4,4,2" />
+                                                <TextBlock x:Name="FilesystemRootText" Grid.Row="1" Margin="4,0,4,6" Foreground="#FF555555" TextWrapping="Wrap" />
+                                                <Grid Grid.Row="2">
+                                                        <TextBlock x:Name="FilesystemHintText" Margin="8" Foreground="#FF666666" Text="Expand Computer, choose a drive or folder, then right-click it and select Scan folder." TextWrapping="Wrap" />
+                                                        <TreeView x:Name="FilesystemTreeView"
+                                                                  IsVisible="False"
+                                                                  PointerPressed="OnFilesystemTreePointerPressed"
+                                                                  KeyDown="OnFilesystemTreeKeyDown"
+                                                                  SelectionChanged="OnFilesystemTreeSelectionChanged">
+                                                                <TreeView.ItemTemplate>
+                                                                        <TreeDataTemplate ItemsSource="{Binding Children}">
+                                                                                <TextBlock Text="{Binding DisplayName}" />
+                                                                        </TreeDataTemplate>
+                                                                </TreeView.ItemTemplate>
+                                                                <TreeView.ContextMenu>
+                                                                        <ContextMenu Opened="OnFilesystemContextMenuOpened">
+                                                                                <MenuItem x:Name="ScanFolderMenuItem" Header="Scan folder" Click="OnScanFolderClick" />
+                                                                        </ContextMenu>
+                                                                </TreeView.ContextMenu>
+                                                        </TreeView>
+                                                </Grid>
+                                        </Grid>
+
+                                        <Border x:Name="ModePlaceholderPanel" IsVisible="False" Background="#FFEAEAEA" Padding="8">
+                                                <TextBlock x:Name="ModePlaceholderText" Foreground="#FF666666" TextWrapping="Wrap" VerticalAlignment="Center" />
+                                        </Border>
+                                </Grid>
+                        </Border>
+
+                        <Border Grid.Column="2" Classes="section" Padding="4" Margin="0,0,0,8">
+                                <Grid RowDefinitions="Auto,*">
+                                        <StackPanel Margin="4,4,4,6">
+                                                <TextBlock Text="Studies" FontWeight="Bold" Foreground="#FF333333" />
+                                                <TextBlock x:Name="StudySummaryText" Foreground="#FF555555" FontSize="12" />
+                                        </StackPanel>
+                                        <DataGrid x:Name="StudyGrid" Grid.Row="1"
+                                                          AutoGenerateColumns="False"
+                                                          CanUserResizeColumns="True"
+                                                          CanUserSortColumns="True"
+                                                          GridLinesVisibility="All"
+                                                          HeadersVisibility="Column"
+                                                          IsReadOnly="True"
+                                                          SelectionMode="Single"
+                                                          PointerPressed="OnStudyGridPointerPressed"
+                                                          SelectionChanged="OnStudySelectionChanged"
+                                                          DoubleTapped="OnStudyDoubleTapped">
+                                                <DataGrid.ContextMenu>
+                                                        <ContextMenu Opened="OnStudyContextMenuOpened">
+                                                                <MenuItem x:Name="DeleteStudyMenuItem" Header="Delete Study" Click="OnDeleteStudyClick" />
+                                                        </ContextMenu>
+                                                </DataGrid.ContextMenu>
+                                                <DataGrid.Columns>
+                                                        <DataGridTextColumn Header="Modality" Binding="{Binding Modalities}" Width="88" />
+                                                        <DataGridTextColumn Header="Status" Binding="{Binding SeriesCount}" Width="68" />
+                                                        <DataGridTextColumn Header="Patient name" Binding="{Binding PatientName}" Width="170" />
+                                                        <DataGridTextColumn Header="Patient ID" Binding="{Binding PatientId}" Width="120" />
+                                                        <DataGridTextColumn Header="Date of birth" Binding="{Binding DisplayPatientBirthDate}" Width="110" />
+                                                        <DataGridTextColumn Header="Study date" Binding="{Binding DisplayStudyDate}" Width="100" />
+                                                        <DataGridTextColumn Header="Referring phys." Binding="{Binding ReferringPhysician}" Width="150" />
+                                                        <DataGridTextColumn Header="Description" Binding="{Binding StudyDescription}" Width="*" />
+                                                        <DataGridTextColumn Header="Accession no." Binding="{Binding AccessionNumber}" Width="120" />
+                                                </DataGrid.Columns>
+                                        </DataGrid>
+                                </Grid>
+                        </Border>
+
+                        <Border Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Classes="section" Padding="4" Margin="8,0,0,0">
+                                <Grid RowDefinitions="Auto,*">
+                                        <TextBlock Text="Series overview" FontWeight="Bold" Foreground="#FF333333" Margin="4,4,4,6" />
+                                        <DataGrid x:Name="SeriesGrid" Grid.Row="1"
+                                                          AutoGenerateColumns="False"
+                                                          CanUserResizeColumns="True"
+                                                          CanUserSortColumns="True"
+                                                          GridLinesVisibility="All"
+                                                          HeadersVisibility="Column"
+                                                          IsReadOnly="True"
+                                                          SelectionMode="Single">
+                                                <DataGrid.Columns>
+                                                        <DataGridTextColumn Header="Series" Binding="{Binding SeriesNumber}" Width="80" />
+                                                        <DataGridTextColumn Header="Modality" Binding="{Binding Modality}" Width="90" />
+                                                        <DataGridTextColumn Header="Description" Binding="{Binding SeriesDescription}" Width="*" />
+                                                        <DataGridTextColumn Header="Images" Binding="{Binding InstanceCount}" Width="90" />
+                                                        <DataGridTextColumn Header="First file" Binding="{Binding FirstFileName}" Width="230" />
+                                                </DataGrid.Columns>
+                                        </DataGrid>
+                                </Grid>
+                        </Border>
+                </Grid>
+        </DockPanel>
 </Window>

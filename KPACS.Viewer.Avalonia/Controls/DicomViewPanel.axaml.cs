@@ -19,6 +19,7 @@ using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using FellowOakDicom;
 using FellowOakDicom.Imaging;
 using FellowOakDicom.Imaging.Codec;
@@ -32,6 +33,15 @@ namespace KPACS.Viewer.Controls;
 /// </summary>
 public partial class DicomViewPanel : UserControl
 {
+    public sealed record DisplayState(
+        double WindowCenter,
+        double WindowWidth,
+        double ZoomFactor,
+        bool FitToWindow,
+        double PanX,
+        double PanY,
+        int ColorScheme);
+
     // ==============================================================================================
     // Image data (ported from TdView fields + DICOMdata record)
     // ==============================================================================================
@@ -97,12 +107,17 @@ public partial class DicomViewPanel : UserControl
     private bool _isLeftDragging;   // pan or edge-zoom
     private double _startWindowCenter, _startWindowWidth;
     private double _startPanX, _startPanY;
+    private bool _isStackDragging;
+    private int _lastStackMouseY;
 
     // Integrated zoom/pan (ported from TdView: IsCursorInZoomRegion, FZoomRegion)
     // Edge zone = outer 1/6th of each dimension → drag to zoom
     // Center zone = inner area → drag to pan
     private bool _isEdgeZoom;        // locked at mouse-down: true = zoom mode, false = pan mode
     private int _lastMouseY;         // for incremental edge-zoom tracking
+
+    // Pointer capture tracking
+    private IPointer? _capturedPointer;
 
     /// <summary>Last error message from LoadFile, if any.</summary>
     public string? LastError { get; private set; }
@@ -114,13 +129,13 @@ public partial class DicomViewPanel : UserControl
     public double WindowCenter
     {
         get => _windowCenter;
-        set { _windowCenter = value; RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); }
+        set { _windowCenter = value; RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); NotifyViewStateChanged(); }
     }
 
     public double WindowWidth
     {
         get => _windowWidth;
-        set { _windowWidth = Math.Max(1, value); RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); }
+        set { _windowWidth = Math.Max(1, value); RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); NotifyViewStateChanged(); }
     }
 
     public double ZoomFactor => _zoomFactor;
@@ -131,6 +146,17 @@ public partial class DicomViewPanel : UserControl
     public bool IsImageLoaded => _rawPixelData != null;
     public int CurrentColorScheme => _colorScheme;
 
+    private bool _showOverlay = true;
+    public bool ShowOverlay
+    {
+        get => _showOverlay;
+        set
+        {
+            _showOverlay = value;
+            ApplyOverlayVisibility();
+        }
+    }
+
     // ==============================================================================================
     // Events
     // ==============================================================================================
@@ -138,6 +164,12 @@ public partial class DicomViewPanel : UserControl
     public event Action? WindowChanged;
     public event Action? ZoomChanged;
     public event Action? ImageLoaded;
+    public event Action<int>? StackScrollRequested;
+    public event Action? ViewStateChanged;
+
+    public MouseWheelMode WheelMode { get; set; } = MouseWheelMode.Zoom;
+    public int StackItemCount { get; set; } = 1;
+    public bool StackSkipImages { get; set; } = true;
 
     // ==============================================================================================
     // Constructor
@@ -176,7 +208,7 @@ public partial class DicomViewPanel : UserControl
 
         try
         {
-            var file = DicomFile.Open(filePath);
+            var file = DicomFile.Open(filePath, FellowOakDicom.FileReadOption.ReadAll);
             var dataset = file.Dataset;
             _fileName = filePath;
 
@@ -263,6 +295,9 @@ public partial class DicomViewPanel : UserControl
                 Avalonia.Platform.PixelFormat.Bgra8888,
                 Avalonia.Platform.AlphaFormat.Opaque);
             DicomImage.Source = _displayBitmap;
+            DicomImage.Width = _imageWidth;
+            DicomImage.Height = _imageHeight;
+            DicomImage.InvalidateMeasure();
 
             // Hide placeholder
             PlaceholderText.IsVisible = false;
@@ -272,8 +307,7 @@ public partial class DicomViewPanel : UserControl
 
             // Fit to window and center
             _fitToWindow = true;
-            ApplyFitToWindow();
-            CenterImage();
+            ApplyInitialFitToWindow();
 
             UpdateOverlay();
             ImageLoaded?.Invoke();
@@ -354,6 +388,7 @@ public partial class DicomViewPanel : UserControl
         SetColorLutInternal(scheme);
         RenderImage();
         UpdateOverlay();
+        NotifyViewStateChanged();
     }
 
     // ==============================================================================================
@@ -379,6 +414,26 @@ public partial class DicomViewPanel : UserControl
         ApplyZoomTransform();
         CenterImage();
         ZoomChanged?.Invoke();
+        NotifyViewStateChanged();
+    }
+
+    private void ApplyInitialFitToWindow()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            if (!_fitToWindow || _rawPixelData == null)
+            {
+                return;
+            }
+
+            if (RootGrid.Bounds.Width <= 0 || RootGrid.Bounds.Height <= 0)
+            {
+                return;
+            }
+
+            ApplyFitToWindow();
+            UpdateOverlay();
+        }, DispatcherPriority.Loaded);
     }
 
     /// <summary>
@@ -391,6 +446,7 @@ public partial class DicomViewPanel : UserControl
         ApplyZoomTransform();
         CenterImage();
         ZoomChanged?.Invoke();
+        NotifyViewStateChanged();
     }
 
     /// <summary>
@@ -402,6 +458,7 @@ public partial class DicomViewPanel : UserControl
         _zoomFactor = Math.Min(20.0, _zoomFactor * 1.1);
         ApplyZoomTransform();
         ZoomChanged?.Invoke();
+        NotifyViewStateChanged();
     }
 
     /// <summary>
@@ -413,6 +470,7 @@ public partial class DicomViewPanel : UserControl
         _zoomFactor = Math.Max(0.01, _zoomFactor / 1.1);
         ApplyZoomTransform();
         ZoomChanged?.Invoke();
+        NotifyViewStateChanged();
     }
 
     /// <summary>
@@ -424,6 +482,52 @@ public partial class DicomViewPanel : UserControl
         _zoomFactor = Math.Clamp(factor, 0.01, 20.0);
         ApplyZoomTransform();
         ZoomChanged?.Invoke();
+        NotifyViewStateChanged();
+    }
+
+    public DisplayState CaptureDisplayState()
+    {
+        return new DisplayState(
+            _windowCenter,
+            _windowWidth,
+            _zoomFactor,
+            _fitToWindow,
+            _panX,
+            _panY,
+            _colorScheme);
+    }
+
+    public void ApplyDisplayState(DisplayState state)
+    {
+        _windowCenter = state.WindowCenter;
+        _windowWidth = Math.Max(1, state.WindowWidth);
+
+        if (_colorScheme != state.ColorScheme)
+        {
+            SetColorLutInternal(state.ColorScheme);
+        }
+
+        if (state.FitToWindow)
+        {
+            _fitToWindow = true;
+            ApplyFitToWindow();
+        }
+        else
+        {
+            _fitToWindow = false;
+            _zoomFactor = Math.Clamp(state.ZoomFactor, 0.01, 20.0);
+            ApplyZoomTransform();
+            _panX = state.PanX;
+            _panY = state.PanY;
+            _panTransform.X = _panX;
+            _panTransform.Y = _panY;
+            ZoomChanged?.Invoke();
+            NotifyViewStateChanged();
+        }
+
+        RenderImage();
+        UpdateOverlay();
+        WindowChanged?.Invoke();
     }
 
     private void ApplyZoomTransform()
@@ -460,7 +564,10 @@ public partial class DicomViewPanel : UserControl
         RenderImage();
         UpdateOverlay();
         WindowChanged?.Invoke();
+        NotifyViewStateChanged();
     }
+
+    private void NotifyViewStateChanged() => ViewStateChanged?.Invoke();
 
     // ==============================================================================================
     // Overlay (ported from TdView.OverlayData — simplified 4-corner text)
@@ -474,6 +581,7 @@ public partial class DicomViewPanel : UserControl
             OverlayTopRight.Text = "";
             OverlayBottomLeft.Text = "";
             OverlayBottomRight.Text = "";
+            ApplyOverlayVisibility();
             return;
         }
 
@@ -492,6 +600,16 @@ public partial class DicomViewPanel : UserControl
         string info = string.IsNullOrEmpty(_modality) ? dims : $"{dims}  {_modality}";
         if (_frameCount > 1) info += $"  [{_frameCount} frames]";
         OverlayBottomRight.Text = $"{zoomPct}\n{info}";
+        ApplyOverlayVisibility();
+    }
+
+    private void ApplyOverlayVisibility()
+    {
+        bool visible = _showOverlay;
+        OverlayTopLeft.IsVisible = visible;
+        OverlayTopRight.IsVisible = visible;
+        OverlayBottomLeft.IsVisible = visible;
+        OverlayBottomRight.IsVisible = visible;
     }
 
     private static string FormatStudyDate(string dcmDate)
@@ -542,6 +660,7 @@ public partial class DicomViewPanel : UserControl
             _startWindowCenter = _windowCenter;
             _startWindowWidth = _windowWidth;
             e.Pointer.Capture(RootGrid);
+            _capturedPointer = e.Pointer;
             Cursor = new Cursor(StandardCursorType.Cross);
             e.Handled = true;
         }
@@ -549,6 +668,17 @@ public partial class DicomViewPanel : UserControl
         {
             _isLeftDragging = true;
             _mouseDownPos = pos;
+
+            if (WheelMode == MouseWheelMode.StackScroll)
+            {
+                _isStackDragging = true;
+                _lastStackMouseY = (int)_mouseDownPos.Y;
+                Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
+                e.Pointer.Capture(RootGrid);
+                _capturedPointer = e.Pointer;
+                e.Handled = true;
+                return;
+            }
 
             // Lock the zone at click time (ported from FZoomRegion := IsCursorInZoomRegion)
             _isEdgeZoom = IsCursorInZoomRegion(_mouseDownPos);
@@ -566,6 +696,7 @@ public partial class DicomViewPanel : UserControl
             }
 
             e.Pointer.Capture(RootGrid);
+            _capturedPointer = e.Pointer;
             e.Handled = true;
         }
     }
@@ -575,7 +706,8 @@ public partial class DicomViewPanel : UserControl
         if (e.InitialPressMouseButton == MouseButton.Right && _isRightDragging)
         {
             _isRightDragging = false;
-            e.Pointer.Capture(null);
+            _capturedPointer?.Capture(null);
+            _capturedPointer = null;
             UpdateZoneCursor(e.GetPosition(RootGrid));
             e.Handled = true;
         }
@@ -583,7 +715,9 @@ public partial class DicomViewPanel : UserControl
         {
             _isLeftDragging = false;
             _isEdgeZoom = false;
-            e.Pointer.Capture(null);
+            _isStackDragging = false;
+            _capturedPointer?.Capture(null);
+            _capturedPointer = null;
             UpdateZoneCursor(e.GetPosition(RootGrid));
             e.Handled = true;
         }
@@ -611,6 +745,26 @@ public partial class DicomViewPanel : UserControl
             RenderImage();
             UpdateOverlay();
             WindowChanged?.Invoke();
+            NotifyViewStateChanged();
+        }
+        else if (_isLeftDragging && _isStackDragging)
+        {
+            int currentY = (int)pos.Y;
+            int deltaY = currentY - _lastStackMouseY;
+
+            if (Math.Abs(deltaY) > 1)
+            {
+                int stepDivisor = GetStackDragStepDivisor();
+                int stackDelta = Math.Max(1, Math.Abs(deltaY) / stepDivisor);
+                if (deltaY < 0)
+                {
+                    stackDelta = -stackDelta;
+                }
+
+                StackScrollRequested?.Invoke(stackDelta);
+                _lastStackMouseY = currentY;
+                e.Handled = true;
+            }
         }
         else if (_isLeftDragging && _isEdgeZoom)
         {
@@ -645,6 +799,7 @@ public partial class DicomViewPanel : UserControl
                 ApplyZoomTransform();
                 UpdateOverlay();
                 ZoomChanged?.Invoke();
+                NotifyViewStateChanged();
 
                 _lastMouseY = currentY;
             }
@@ -660,6 +815,7 @@ public partial class DicomViewPanel : UserControl
             _panTransform.X = _panX;
             _panTransform.Y = _panY;
             _fitToWindow = false;
+            NotifyViewStateChanged();
         }
         else if (!_isRightDragging && !_isLeftDragging && _rawPixelData != null)
         {
@@ -672,6 +828,12 @@ public partial class DicomViewPanel : UserControl
     /// </summary>
     private void UpdateZoneCursor(Point pos)
     {
+        if (WheelMode == MouseWheelMode.StackScroll)
+        {
+            Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
+            return;
+        }
+
         if (IsCursorInZoomRegion(pos))
             Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
         else
@@ -684,6 +846,13 @@ public partial class DicomViewPanel : UserControl
 
     private void OnPointerWheelChanged(object? sender, PointerWheelEventArgs e)
     {
+        if (WheelMode == MouseWheelMode.StackScroll)
+        {
+            StackScrollRequested?.Invoke(e.Delta.Y > 0 ? -1 : 1);
+            e.Handled = true;
+            return;
+        }
+
         Point mousePos = e.GetPosition(RootGrid);
 
         double oldZoom = _zoomFactor;
@@ -703,7 +872,19 @@ public partial class DicomViewPanel : UserControl
 
         UpdateOverlay();
         ZoomChanged?.Invoke();
+        NotifyViewStateChanged();
         e.Handled = true;
+    }
+
+    private int GetStackDragStepDivisor()
+    {
+        if (!StackSkipImages || StackItemCount <= 1)
+        {
+            return 1;
+        }
+
+        int maxIndex = Math.Max(1, StackItemCount - 1);
+        return Math.Max(2, (int)Math.Ceiling(200.0 / maxIndex));
     }
 
     // ==============================================================================================

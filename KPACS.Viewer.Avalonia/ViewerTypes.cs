@@ -30,3 +30,12 @@ public enum ViewerTool
     /// <summary>Mouse wheel zooms in/out.</summary>
     Zoom,
 }
+
+/// <summary>
+/// Mouse wheel behavior for a viewport.
+/// </summary>
+public enum MouseWheelMode
+{
+    Zoom,
+    StackScroll,
+}

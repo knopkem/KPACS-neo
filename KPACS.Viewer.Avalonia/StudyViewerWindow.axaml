@@ -1,0 +1,80 @@
+<Window xmlns="https://github.com/avaloniaui"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        x:Class="KPACS.Viewer.StudyViewerWindow"
+        Title="K-PACS Viewer"
+        Width="1400" Height="900"
+        MinWidth="960" MinHeight="700"
+        WindowStartupLocation="CenterOwner"
+        Background="#FF181818">
+    <Window.Styles>
+        <Style Selector="Button.viewerAction">
+            <Setter Property="Background" Value="#FF1FA2D6" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="MinWidth" Value="86" />
+        </Style>
+        <Style Selector="ToggleButton.viewerAction">
+            <Setter Property="Background" Value="#FF1FA2D6" />
+            <Setter Property="Foreground" Value="White" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="MinWidth" Value="110" />
+        </Style>
+    </Window.Styles>
+
+    <DockPanel>
+        <Border DockPanel.Dock="Top" Background="#FF2A2A2A" Padding="10,8">
+            <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
+                <TextBlock x:Name="StudyTitleText"
+                           FontSize="18" FontWeight="SemiBold" Foreground="White" />
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                    <TextBlock Text="Layout" Foreground="#FFBDBDBD" VerticalAlignment="Center" />
+                    <ComboBox x:Name="LayoutBox" Width="110" SelectionChanged="OnLayoutChanged">
+                        <ComboBoxItem Content="1 × 1" Tag="1x1" IsSelected="True" />
+                        <ComboBoxItem Content="2 × 2" Tag="2x2" />
+                        <ComboBoxItem Content="3 × 3" Tag="3x3" />
+                        <ComboBoxItem Content="4 × 4" Tag="4x4" />
+                        <ComboBoxItem Content="5 × 3" Tag="5x3" />
+                    </ComboBox>
+                    <TextBlock Text="LUT" Foreground="#FFBDBDBD" VerticalAlignment="Center" />
+                    <ComboBox x:Name="LutBox" Width="120" SelectionChanged="OnLutChanged">
+                        <ComboBoxItem Content="Grayscale" Tag="1" IsSelected="True" />
+                        <ComboBoxItem Content="Inverted" Tag="-1" />
+                        <ComboBoxItem Content="Hot Iron" Tag="2" />
+                        <ComboBoxItem Content="Rainbow" Tag="3" />
+                        <ComboBoxItem Content="Gold" Tag="5" />
+                        <ComboBoxItem Content="Bone" Tag="10" />
+                    </ComboBox>
+                </StackPanel>
+                <TextBlock x:Name="StudySubtitleText" Grid.Row="1" Margin="0,6,0,0"
+                           Foreground="#FFAAAAAA" FontSize="12" />
+            </Grid>
+        </Border>
+
+        <Border DockPanel.Dock="Top" Background="#FF0F0F0F" BorderBrush="#FF4A4A4A" BorderThickness="0,0,0,1" Padding="8,6">
+            <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
+                <StackPanel x:Name="ThumbnailStripPanel" Orientation="Horizontal" Spacing="8" />
+            </ScrollViewer>
+        </Border>
+
+        <Border DockPanel.Dock="Bottom" Background="#FF262626" Padding="10,8">
+            <Grid ColumnDefinitions="*,Auto,*">
+                <StackPanel Orientation="Horizontal" Spacing="8">
+                    <Button Classes="viewerAction" Content="Fit" Click="OnFitClick" />
+                    <Button Classes="viewerAction" Content="1:1" Click="OnOriginalClick" />
+                    <Button Classes="viewerAction" Content="Reset W/L" Click="OnResetWindowClick" />
+                </StackPanel>
+                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
+                    <ToggleButton x:Name="ScrollToggle" Classes="viewerAction" Content="Stack tool" IsChecked="True" Checked="OnWheelModeChanged" Unchecked="OnWheelModeChanged" />
+                    <Button Classes="viewerAction" Content="Prev image" Click="OnPrevImageClick" />
+                    <Button Classes="viewerAction" Content="Next image" Click="OnNextImageClick" />
+                </StackPanel>
+                <TextBlock Grid.Column="2" x:Name="ViewerStatusText" HorizontalAlignment="Right"
+                           VerticalAlignment="Center" Foreground="#FFAAAAAA" />
+            </Grid>
+        </Border>
+
+        <Border Background="#FF101010" Padding="8">
+            <Grid x:Name="ViewportGrid" ClipToBounds="True" />
+        </Border>
+    </DockPanel>
+</Window>

@@ -1,0 +1,16 @@
+{
+	"version": "2.0.0",
+	"tasks": [
+		{
+			"label": "Build Avalonia Viewer",
+			"type": "shell",
+			"command": "dotnet",
+			"args": [
+				"build",
+				"KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj"
+			],
+			"isBackground": false,
+			"group": "build"
+		}
+	]
+}

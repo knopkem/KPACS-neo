@@ -2,22 +2,45 @@ using Avalonia;
 using Avalonia.Controls.ApplicationLifetimes;
 using Avalonia.Markup.Xaml;
 using FellowOakDicom;
+using KPACS.Viewer.Models;
+using KPACS.Viewer.Services;
+using System.Globalization;
 
 namespace KPACS.Viewer;
 
 public partial class App : Application
 {
+    public ImageboxPaths Paths { get; private set; } = null!;
+    public ImageboxRepository Repository { get; private set; } = null!;
+    public DicomImportService ImportService { get; private set; } = null!;
+    public DicomFilesystemScanService FilesystemScanService { get; private set; } = null!;
+    public DicomPseudonymizationService PseudonymizationService { get; private set; } = null!;
+    public DicomStudyDeletionService StudyDeletionService { get; private set; } = null!;
+
     public override void Initialize()
     {
+        var culture = CultureInfo.GetCultureInfo("en-US");
+        CultureInfo.DefaultThreadCurrentCulture = culture;
+        CultureInfo.DefaultThreadCurrentUICulture = culture;
+
         AvaloniaXamlLoader.Load(this);
         new DicomSetupBuilder().Build();
+
+        var bootstrap = new ImageboxBootstrap();
+        Paths = bootstrap.EnsurePaths();
+        Repository = new ImageboxRepository(Paths.DatabasePath);
+        Repository.InitializeAsync().GetAwaiter().GetResult();
+        ImportService = new DicomImportService(Paths, Repository);
+        FilesystemScanService = new DicomFilesystemScanService();
+        PseudonymizationService = new DicomPseudonymizationService(Repository);
+        StudyDeletionService = new DicomStudyDeletionService(Paths, Repository);
     }
 
     public override void OnFrameworkInitializationCompleted()
     {
         if (ApplicationLifetime is IClassicDesktopStyleApplicationLifetime desktop)
         {
-            desktop.MainWindow = new MainWindow();
+            desktop.MainWindow = new MainWindow(this);
         }
         base.OnFrameworkInitializationCompleted();
     }
