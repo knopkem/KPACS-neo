@@ -35,6 +35,9 @@ namespace KPACS.Viewer.Controls;
 /// </summary>
 public partial class DicomViewPanel : UserControl
 {
+    private static Cursor? s_windowCursor;
+    private static readonly object s_windowCursorLock = new();
+
     public sealed record DisplayState(
         double WindowCenter,
         double WindowWidth,
@@ -118,6 +121,7 @@ public partial class DicomViewPanel : UserControl
     private bool _isEdgeZoom;        // locked at mouse-down: true = zoom mode, false = pan mode
     private int _lastMouseY;         // for incremental edge-zoom tracking
     private Point? _cursor3DImagePoint;
+    private ActionToolbarMode _actionMode = ActionToolbarMode.ZoomPan;
 
     // Pointer capture tracking
     private IPointer? _capturedPointer;
@@ -174,6 +178,15 @@ public partial class DicomViewPanel : UserControl
     public event Action<DicomHoverInfo?>? HoveredImagePointChanged;
 
     public MouseWheelMode WheelMode { get; set; } = MouseWheelMode.Zoom;
+    public ActionToolbarMode ActionMode
+    {
+        get => _actionMode;
+        set
+        {
+            _actionMode = value;
+            UpdateInteractiveCursor();
+        }
+    }
     public int StackItemCount { get; set; } = 1;
     public bool StackSkipImages { get; set; } = true;
 
@@ -200,6 +213,35 @@ public partial class DicomViewPanel : UserControl
         RootGrid.PointerExited += OnPointerExited;
 
         SizeChanged += OnSizeChanged;
+        UpdateInteractiveCursor();
+    }
+
+    private void UpdateInteractiveCursor(Point? pos = null)
+    {
+        if (_measurementTool != MeasurementTool.None)
+        {
+            Cursor = _measurementTool == MeasurementTool.Modify
+                ? new Cursor(StandardCursorType.DragMove)
+                : new Cursor(StandardCursorType.Cross);
+            return;
+        }
+
+        if (IsScrollActionMode())
+        {
+            Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
+            return;
+        }
+
+        if (IsWindowActionMode())
+        {
+            Cursor = CreateWindowCursor();
+            return;
+        }
+
+        Point pointerPosition = pos ?? _mouseDownPos;
+        Cursor = IsCursorInZoomRegion(pointerPosition)
+            ? new Cursor(StandardCursorType.SizeNorthSouth)
+            : new Cursor(StandardCursorType.Hand);
     }
 
     // ==============================================================================================
@@ -332,6 +374,25 @@ public partial class DicomViewPanel : UserControl
             SpatialMetadata = null;
             return false;
         }
+    }
+
+    public void ClearImage()
+    {
+        _rawPixelData = null;
+        _displayBitmap = null;
+        _imageWidth = 0;
+        _imageHeight = 0;
+        _frameCount = 1;
+        _fileName = string.Empty;
+        SpatialMetadata = null;
+        DicomImage.Source = null;
+        PlaceholderText.IsVisible = true;
+        Set3DCursorOverlay(null);
+        PixelLensPanel.IsVisible = false;
+        MeasurementOverlay.Children.Clear();
+        ResetMeasurementStateForNewImage();
+        UpdateOverlay();
+        UpdateSecondaryCaptureButton();
     }
 
     // ==============================================================================================
@@ -592,6 +653,16 @@ public partial class DicomViewPanel : UserControl
         NotifyViewStateChanged();
     }
 
+    public void SetWindowLevel(double center, double width)
+    {
+        _windowCenter = center;
+        _windowWidth = Math.Max(1, width);
+        RenderImage();
+        UpdateOverlay();
+        WindowChanged?.Invoke();
+        NotifyViewStateChanged();
+    }
+
     public void Set3DCursorOverlay(Point? imagePoint)
     {
         _cursor3DImagePoint = imagePoint;
@@ -755,6 +826,51 @@ public partial class DicomViewPanel : UserControl
             || pos.Y > RootGrid.Bounds.Height - frameH;
     }
 
+    private bool IsScrollActionMode() => ActionMode == ActionToolbarMode.ScrollStack;
+
+    private bool IsWindowActionMode() => ActionMode == ActionToolbarMode.Window;
+
+    private void BeginWindowLevelDrag(Point pos, IPointer pointer)
+    {
+        _isRightDragging = true;
+        _mouseDownPos = pos;
+        _startWindowCenter = _windowCenter;
+        _startWindowWidth = _windowWidth;
+        pointer.Capture(RootGrid);
+        _capturedPointer = pointer;
+        Cursor = CreateWindowCursor();
+    }
+
+    private static Cursor CreateWindowCursor()
+    {
+        if (s_windowCursor is not null)
+        {
+            return s_windowCursor;
+        }
+
+        lock (s_windowCursorLock)
+        {
+            if (s_windowCursor is not null)
+            {
+                return s_windowCursor;
+            }
+
+            try
+            {
+                Uri uri = new("avares://KPACS.Viewer/Assets/Cursors/window-cursor.png");
+                using Stream stream = AssetLoader.Open(uri);
+                var bitmap = new Bitmap(stream);
+                s_windowCursor = new Cursor(bitmap, new PixelPoint(16, 16));
+            }
+            catch
+            {
+                s_windowCursor = new Cursor(StandardCursorType.Cross);
+            }
+
+            return s_windowCursor;
+        }
+    }
+
     private void OnPointerPressed(object? sender, PointerPressedEventArgs e)
     {
         var point = e.GetCurrentPoint(RootGrid);
@@ -775,16 +891,9 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
-        if (point.Properties.IsRightButtonPressed)
+        if (point.Properties.IsRightButtonPressed || (point.Properties.IsLeftButtonPressed && IsWindowActionMode()))
         {
-            // Window/Level
-            _isRightDragging = true;
-            _mouseDownPos = pos;
-            _startWindowCenter = _windowCenter;
-            _startWindowWidth = _windowWidth;
-            e.Pointer.Capture(RootGrid);
-            _capturedPointer = e.Pointer;
-            Cursor = new Cursor(StandardCursorType.Cross);
+            BeginWindowLevelDrag(pos, e.Pointer);
             e.Handled = true;
         }
         else if (point.Properties.IsLeftButtonPressed)
@@ -792,7 +901,7 @@ public partial class DicomViewPanel : UserControl
             _isLeftDragging = true;
             _mouseDownPos = pos;
 
-            if (WheelMode == MouseWheelMode.StackScroll)
+            if (IsScrollActionMode())
             {
                 _isStackDragging = true;
                 _lastStackMouseY = (int)_mouseDownPos.Y;
@@ -831,7 +940,7 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
-        if (e.InitialPressMouseButton == MouseButton.Right && _isRightDragging)
+        if ((e.InitialPressMouseButton == MouseButton.Right || IsWindowActionMode()) && _isRightDragging)
         {
             _isRightDragging = false;
             _capturedPointer?.Capture(null);
@@ -981,16 +1090,7 @@ public partial class DicomViewPanel : UserControl
     /// </summary>
     private void UpdateZoneCursor(Point pos)
     {
-        if (WheelMode == MouseWheelMode.StackScroll)
-        {
-            Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
-            return;
-        }
-
-        if (IsCursorInZoomRegion(pos))
-            Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
-        else
-            Cursor = new Cursor(StandardCursorType.Hand);
+        UpdateInteractiveCursor(pos);
     }
 
     // ==============================================================================================

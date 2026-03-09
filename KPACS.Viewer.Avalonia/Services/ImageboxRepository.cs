@@ -59,6 +59,7 @@ public sealed class ImageboxRepository
                 instance_key INTEGER PRIMARY KEY AUTOINCREMENT,
                 series_key INTEGER NOT NULL,
                 sop_instance_uid TEXT NOT NULL UNIQUE,
+                sop_class_uid TEXT NOT NULL DEFAULT '',
                 file_path TEXT NOT NULL,
                 instance_number INTEGER NOT NULL,
                 frame_count INTEGER NOT NULL DEFAULT 1,
@@ -77,6 +78,7 @@ public sealed class ImageboxRepository
         await command.ExecuteNonQueryAsync(cancellationToken);
 
         await EnsureColumnExistsAsync(connection, "studies", "patient_birth_date", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+        await EnsureColumnExistsAsync(connection, "instances", "sop_class_uid", "TEXT NOT NULL DEFAULT ''", cancellationToken);
     }
 
     public async Task<List<StudyListItem>> SearchStudiesAsync(StudyQuery query, CancellationToken cancellationToken = default)
@@ -169,7 +171,7 @@ public sealed class ImageboxRepository
             command.CommandText = """
                 SELECT sr.series_key, sr.study_key, sr.series_instance_uid, sr.modality,
                        sr.series_description, sr.series_number, sr.instance_count,
-                       i.instance_key, i.series_key, i.sop_instance_uid, i.file_path, i.instance_number, i.frame_count
+                      i.instance_key, i.series_key, i.sop_instance_uid, i.sop_class_uid, i.file_path, i.instance_number, i.frame_count
                 FROM series sr
                 LEFT JOIN instances i ON i.series_key = sr.series_key
                 WHERE sr.study_key = $studyKey
@@ -207,9 +209,10 @@ public sealed class ImageboxRepository
                     InstanceKey = reader.GetInt64(7),
                     SeriesKey = reader.GetInt64(8),
                     SopInstanceUid = reader.GetString(9),
-                    FilePath = reader.GetString(10),
-                    InstanceNumber = reader.GetInt32(11),
-                    FrameCount = reader.GetInt32(12),
+                    SopClassUid = reader.GetString(10),
+                    FilePath = reader.GetString(11),
+                    InstanceNumber = reader.GetInt32(12),
+                    FrameCount = reader.GetInt32(13),
                 });
             }
         }
@@ -295,19 +298,49 @@ public sealed class ImageboxRepository
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO instances(series_key, sop_instance_uid, file_path, instance_number, frame_count)
-            VALUES ($seriesKey, $uid, $filePath, $instanceNumber, $frameCount)
+            INSERT INTO instances(series_key, sop_instance_uid, sop_class_uid, file_path, instance_number, frame_count)
+            VALUES ($seriesKey, $uid, $sopClassUid, $filePath, $instanceNumber, $frameCount)
             ON CONFLICT(sop_instance_uid) DO UPDATE SET
                 series_key = excluded.series_key,
+                sop_class_uid = excluded.sop_class_uid,
                 file_path = excluded.file_path,
                 instance_number = excluded.instance_number,
                 frame_count = excluded.frame_count;
             """;
         command.Parameters.AddWithValue("$seriesKey", seriesKey);
         command.Parameters.AddWithValue("$uid", instance.SopInstanceUid);
+        command.Parameters.AddWithValue("$sopClassUid", instance.SopClassUid);
         command.Parameters.AddWithValue("$filePath", instance.FilePath);
         command.Parameters.AddWithValue("$instanceNumber", instance.InstanceNumber);
         command.Parameters.AddWithValue("$frameCount", instance.FrameCount);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task DeleteInstanceBySopInstanceUidAsync(string sopInstanceUid, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM instances WHERE sop_instance_uid = $sopInstanceUid;";
+        command.Parameters.AddWithValue("$sopInstanceUid", sopInstanceUid);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task DeleteSeriesIfEmptyAsync(string seriesInstanceUid, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            DELETE FROM series
+            WHERE series_instance_uid = $seriesInstanceUid
+              AND NOT EXISTS (
+                  SELECT 1
+                  FROM instances i
+                  WHERE i.series_key = series.series_key
+              );
+            """;
+        command.Parameters.AddWithValue("$seriesInstanceUid", seriesInstanceUid);
         await command.ExecuteNonQueryAsync(cancellationToken);
     }
 

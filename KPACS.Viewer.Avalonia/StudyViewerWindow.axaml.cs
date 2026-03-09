@@ -20,19 +20,36 @@ public partial class StudyViewerWindow : Window
     private readonly ViewerStudyContext _context;
     private readonly List<ViewportSlot> _slots = [];
     private readonly Dictionary<string, DicomSpatialMetadata?> _spatialMetadataCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly DispatcherTimer _actionToolbarHideTimer = new();
     private ViewportSlot? _activeSlot;
     private Border? _dragGhost;
+    private ActionToolbarMode _actionToolbarMode = ActionToolbarMode.ScrollStack;
+    private bool _overlayEnabled = true;
+    private bool _isActionToolbarPointerOver;
 
     public StudyViewerWindow(ViewerStudyContext context)
     {
         InitializeComponent();
         InitializeMeasurementsUi();
         _context = context;
+        InitializeActionToolbar();
         StudyTitleText.Text = context.StudyDetails.Study.PatientName;
         StudySubtitleText.Text = $"{context.StudyDetails.Study.StudyDescription}   {context.StudyDetails.Study.StudyDate}   {context.StudyDetails.Study.Modalities}";
         KeyUp += OnWindowKeyUp;
         Deactivated += (_, _) => Clear3DCursor();
         ApplyLayout(context.LayoutRows, context.LayoutColumns);
+        InitializeSecondaryCaptureUi();
+    }
+
+    private void InitializeActionToolbar()
+    {
+        _overlayEnabled = OverlayToggleButton.IsChecked != false;
+        _actionToolbarHideTimer.Interval = TimeSpan.FromSeconds(2.2);
+        _actionToolbarHideTimer.Tick += OnActionToolbarHideTimerTick;
+        SetActionToolbarMode(ActionToolbarMode.ScrollStack);
+        ApplyOverlayState();
+        ShowActionToolbar();
+        RestartActionToolbarHideTimer();
     }
 
     private void ApplyLayout(int rows, int columns)
@@ -72,10 +89,12 @@ public partial class StudyViewerWindow : Window
 
             var panel = new DicomViewPanel
             {
-                WheelMode = ScrollToggle.IsChecked == true ? MouseWheelMode.StackScroll : MouseWheelMode.Zoom,
+                WheelMode = GetMouseWheelModeForAction(),
+                ActionMode = _actionToolbarMode,
                 StackItemCount = slot.Series?.Instances.Count ?? 0,
                 HorizontalAlignment = HorizontalAlignment.Stretch,
                 VerticalAlignment = VerticalAlignment.Stretch,
+                ShowOverlay = _overlayEnabled,
             };
             slot.Border = border;
             slot.Panel = panel;
@@ -83,6 +102,7 @@ public partial class StudyViewerWindow : Window
             slot.InstanceIndex = 0;
 
             ConfigureMeasurementPanel(slot, panel);
+            ConfigureSecondaryCapturePanel(slot, panel);
             panel.StackScrollRequested += delta => OnStackScroll(border, delta);
             panel.PointerPressed += (_, e) => OnViewportPressed(border, e);
             panel.HoveredImagePointChanged += hover => OnPanelHovered(slot, hover);
@@ -146,6 +166,8 @@ public partial class StudyViewerWindow : Window
         {
             RefreshThumbnailStrip(slot.Series);
         }
+
+        UpdateSecondaryCaptureIndicator(slot);
     }
 
     private void OnViewportPressed(object? sender, PointerPressedEventArgs e)
@@ -197,17 +219,6 @@ public partial class StudyViewerWindow : Window
     private void OnLayoutChanged(object? sender, SelectionChangedEventArgs e)
     {
         Clear3DCursor();
-
-        if (LayoutBox.SelectedItem is not ComboBoxItem item || item.Tag is not string tag)
-        {
-            return;
-        }
-
-        string[] parts = tag.Split('x');
-        if (parts.Length == 2 && int.TryParse(parts[0], out int rows) && int.TryParse(parts[1], out int columns))
-        {
-            ApplyLayout(rows, columns);
-        }
     }
 
     private void OnLutChanged(object? sender, SelectionChangedEventArgs e)
@@ -228,11 +239,7 @@ public partial class StudyViewerWindow : Window
 
     private void OnWheelModeChanged(object? sender, RoutedEventArgs e)
     {
-        MouseWheelMode mode = ScrollToggle.IsChecked == true ? MouseWheelMode.StackScroll : MouseWheelMode.Zoom;
-        foreach (ViewportSlot slot in _slots)
-        {
-            slot.Panel.WheelMode = mode;
-        }
+        ApplyActionModeToPanels();
         UpdateStatus();
     }
 
@@ -760,7 +767,7 @@ public partial class StudyViewerWindow : Window
 
     private string BuildStatusText(ViewportSlot? slot)
     {
-        string toolText = ScrollToggle.IsChecked == true ? "Stack tool" : "Zoom tool";
+        string toolText = $"Action: {GetActionToolbarModeLabel()}";
         string cursorText = "Hold SHIFT for 3D cursor";
         string measurementText = $"Measure: {GetMeasurementToolLabel()}";
 
@@ -770,6 +777,265 @@ public partial class StudyViewerWindow : Window
         }
 
         return $"{slot.Series.Modality}   Series {slot.Series.SeriesNumber}   Image {slot.InstanceIndex + 1}/{slot.Series.Instances.Count}   {toolText}   {measurementText}   {cursorText}";
+    }
+
+    private MouseWheelMode GetMouseWheelModeForAction() =>
+        _actionToolbarMode == ActionToolbarMode.ScrollStack ? MouseWheelMode.StackScroll : MouseWheelMode.Zoom;
+
+    private void SetActionToolbarMode(ActionToolbarMode mode)
+    {
+        _actionToolbarMode = mode;
+        UpdateActionModeButtons();
+        ApplyActionModeToPanels();
+        UpdateStatus();
+    }
+
+    private void UpdateActionModeButtons()
+    {
+        ActionScrollButton.IsChecked = _actionToolbarMode == ActionToolbarMode.ScrollStack;
+        ActionZoomPanButton.IsChecked = _actionToolbarMode == ActionToolbarMode.ZoomPan;
+        ActionWindowButton.IsChecked = _actionToolbarMode == ActionToolbarMode.Window;
+        ActionToolsButton.IsChecked = _actionToolbarMode == ActionToolbarMode.Tools;
+        ActionLayoutButton.IsChecked = _actionToolbarMode == ActionToolbarMode.Layout;
+        OverlayToggleButton.IsChecked = _overlayEnabled;
+    }
+
+    private void ApplyActionModeToPanels()
+    {
+        MouseWheelMode mode = GetMouseWheelModeForAction();
+        foreach (ViewportSlot slot in _slots)
+        {
+            slot.Panel.WheelMode = mode;
+            slot.Panel.ActionMode = _actionToolbarMode;
+            slot.Panel.ShowOverlay = _overlayEnabled;
+        }
+    }
+
+    private void ApplyOverlayState()
+    {
+        foreach (ViewportSlot slot in _slots)
+        {
+            slot.Panel.ShowOverlay = _overlayEnabled;
+        }
+
+        UpdateActionModeButtons();
+        UpdateStatus();
+    }
+
+    private string GetActionToolbarModeLabel() => _actionToolbarMode switch
+    {
+        ActionToolbarMode.ScrollStack => "Scroll/Stack",
+        ActionToolbarMode.ZoomPan => "Zoom-Pan",
+        ActionToolbarMode.Window => "Window",
+        ActionToolbarMode.Tools => "Tools",
+        ActionToolbarMode.Layout => "Layout",
+        _ => "Zoom-Pan",
+    };
+
+    private void ShowActionToolbar()
+    {
+        ActionToolbarBorder.Opacity = 1;
+        ActionToolbarBorder.IsHitTestVisible = true;
+    }
+
+    private void HideActionToolbar()
+    {
+        if (_isActionToolbarPointerOver || IsAnyActionPopupOpen())
+        {
+            return;
+        }
+
+        ActionToolbarBorder.Opacity = 0;
+        ActionToolbarBorder.IsHitTestVisible = false;
+    }
+
+    private void RestartActionToolbarHideTimer()
+    {
+        ShowActionToolbar();
+        _actionToolbarHideTimer.Stop();
+        if (!_isActionToolbarPointerOver && !IsAnyActionPopupOpen())
+        {
+            _actionToolbarHideTimer.Start();
+        }
+    }
+
+    private bool IsAnyActionPopupOpen() =>
+        WindowPresetPopup.IsOpen || ToolsPopup.IsOpen || LayoutPopup.IsOpen;
+
+    private void CloseAllActionPopups(Popup? except = null)
+    {
+        if (!ReferenceEquals(WindowPresetPopup, except))
+        {
+            WindowPresetPopup.IsOpen = false;
+        }
+
+        if (!ReferenceEquals(ToolsPopup, except))
+        {
+            ToolsPopup.IsOpen = false;
+        }
+
+        if (!ReferenceEquals(LayoutPopup, except))
+        {
+            LayoutPopup.IsOpen = false;
+        }
+    }
+
+    private void TogglePopup(Popup popup, Control placementTarget)
+    {
+        bool shouldOpen = !popup.IsOpen;
+        CloseAllActionPopups(popup);
+        popup.PlacementTarget = placementTarget;
+        popup.IsOpen = shouldOpen;
+        ShowActionToolbar();
+
+        if (shouldOpen)
+        {
+            _actionToolbarHideTimer.Stop();
+        }
+        else
+        {
+            RestartActionToolbarHideTimer();
+        }
+    }
+
+    private void ApplyLayoutFromTag(string? tag)
+    {
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            return;
+        }
+
+        string[] parts = tag.Split('x');
+        if (parts.Length == 2 && int.TryParse(parts[0], out int rows) && int.TryParse(parts[1], out int columns))
+        {
+            Clear3DCursor();
+            ApplyLayout(rows, columns);
+        }
+    }
+
+    private void ApplyWindowPreset(string? tag)
+    {
+        if (string.IsNullOrWhiteSpace(tag))
+        {
+            return;
+        }
+
+        if (string.Equals(tag, "RESET", StringComparison.OrdinalIgnoreCase))
+        {
+            ApplyToActiveOrAll(panel => panel.ResetWindowLevel());
+            return;
+        }
+
+        string[] parts = tag.Split('|');
+        if (parts.Length != 2 ||
+            !double.TryParse(parts[0], out double center) ||
+            !double.TryParse(parts[1], out double width))
+        {
+            return;
+        }
+
+        ApplyToActiveOrAll(panel => panel.SetWindowLevel(center, width));
+    }
+
+    private void OnActionToolbarHideTimerTick(object? sender, EventArgs e)
+    {
+        _actionToolbarHideTimer.Stop();
+        HideActionToolbar();
+    }
+
+    private void OnViewerContentPointerMoved(object? sender, PointerEventArgs e) => RestartActionToolbarHideTimer();
+
+    private void OnViewerContentPointerEntered(object? sender, PointerEventArgs e) => RestartActionToolbarHideTimer();
+
+    private void OnViewerContentPointerExited(object? sender, PointerEventArgs e)
+    {
+        if (!_isActionToolbarPointerOver && !IsAnyActionPopupOpen())
+        {
+            _actionToolbarHideTimer.Stop();
+            _actionToolbarHideTimer.Start();
+        }
+    }
+
+    private void OnActionToolbarPointerEntered(object? sender, PointerEventArgs e)
+    {
+        _isActionToolbarPointerOver = true;
+        ShowActionToolbar();
+        _actionToolbarHideTimer.Stop();
+    }
+
+    private void OnActionToolbarPointerExited(object? sender, PointerEventArgs e)
+    {
+        _isActionToolbarPointerOver = false;
+        RestartActionToolbarHideTimer();
+    }
+
+    private void OnActionScrollClick(object? sender, RoutedEventArgs e)
+    {
+        CloseAllActionPopups();
+        SetActionToolbarMode(ActionToolbarMode.ScrollStack);
+        RestartActionToolbarHideTimer();
+    }
+
+    private void OnActionZoomPanClick(object? sender, RoutedEventArgs e)
+    {
+        CloseAllActionPopups();
+        SetActionToolbarMode(ActionToolbarMode.ZoomPan);
+        RestartActionToolbarHideTimer();
+    }
+
+    private void OnActionWindowClick(object? sender, RoutedEventArgs e)
+    {
+        SetActionToolbarMode(ActionToolbarMode.Window);
+        TogglePopup(WindowPresetPopup, ActionWindowButton);
+    }
+
+    private void OnActionToolsClick(object? sender, RoutedEventArgs e)
+    {
+        SetActionToolbarMode(ActionToolbarMode.Tools);
+        TogglePopup(ToolsPopup, ActionToolsButton);
+    }
+
+    private void OnActionLayoutClick(object? sender, RoutedEventArgs e)
+    {
+        SetActionToolbarMode(ActionToolbarMode.Layout);
+        TogglePopup(LayoutPopup, ActionLayoutButton);
+    }
+
+    private void OnOverlayToggleClick(object? sender, RoutedEventArgs e)
+    {
+        _overlayEnabled = OverlayToggleButton.IsChecked != false;
+        ApplyOverlayState();
+        RestartActionToolbarHideTimer();
+    }
+
+    private void OnWindowPresetSelected(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Button button)
+        {
+            ApplyWindowPreset(button.Tag as string);
+        }
+
+        CloseAllActionPopups();
+        RestartActionToolbarHideTimer();
+    }
+
+    private void OnLayoutPopupClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is Button button)
+        {
+            ApplyLayoutFromTag(button.Tag as string);
+        }
+
+        CloseAllActionPopups();
+        RestartActionToolbarHideTimer();
+    }
+
+    private void OnAnyActionPopupClosed(object? sender, EventArgs e)
+    {
+        if (!IsAnyActionPopupOpen())
+        {
+            RestartActionToolbarHideTimer();
+        }
     }
 
     private sealed class ViewportSlot

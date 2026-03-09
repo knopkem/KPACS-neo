@@ -29,22 +29,40 @@
             <Setter Property="Background" Value="#FFD9A03C" />
             <Setter Property="Foreground" Value="Black" />
         </Style>
+        <Style Selector="ToggleButton.actionMode">
+            <Setter Property="Background" Value="#FF323232" />
+            <Setter Property="Foreground" Value="#FFF0F0F0" />
+            <Setter Property="Padding" Value="14,8" />
+            <Setter Property="MinWidth" Value="96" />
+        </Style>
+        <Style Selector="ToggleButton.actionMode:checked">
+            <Setter Property="Background" Value="#FFD9A03C" />
+            <Setter Property="Foreground" Value="Black" />
+        </Style>
+        <Style Selector="ToggleButton.overlayToggle">
+            <Setter Property="Background" Value="#FF323232" />
+            <Setter Property="Foreground" Value="#FFF0F0F0" />
+            <Setter Property="Padding" Value="14,8" />
+            <Setter Property="MinWidth" Value="96" />
+        </Style>
+        <Style Selector="ToggleButton.overlayToggle:checked">
+            <Setter Property="Background" Value="#FF35C7FF" />
+            <Setter Property="Foreground" Value="Black" />
+        </Style>
+        <Style Selector="Button.popupAction">
+            <Setter Property="Background" Value="#FF2E2E2E" />
+            <Setter Property="Foreground" Value="#FFF2F2F2" />
+            <Setter Property="Padding" Value="12,8" />
+            <Setter Property="HorizontalAlignment" Value="Stretch" />
+        </Style>
     </Window.Styles>
 
-    <DockPanel>
-        <Border DockPanel.Dock="Top" Background="#FF2A2A2A" Padding="10,8">
+    <Grid RowDefinitions="Auto,Auto,*">
+        <Border Grid.Row="0" Background="#FF2A2A2A" Padding="10,8">
             <Grid ColumnDefinitions="*,Auto" RowDefinitions="Auto,Auto">
                 <TextBlock x:Name="StudyTitleText"
                            FontSize="18" FontWeight="SemiBold" Foreground="White" />
                 <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                    <TextBlock Text="Layout" Foreground="#FFBDBDBD" VerticalAlignment="Center" />
-                    <ComboBox x:Name="LayoutBox" Width="110" SelectionChanged="OnLayoutChanged">
-                        <ComboBoxItem Content="1 × 1" Tag="1x1" IsSelected="True" />
-                        <ComboBoxItem Content="2 × 2" Tag="2x2" />
-                        <ComboBoxItem Content="3 × 3" Tag="3x3" />
-                        <ComboBoxItem Content="4 × 4" Tag="4x4" />
-                        <ComboBoxItem Content="5 × 3" Tag="5x3" />
-                    </ComboBox>
                     <TextBlock Text="LUT" Foreground="#FFBDBDBD" VerticalAlignment="Center" />
                     <ComboBox x:Name="LutBox" Width="120" SelectionChanged="OnLutChanged">
                         <ComboBoxItem Content="Grayscale" Tag="1" IsSelected="True" />
@@ -60,41 +78,90 @@
             </Grid>
         </Border>
 
-        <Border DockPanel.Dock="Top" Background="#FF0F0F0F" BorderBrush="#FF4A4A4A" BorderThickness="0,0,0,1" Padding="8,6">
+        <Border Grid.Row="1" Background="#FF0F0F0F" BorderBrush="#FF4A4A4A" BorderThickness="0,0,0,1" Padding="8,6">
             <ScrollViewer HorizontalScrollBarVisibility="Auto" VerticalScrollBarVisibility="Disabled">
                 <StackPanel x:Name="ThumbnailStripPanel" Orientation="Horizontal" Spacing="8" />
             </ScrollViewer>
         </Border>
 
-        <Border DockPanel.Dock="Bottom" Background="#FF262626" Padding="10,8">
-            <Grid ColumnDefinitions="*,Auto,*">
-                <StackPanel Orientation="Horizontal" Spacing="8">
-                    <Button Classes="viewerAction" Content="Fit" Click="OnFitClick" />
-                    <Button Classes="viewerAction" Content="1:1" Click="OnOriginalClick" />
-                    <Button Classes="viewerAction" Content="Reset W/L" Click="OnResetWindowClick" />
-                </StackPanel>
-                <StackPanel Grid.Column="1" Orientation="Horizontal" Spacing="8">
-                    <ToggleButton x:Name="ScrollToggle" Classes="viewerAction" Content="Stack tool" IsChecked="True" Checked="OnWheelModeChanged" Unchecked="OnWheelModeChanged" />
-                    <TextBlock Text="Measure" Foreground="#FFBDBDBD" VerticalAlignment="Center" />
-                    <ToggleButton x:Name="MeasureNavigateButton" Classes="measureTool" Content="Nav" Click="OnMeasurementToolButtonClick" Tag="None" IsChecked="True" />
-                    <ToggleButton x:Name="MeasureLensButton" Classes="measureTool" Content="Lens" Click="OnMeasurementToolButtonClick" Tag="PixelLens" />
-                    <ToggleButton x:Name="MeasureLineButton" Classes="measureTool" Content="Line" Click="OnMeasurementToolButtonClick" Tag="Line" />
-                    <ToggleButton x:Name="MeasureAngleButton" Classes="measureTool" Content="Angle" Click="OnMeasurementToolButtonClick" Tag="Angle" />
-                    <ToggleButton x:Name="MeasureRectangleButton" Classes="measureTool" Content="ROI" Click="OnMeasurementToolButtonClick" Tag="RectangleRoi" />
-                    <ToggleButton x:Name="MeasurePolygonButton" Classes="measureTool" Content="Poly" Click="OnMeasurementToolButtonClick" Tag="PolygonRoi" />
-                    <Button Classes="viewerAction" Content="Prev image" Click="OnPrevImageClick" />
-                    <Button Classes="viewerAction" Content="Next image" Click="OnNextImageClick" />
-                </StackPanel>
-                <TextBlock Grid.Column="2" x:Name="ViewerStatusText" HorizontalAlignment="Right"
-                           VerticalAlignment="Center" Foreground="#FFAAAAAA" />
-            </Grid>
-        </Border>
+          <Grid Grid.Row="2" x:Name="ViewerContentHost"
+              PointerMoved="OnViewerContentPointerMoved"
+              PointerEntered="OnViewerContentPointerEntered"
+              PointerExited="OnViewerContentPointerExited">
+            <Border Background="#FF101010" Padding="8">
+                <Grid>
+                    <Grid x:Name="ViewportGrid" ClipToBounds="True" />
+                    <Canvas x:Name="DragGhostOverlay" IsHitTestVisible="False" ClipToBounds="False" />
+                </Grid>
+            </Border>
 
-        <Border Background="#FF101010" Padding="8">
-            <Grid>
-                <Grid x:Name="ViewportGrid" ClipToBounds="True" />
-                <Canvas x:Name="DragGhostOverlay" IsHitTestVisible="False" ClipToBounds="False" />
-            </Grid>
-        </Border>
-    </DockPanel>
+            <Border x:Name="ActionToolbarBorder"
+                    Background="#EE202020"
+                    BorderBrush="#FF4A4A4A"
+                    BorderThickness="1"
+                    CornerRadius="10"
+                    Padding="12,10"
+                    Margin="12"
+                    VerticalAlignment="Bottom"
+                    HorizontalAlignment="Center"
+                    Opacity="0"
+                    IsHitTestVisible="False"
+                    PointerEntered="OnActionToolbarPointerEntered"
+                    PointerExited="OnActionToolbarPointerExited">
+                <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,Auto,Auto,*" ColumnSpacing="8">
+                    <ToggleButton x:Name="ActionScrollButton" Classes="actionMode" Content="Scroll/Stack" Click="OnActionScrollClick" />
+                    <ToggleButton x:Name="ActionZoomPanButton" Grid.Column="1" Classes="actionMode" Content="Zoom-Pan" Click="OnActionZoomPanClick" />
+                    <ToggleButton x:Name="ActionWindowButton" Grid.Column="2" Classes="actionMode" Content="Window" Click="OnActionWindowClick" />
+                    <ToggleButton x:Name="ActionToolsButton" Grid.Column="3" Classes="actionMode" Content="Tools" Click="OnActionToolsClick" />
+                    <ToggleButton x:Name="ActionLayoutButton" Grid.Column="4" Classes="actionMode" Content="Layout" Click="OnActionLayoutClick" />
+                    <ToggleButton x:Name="OverlayToggleButton" Grid.Column="5" Classes="overlayToggle" Content="Overlay" IsChecked="True" Click="OnOverlayToggleClick" />
+                    <TextBlock Grid.Column="6" x:Name="ViewerStatusText" HorizontalAlignment="Right"
+                               VerticalAlignment="Center" Foreground="#FFAAAAAA" Margin="12,0,0,0" />
+                </Grid>
+            </Border>
+
+            <Popup x:Name="WindowPresetPopup" Placement="Top" IsLightDismissEnabled="True" Closed="OnAnyActionPopupClosed">
+                <Border Background="#F0262626" BorderBrush="#FF5A5A5A" BorderThickness="1" CornerRadius="8" Padding="8"
+                        PointerEntered="OnActionToolbarPointerEntered" PointerExited="OnActionToolbarPointerExited">
+                    <StackPanel Width="180" Spacing="6">
+                        <Button Classes="popupAction" Content="Brain" Tag="40|80" Click="OnWindowPresetSelected" />
+                        <Button Classes="popupAction" Content="Abdomen" Tag="60|400" Click="OnWindowPresetSelected" />
+                        <Button Classes="popupAction" Content="Lung" Tag="-600|1500" Click="OnWindowPresetSelected" />
+                        <Button Classes="popupAction" Content="Bone" Tag="300|2000" Click="OnWindowPresetSelected" />
+                        <Button Classes="popupAction" Content="Reset" Tag="RESET" Click="OnWindowPresetSelected" />
+                    </StackPanel>
+                </Border>
+            </Popup>
+
+            <Popup x:Name="ToolsPopup" Placement="Top" IsLightDismissEnabled="True" Closed="OnAnyActionPopupClosed">
+                <Border Background="#F0262626" BorderBrush="#FF5A5A5A" BorderThickness="1" CornerRadius="8" Padding="8"
+                        PointerEntered="OnActionToolbarPointerEntered" PointerExited="OnActionToolbarPointerExited">
+                    <StackPanel Width="190" Spacing="6">
+                        <Button Classes="popupAction" Content="Line" Tag="Line" Click="OnMeasurementToolPopupClick" />
+                        <Button Classes="popupAction" Content="Angle" Tag="Angle" Click="OnMeasurementToolPopupClick" />
+                        <Button Classes="popupAction" Content="Rectangle ROI" Tag="RectangleRoi" Click="OnMeasurementToolPopupClick" />
+                        <Button Classes="popupAction" Content="Polygon ROI" Tag="PolygonRoi" Click="OnMeasurementToolPopupClick" />
+                        <Button Classes="popupAction" Content="Pixel lens" Tag="PixelLens" Click="OnMeasurementToolPopupClick" />
+                        <Button Classes="popupAction" Content="Modify" Tag="Modify" Click="OnMeasurementToolPopupClick" />
+                        <Button Classes="popupAction" Content="Erase" Tag="Erase" Click="OnMeasurementToolPopupClick" />
+                    </StackPanel>
+                </Border>
+            </Popup>
+
+            <Popup x:Name="LayoutPopup" Placement="Top" IsLightDismissEnabled="True" Closed="OnAnyActionPopupClosed">
+                <Border Background="#F0262626" BorderBrush="#FF5A5A5A" BorderThickness="1" CornerRadius="8" Padding="8"
+                        PointerEntered="OnActionToolbarPointerEntered" PointerExited="OnActionToolbarPointerExited">
+                    <StackPanel Width="160" Spacing="6">
+                        <Button Classes="popupAction" Content="1:1" Tag="1x1" Click="OnLayoutPopupClick" />
+                        <Button Classes="popupAction" Content="2:1" Tag="2x1" Click="OnLayoutPopupClick" />
+                        <Button Classes="popupAction" Content="3:1" Tag="3x1" Click="OnLayoutPopupClick" />
+                        <Button Classes="popupAction" Content="2:2" Tag="2x2" Click="OnLayoutPopupClick" />
+                        <Button Classes="popupAction" Content="3:2" Tag="3x2" Click="OnLayoutPopupClick" />
+                        <Button Classes="popupAction" Content="3:3" Tag="3x3" Click="OnLayoutPopupClick" />
+                        <Button Classes="popupAction" Content="4:3" Tag="4x3" Click="OnLayoutPopupClick" />
+                    </StackPanel>
+                </Border>
+            </Popup>
+        </Grid>
+    </Grid>
 </Window>

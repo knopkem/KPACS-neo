@@ -11,6 +11,9 @@ public partial class StudyViewerWindow
     private MeasurementTool _measurementTool = MeasurementTool.None;
     private Guid? _selectedMeasurementId;
 
+    private MeasurementTool GetEffectiveMeasurementTool() =>
+        _actionToolbarMode == ActionToolbarMode.Tools ? _measurementTool : MeasurementTool.None;
+
     private void InitializeMeasurementsUi()
     {
         _measurementTool = MeasurementTool.None;
@@ -19,33 +22,35 @@ public partial class StudyViewerWindow
 
     private void ConfigureMeasurementPanel(ViewportSlot slot, DicomViewPanel panel)
     {
-        panel.SetMeasurementTool(_measurementTool);
+        panel.SetMeasurementTool(GetEffectiveMeasurementTool());
         panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         panel.MeasurementCreated += OnPanelMeasurementCreated;
         panel.MeasurementUpdated += OnPanelMeasurementUpdated;
+        panel.MeasurementDeleted += OnPanelMeasurementDeleted;
         panel.SelectedMeasurementChanged += OnPanelMeasurementSelectedChanged;
     }
 
     private void ApplyMeasurementContext(ViewportSlot slot)
     {
-        slot.Panel.SetMeasurementTool(_measurementTool);
+        slot.Panel.SetMeasurementTool(GetEffectiveMeasurementTool());
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
     }
 
     private void RefreshMeasurementPanels()
     {
+        MeasurementTool effectiveTool = GetEffectiveMeasurementTool();
         foreach (ViewportSlot slot in _slots)
         {
-            slot.Panel.SetMeasurementTool(_measurementTool);
+            slot.Panel.SetMeasurementTool(effectiveTool);
             slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         }
 
         UpdateStatus();
     }
 
-    private void OnMeasurementToolButtonClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    private void OnMeasurementToolPopupClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
     {
-        if (sender is not ToggleButton button || button.Tag is not string tag)
+        if (sender is not Avalonia.Controls.Button button || button.Tag is not string tag)
         {
             return;
         }
@@ -56,6 +61,9 @@ public partial class StudyViewerWindow
         }
 
         SetMeasurementTool(tool);
+        CloseAllActionPopups();
+        ShowActionToolbar();
+        RestartActionToolbarHideTimer();
     }
 
     private void SetMeasurementTool(MeasurementTool tool)
@@ -67,17 +75,10 @@ public partial class StudyViewerWindow
 
     private void UpdateMeasurementToolButtons()
     {
-        if (MeasureNavigateButton is null)
+        if (ActionToolsButton is null)
         {
             return;
         }
-
-        MeasureNavigateButton.IsChecked = _measurementTool == MeasurementTool.None;
-        MeasureLensButton.IsChecked = _measurementTool == MeasurementTool.PixelLens;
-        MeasureLineButton.IsChecked = _measurementTool == MeasurementTool.Line;
-        MeasureAngleButton.IsChecked = _measurementTool == MeasurementTool.Angle;
-        MeasureRectangleButton.IsChecked = _measurementTool == MeasurementTool.RectangleRoi;
-        MeasurePolygonButton.IsChecked = _measurementTool == MeasurementTool.PolygonRoi;
     }
 
     private void OnPanelMeasurementCreated(StudyMeasurement measurement)
@@ -115,6 +116,17 @@ public partial class StudyViewerWindow
         RefreshMeasurementPanels();
     }
 
+    private void OnPanelMeasurementDeleted(Guid measurementId)
+    {
+        _studyMeasurements.RemoveAll(existing => existing.Id == measurementId);
+        if (_selectedMeasurementId == measurementId)
+        {
+            _selectedMeasurementId = null;
+        }
+
+        RefreshMeasurementPanels();
+    }
+
     private string GetMeasurementToolLabel() => _measurementTool switch
     {
         MeasurementTool.None => "Navigate",
@@ -123,6 +135,8 @@ public partial class StudyViewerWindow
         MeasurementTool.Angle => "Angle",
         MeasurementTool.RectangleRoi => "Rectangle ROI",
         MeasurementTool.PolygonRoi => "Polygon ROI",
+        MeasurementTool.Modify => "Modify",
+        MeasurementTool.Erase => "Erase",
         _ => "Navigate",
     };
 }

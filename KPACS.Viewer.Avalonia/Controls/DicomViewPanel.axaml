@@ -60,6 +60,23 @@
                    IsVisible="False" />
             </Canvas>
 
+            <Button x:Name="KeyImageButton"
+                Content="🔑"
+                Width="28"
+                Height="28"
+                FontSize="16"
+                HorizontalAlignment="Left"
+                VerticalAlignment="Bottom"
+                Margin="8,0,0,34"
+                Padding="0"
+                CornerRadius="14"
+                Background="#B0202020"
+                BorderBrush="#80909090"
+                BorderThickness="1"
+                Foreground="#FFB8B8B8"
+                IsVisible="False"
+                Click="OnKeyImageButtonClick" />
+
         <!-- Overlay text: 4 corners like a DICOM viewer -->
         <TextBlock x:Name="OverlayTopLeft"
                    Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="13"

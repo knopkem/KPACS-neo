@@ -51,4 +51,18 @@ public enum MeasurementTool
     Angle,
     RectangleRoi,
     PolygonRoi,
+    Modify,
+    Erase,
+}
+
+/// <summary>
+/// Active mode for the floating action toolbar.
+/// </summary>
+public enum ActionToolbarMode
+{
+    ScrollStack,
+    ZoomPan,
+    Window,
+    Tools,
+    Layout,
 }

@@ -26,4 +26,8 @@
     <ProjectReference Include="..\KPACS.DCMClasses\KPACS.DCMClasses.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <AvaloniaResource Include="Assets\**" />
+  </ItemGroup>
+
 </Project>

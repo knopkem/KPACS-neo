@@ -21,6 +21,7 @@ public partial class DicomViewPanel
 
     public event Action<StudyMeasurement>? MeasurementCreated;
     public event Action<StudyMeasurement>? MeasurementUpdated;
+    public event Action<Guid>? MeasurementDeleted;
     public event Action<Guid?>? SelectedMeasurementChanged;
 
     public void SetMeasurementTool(MeasurementTool tool)
@@ -38,6 +39,8 @@ public partial class DicomViewPanel
         }
 
         UpdateMeasurementPresentation();
+        UpdateInteractiveCursor();
+        UpdateSecondaryCaptureButton();
     }
 
     public void SetMeasurements(IEnumerable<StudyMeasurement> measurements, Guid? selectedMeasurementId)
@@ -87,7 +90,24 @@ public partial class DicomViewPanel
             return true;
         }
 
+        if (_measurementTool == MeasurementTool.Erase)
+        {
+            if (TryDeleteMeasurement(controlPoint))
+            {
+                e.Handled = true;
+                return true;
+            }
+
+            return false;
+        }
+
         if (TryBeginMeasurementEdit(controlPoint, imagePoint, e.Pointer))
+        {
+            e.Handled = true;
+            return true;
+        }
+
+        if (_measurementTool == MeasurementTool.Modify)
         {
             e.Handled = true;
             return true;
@@ -147,7 +167,7 @@ public partial class DicomViewPanel
             return true;
         }
 
-        return _measurementTool != MeasurementTool.None;
+        return _measurementTool is not MeasurementTool.None and not MeasurementTool.Erase;
     }
 
     private bool HandleMeasurementPointerReleased(PointerReleasedEventArgs e)
@@ -175,7 +195,7 @@ public partial class DicomViewPanel
             return true;
         }
 
-        return _measurementTool != MeasurementTool.None;
+        return _measurementTool is not MeasurementTool.None and not MeasurementTool.Erase;
     }
 
     private void HandleMeasurementPointerExited()
@@ -184,6 +204,8 @@ public partial class DicomViewPanel
         {
             PixelLensPanel.IsVisible = false;
         }
+
+        UpdateInteractiveCursor();
     }
 
     private void StartDragMeasurement(MeasurementKind kind, Point imagePoint, IPointer pointer)
@@ -315,6 +337,24 @@ public partial class DicomViewPanel
 
         pointer.Capture(RootGrid);
         _capturedPointer = pointer;
+        UpdateMeasurementPresentation();
+        return true;
+    }
+
+    private bool TryDeleteMeasurement(Point controlPoint)
+    {
+        MeasurementHit? hit = HitTestMeasurement(controlPoint);
+        if (hit is null)
+        {
+            return false;
+        }
+
+        if (_selectedMeasurementId == hit.Measurement.Id)
+        {
+            SetSelectedMeasurement(null);
+        }
+
+        MeasurementDeleted?.Invoke(hit.Measurement.Id);
         UpdateMeasurementPresentation();
         return true;
     }
