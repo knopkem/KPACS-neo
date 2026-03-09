@@ -32,11 +32,13 @@ KPACS.DCMClasses/               — Core DICOM class library (.NET 10, fo-dicom 
 KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer (.NET 10, Avalonia 11.3)
 ├── App.axaml / App.axaml.cs      — Application entry point, imagebox bootstrap, Semi.Avalonia light theme
 ├── Program.cs                    — Avalonia desktop entry point
-├── MainWindow.axaml / .cs        — K-PACS-style study browser with Database / Filesystem modes
-├── StudyViewerWindow.axaml / .cs — Multi-viewport study viewer with thumbnails, LUTs, stack tool
+├── MainWindow.axaml / .cs        — K-PACS-style study browser with Database / Network / Filesystem modes
+├── StudyViewerWindow.axaml / .cs — Multi-viewport study viewer with thumbnails, LUTs, stack tool, and progressive remote loading
 ├── ViewerTypes.cs                — ColorScheme, ViewerTool, MouseWheelMode enumerations
 ├── Models/
-│   └── ImageboxModels.cs         — Browser, study, import, filesystem tree, and query models
+│   ├── ImageboxModels.cs         — Browser, study, import, filesystem tree, and query models
+│   ├── NetworkModels.cs          — Remote archive and network settings models
+│   └── ToastNotificationItem.cs  — Transient in-window notification models
 ├── Controls/
 │   └── DicomViewPanel.axaml / .cs— Core viewer control: zoom, pan, window/level, stack scrolling, overlays
 ├── Services/
@@ -46,7 +48,15 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
 │   ├── DicomFilesystemScanService.cs — Scan-only preview of filesystem/DICOMDIR studies
 │   ├── DicomStudyDeletionService.cs  — Delete study from SQLite and stored files
 │   ├── DicomPseudonymizationService.cs — Pseudonymize imported studies in-place
-│   └── ViewerStudyContext.cs     — Study viewer input context
+│   ├── DicomRemoteStudyBrowserService.cs — Remote C-FIND/C-MOVE/C-STORE integration
+│   ├── NetworkSettingsService.cs — Persistent network-settings.json management
+│   ├── RemoteStudyRetrievalSession.cs — Progressive representative-image-first retrieval
+│   ├── StorageScpService.cs      — Local Storage SCP receiver with import pipeline
+│   ├── ViewerStudyContext.cs     — Study viewer input context
+│   └── WindowPlacementService.cs — Window geometry persistence
+├── Windows/
+    ├── NetworkInfoWindow.cs      — Runtime network status dialog
+    └── NetworkSettingsWindow.cs  — Network configuration dialog
 └── Rendering/
     ├── DicomPixelRenderer.cs     — Pixel rendering engine (platform-independent)
     └── ColorLut.cs               — Color lookup tables (platform-independent)
@@ -71,12 +81,15 @@ The Avalonia application has moved beyond a single-file viewer and now includes 
 
 - **Database mode** backed by a local SQLite imagebox
 - **Filesystem mode** with Windows-style `Computer` root, drive browsing, folder scan, and optional DICOMDIR usage
-- **Preview-before-import workflow**: filesystem scans build preview studies first, and actual import happens only on explicit `Import` or `View`
-- **Study actions**: view, import, pseudonymize, and delete study (including disk files)
+- **Network mode** with configured remote archive search, preview of remote series, and representative-image-first retrieval into the local imagebox
+- **Preview-before-import workflow**: filesystem scans build preview studies first, and actual import happens only on explicit open/import workflows
+- **Study actions**: view, send to remote archive, pseudonymize, and delete study (including multi-select send/delete for local studies)
 - **Multi-viewport study viewer** with thumbnail strip, layout selection, LUT switching, stack-tool drag behavior, direct active-viewport selection, and drag-reassignable series layouting
 - **Interactive orientation/navigation overlays** including patient left/right markers and a Shift-held transient 3D cursor for cross-view localization
 - **Editable measurement tools** including pixel lens, line, angle, rectangular ROI, and polygon ROI, anchored to the referenced slice geometry in patient space
-- **Search/filter support** in both Database and Filesystem mode, including multi-select modality filtering
+- **Search/filter support** in Database, Filesystem, and Network mode, including wildcard remote matching and safe blocking of empty remote queries
+- **Local Storage SCP receiving** backed by fo-dicom with automatic import into the local imagebox
+- **Operational polish** including toast notifications, persisted browser/viewer window placement, persisted study browser splitters, and non-modal viewer windows
 - Shares the same platform-independent rendering engine and color LUTs across the current C# viewer stack
 - Uses Avalonia pointer events, StorageProvider dialogs, and Semi.Avalonia styling
 
@@ -96,17 +109,14 @@ The following major components from the original K-PACS have **not yet been port
 
 | Component | Description |
 |---|---|
-| **Network Query/Retrieve UI** | Remote study browser, server selection, and retrieve workflow |
 | **Email Mode** | Import/export or mail-driven workflows |
-| **Server / SCP** | C-STORE receiver, Query/Retrieve provider, service management |
-| **DICOM Server** | SCP services (C-STORE receiver, Query/Retrieve provider) |
+| **Query/Retrieve SCP** | Full server-side query/retrieve provider and broader service administration |
 | **Print** | DICOM Print SCU, print preview, film layout |
 | **Report Writer** | Structured report authoring and display |
 | **CD Burner** | DICOM media creation with auto-run viewer |
-| **Settings & Configuration** | DICOM network settings, local storage, server management |
 | **RIS Interface** | Worklist-driven workflow integration |
-| **Measurements & Annotations** | Distance, angle, ROI, freehand drawing, text annotations |
-| **Advanced Viewing** | Hanging protocols, lightbox tiling, cine playback, magnifier |
+| **Advanced Annotations** | Text annotations, richer editing UX, and more parity with legacy drawing/report tools |
+| **Advanced Viewing** | Hanging protocols, lightbox tiling, cine playback, magnifier, and higher-level workflow presets |
 
 ## Technology
 
@@ -141,11 +151,11 @@ dotnet run --project KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj
 
 ## Avalonia Browser Workflow
 
-The Avalonia application currently focuses on a local K-PACS-style workflow:
+The Avalonia application now supports a practical local-plus-network K-PACS workflow:
 
 - **Database** — studies already imported into the local SQLite imagebox
 - **Filesystem** — browse drives/folders, scan DICOM folders or DICOMDIR media, preview studies, then import on demand
-- **Network** — placeholder tab for future query/retrieve work
+- **Network** — configure one primary remote archive, query studies, preview remote series, and open studies with progressive background retrieval into the local imagebox
 - **Email** — placeholder tab for future mail/export workflows
 
 ### Local imagebox
@@ -161,6 +171,100 @@ This contains:
 - `imagebox.db` — SQLite metadata database
 - `Studies/` — imported DICOM files organized by Study Instance UID / Series Instance UID
 
+Additional runtime configuration files are stored alongside the imagebox root:
+
+- `network-settings.json` — local AE title/port plus the configured remote archive
+- `window-placement.json` — persisted browser/viewer geometry
+- `study-browser-layout.json` — persisted patient/study and study/series splitter sizes
+
+### Network workflow notes
+
+- Double-clicking a network study loads remote series metadata first, then opens the viewer as soon as the first representative images arrive.
+- Remaining series continue downloading in the background through the configured local Storage SCP.
+- Local studies can be sent back to the configured archive with the `Send` action in Database mode.
+- Empty network searches are blocked on purpose to avoid accidental full-archive C-FIND requests.
+
+### Remote DICOM archive configuration examples
+
+The Avalonia browser currently stores network configuration in `network-settings.json` under `%LOCALAPPDATA%/KPACS.Viewer.Avalonia`.
+
+Example structure:
+
+```json
+{
+    "LocalAeTitle": "KPACS",
+    "LocalPort": 11112,
+    "InboxDirectory": "C:\\Users\\<you>\\AppData\\Local\\KPACS.Viewer.Avalonia\\network-inbox",
+    "SelectedArchiveId": "conquest-local",
+    "Archives": [
+        {
+            "Id": "conquest-local",
+            "Name": "Local Conquest",
+            "Host": "127.0.0.1",
+            "Port": 5678,
+            "RemoteAeTitle": "CONQUESTSRV1"
+        }
+    ]
+}
+```
+
+#### Conquest PACS example
+
+Use this when Conquest is running locally or on a reachable server and accepts query/retrieve on its configured TCP port.
+
+```json
+{
+    "LocalAeTitle": "KPACS",
+    "LocalPort": 11112,
+    "InboxDirectory": "C:\\Users\\<you>\\AppData\\Local\\KPACS.Viewer.Avalonia\\network-inbox",
+    "SelectedArchiveId": "conquest-main",
+    "Archives": [
+        {
+            "Id": "conquest-main",
+            "Name": "Conquest Main",
+            "Host": "192.168.1.50",
+            "Port": 5678,
+            "RemoteAeTitle": "CONQUESTSRV1"
+        }
+    ]
+}
+```
+
+Typical Conquest pairing:
+
+- Local Storage SCP in K-PACS: AE `KPACS`, port `11112`
+- Remote archive in K-PACS: host `192.168.1.50`, port `5678`, remote AE `CONQUESTSRV1`
+- Matching destination configured in Conquest for C-MOVE/C-STORE back to K-PACS: AE `KPACS` at your workstation IP and port `11112`
+
+#### Orthanc example
+
+Orthanc often uses AE title `ORTHANC` and DICOM port `4242` unless changed in its configuration.
+
+```json
+{
+    "LocalAeTitle": "KPACS",
+    "LocalPort": 11112,
+    "InboxDirectory": "C:\\Users\\<you>\\AppData\\Local\\KPACS.Viewer.Avalonia\\network-inbox",
+    "SelectedArchiveId": "orthanc-dev",
+    "Archives": [
+        {
+            "Id": "orthanc-dev",
+            "Name": "Orthanc Dev",
+            "Host": "127.0.0.1",
+            "Port": 4242,
+            "RemoteAeTitle": "ORTHANC"
+        }
+    ]
+}
+```
+
+Checklist for any remote PACS:
+
+- The remote PACS must know the workstation as destination AE `KPACS` on port `11112` (or whatever you configure locally).
+- Firewalls must allow inbound traffic to the local Storage SCP port.
+- AE titles must match exactly, including case and truncation to the DICOM 16-character limit.
+- If C-FIND works but retrieve fails, the first thing to check is usually the remote PACS destination table for the local AE.
+
 ### Current viewer capabilities
 
 - Window/level, zoom, pan, fit-to-window, and color LUT switching
@@ -171,9 +275,11 @@ This contains:
 - Shift-held 3D cursor that projects the hovered location into compatible views without locking the viewer in localization mode
 - Measurement mode selector with editable line, angle, rectangular ROI, polygon ROI, and pixel lens tools
 - Measurement objects persist against the correct image geometry and are reprojected only onto compatible slices/views from the same acquisition space
-- Series overview panel in the browser
+- Series overview panel in the browser with persisted splitter sizing
+- Progressive remote retrieval support inside the viewer, including status updates while images arrive
 - Pseudonymization of imported studies
 - Delete-study workflow that removes both database rows and stored files
+- Send-to-archive workflow for local studies
 
 ## Background
 

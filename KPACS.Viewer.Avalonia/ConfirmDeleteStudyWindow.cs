@@ -8,15 +8,24 @@ namespace KPACS.Viewer;
 
 internal sealed class ConfirmDeleteStudyWindow : Window
 {
-    public ConfirmDeleteStudyWindow(StudyListItem study)
+    public ConfirmDeleteStudyWindow(IReadOnlyList<StudyListItem> studies)
     {
+        ArgumentNullException.ThrowIfNull(studies);
+        if (studies.Count == 0)
+        {
+            throw new ArgumentException("At least one study must be supplied.", nameof(studies));
+        }
+
+        StudyListItem firstStudy = studies[0];
+        bool multiSelect = studies.Count > 1;
+
         Title = "Delete Study";
         Width = 460;
-        Height = 235;
+        Height = multiSelect ? 270 : 235;
         MinWidth = 460;
-        MinHeight = 235;
+        MinHeight = multiSelect ? 270 : 235;
         MaxWidth = 460;
-        MaxHeight = 235;
+        MaxHeight = multiSelect ? 270 : 235;
         CanResize = false;
         WindowStartupLocation = WindowStartupLocation.CenterOwner;
         Background = new SolidColorBrush(Color.Parse("#FFE3E3E3"));
@@ -32,7 +41,7 @@ internal sealed class ConfirmDeleteStudyWindow : Window
 
         var confirmButton = new Button
         {
-            Content = "Delete Study",
+            Content = multiSelect ? "Delete Studies" : "Delete Study",
             MinWidth = 110,
             HorizontalAlignment = HorizontalAlignment.Right,
         };
@@ -58,14 +67,18 @@ internal sealed class ConfirmDeleteStudyWindow : Window
                 {
                     new TextBlock
                     {
-                        Text = "Delete the selected study from the K-PACS imagebox?",
+                        Text = multiSelect
+                            ? $"Delete the {studies.Count} selected studies from the K-PACS imagebox?"
+                            : "Delete the selected study from the K-PACS imagebox?",
                         FontWeight = FontWeight.Bold,
                         Foreground = new SolidColorBrush(Color.Parse("#FF222222")),
                         TextWrapping = TextWrapping.Wrap,
                     },
                     new TextBlock
                     {
-                        Text = $"Patient: {study.PatientName}\nPatient ID: {study.PatientId}\nStudy date: {study.DisplayStudyDate}\nSeries/images: {study.SeriesCount} / {study.InstanceCount}",
+                        Text = multiSelect
+                            ? BuildMultiStudySummary(studies)
+                            : $"Patient: {firstStudy.PatientName}\nPatient ID: {firstStudy.PatientId}\nStudy date: {firstStudy.DisplayStudyDate}\nSeries/images: {firstStudy.SeriesCount} / {firstStudy.InstanceCount}",
                         Foreground = new SolidColorBrush(Color.Parse("#FF333333")),
                         TextWrapping = TextWrapping.Wrap,
                     },
@@ -79,5 +92,18 @@ internal sealed class ConfirmDeleteStudyWindow : Window
                 },
             },
         };
+    }
+
+    private static string BuildMultiStudySummary(IReadOnlyList<StudyListItem> studies)
+    {
+        int totalSeries = studies.Sum(study => study.SeriesCount);
+        int totalImages = studies.Sum(study => study.InstanceCount);
+        string preview = string.Join("\n", studies.Take(4).Select(study => $"• {study.PatientName} ({study.DisplayStudyDate})"));
+        if (studies.Count > 4)
+        {
+            preview += $"\n• ... and {studies.Count - 4} more";
+        }
+
+        return $"Studies: {studies.Count}\nTotal series/images: {totalSeries} / {totalImages}\n{preview}";
     }
 }

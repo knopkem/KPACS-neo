@@ -41,7 +41,8 @@
                 </Style>
         </Window.Styles>
 
-        <DockPanel>
+        <Grid>
+                <DockPanel>
                 <Border DockPanel.Dock="Top" Background="#FFCFCFCF" BorderBrush="#FF9E9E9E" BorderThickness="0,0,0,1" Padding="8">
                         <Grid ColumnDefinitions="4.8*,2.2*">
                                 <Border Classes="section" Padding="8">
@@ -127,15 +128,27 @@
                                                                 <TextBlock Text="Query" FontWeight="Bold" Foreground="#FF333333" />
                                                                 <TextBlock x:Name="DatabaseStatsText" Foreground="#FF5F5F5F" Margin="0,4,0,0" />
                                                         </StackPanel>
-                                                        <Button Grid.Column="1" Width="56" Classes="action" Content="Cfg" />
-                                                        <Button Grid.Column="2" Width="56" Classes="action" Content="Info" />
+                                                        <Button x:Name="ConfigButton" Grid.Column="1" Width="56" Classes="action" Content="Cfg" Click="OnConfigClick" />
+                                                        <Button x:Name="InfoButton" Grid.Column="2" Width="56" Classes="action" Content="Info" Click="OnInfoClick" />
                                                 </Grid>
                                         </Border>
 
                                         <Border Classes="section" Padding="6">
                                                 <TabControl x:Name="BrowserModeTabs" SelectionChanged="OnBrowserModeChanged">
                                                         <TabItem Header="Network">
-                                                                <TextBlock Margin="8" Text="Network functions are deferred for now." Foreground="#FF555555" />
+                                                                <StackPanel Margin="8" Spacing="8">
+                                                                        <TextBlock Text="Query the configured archive, inspect remote series, and double-click a study to retrieve representative images immediately while a full study fetch continues into the local imagebox." TextWrapping="Wrap" Foreground="#FF555555" />
+                                                                        <Border Background="#FFF2F2F2" BorderBrush="#FFB5B5B5" BorderThickness="1" Padding="8">
+                                                                                <StackPanel Spacing="6">
+                                                                                        <TextBlock Text="Network setup" FontWeight="SemiBold" Foreground="#FF333333" />
+                                                                                        <TextBlock x:Name="NetworkSetupSummaryText" TextWrapping="Wrap" Foreground="#FF4E4E4E" />
+                                                                                        <StackPanel Orientation="Horizontal" Spacing="8">
+                                                                                                <Button Content="Configure network..." Click="OnConfigClick" />
+                                                                                                <Button Content="Show network status" Click="OnInfoClick" />
+                                                                                        </StackPanel>
+                                                                                </StackPanel>
+                                                                        </Border>
+                                                                </StackPanel>
                                                         </TabItem>
                                                         <TabItem Header="Database">
                                                                 <TextBlock Margin="8" Text="SQLite-backed K-PACS imagebox." Foreground="#FF555555" />
@@ -156,28 +169,29 @@
                         <TextBlock x:Name="StatusText" FontFamily="Consolas" Foreground="#FF222222" />
                 </Border>
 
-                <Grid x:Name="BrowserContentGrid" Margin="8" RowDefinitions="*,190">
+                <Grid x:Name="BrowserContentGrid" Margin="8" RowDefinitions="*,6,190">
                         <Grid.ColumnDefinitions>
                                 <ColumnDefinition Width="74" />
-                                <ColumnDefinition Width="220" />
+                                <ColumnDefinition Width="320" />
+                                <ColumnDefinition Width="6" />
                                 <ColumnDefinition Width="*" />
                         </Grid.ColumnDefinitions>
-                        <Border Grid.RowSpan="2" Classes="section" Padding="6">
+                        <Border Grid.RowSpan="3" Classes="section" Padding="6">
                                 <StackPanel Spacing="8">
                                         <TextBlock Text="Actions" FontWeight="Bold" Foreground="#FF333333" HorizontalAlignment="Center" Margin="0,0,0,4" />
-                                        <Button Classes="action" Content="View" Click="OnOpenViewerClick" />
-                                        <Button x:Name="TogglePatientPanelButton" Content="Patients" Click="OnTogglePatientPanelClick" />
-                                        <Button x:Name="ImportActionButton" Classes="action" Content="Import" Click="OnImportSelectedClick" />
-                                        <Button x:Name="BrowseFilesystemButton" Classes="action" Content="Browse" Click="OnBrowseFilesystemRootClick" />
+                                        <Button x:Name="ViewActionButton" Classes="action" Content="View" Click="OnOpenViewerClick" />
+                                        <Button x:Name="SendActionButton" Classes="action" Content="Send" Click="OnSendSelectedClick" />
                                         <Button x:Name="ModifyActionButton" Classes="action" Content="Modify" Click="OnPseudonymizeClick" />
-                                        <Button Classes="action" Content="Refresh" Click="OnRefreshClick" />
                                 </StackPanel>
                         </Border>
 
                         <Border Grid.Column="1" Classes="section" Padding="4" Margin="8,0,8,8">
                                 <Grid>
                                         <Grid x:Name="PatientPanel" RowDefinitions="Auto,*">
-                                                <TextBlock Text="Patients" FontWeight="Bold" Foreground="#FF333333" Margin="4" />
+                                                <Grid ColumnDefinitions="*,Auto" Margin="4,4,4,6">
+                                                        <TextBlock Text="Patients" FontWeight="Bold" Foreground="#FF333333" VerticalAlignment="Center" />
+                                                        <Button x:Name="HidePatientPanelButton" Grid.Column="1" Width="56" Height="28" Content="Hide" Click="OnTogglePatientPanelClick" />
+                                                </Grid>
                                                 <DataGrid x:Name="PatientGrid" Grid.Row="1"
                                                                   AutoGenerateColumns="False"
                                                                   CanUserResizeColumns="True"
@@ -225,12 +239,24 @@
                                 </Grid>
                         </Border>
 
-                        <Border Grid.Column="2" Classes="section" Padding="4" Margin="0,0,0,8">
+                        <GridSplitter x:Name="PatientStudySplitter"
+                                      Grid.Column="2"
+                                      Margin="0,0,8,8"
+                                      Background="#FFB8B8B8"
+                                      ResizeDirection="Columns"
+                                      HorizontalAlignment="Stretch"
+                                      VerticalAlignment="Stretch"
+                                      PointerReleased="OnPatientStudySplitterPointerReleased" />
+
+                        <Border Grid.Column="3" Classes="section" Padding="4" Margin="0,0,0,8">
                                 <Grid RowDefinitions="Auto,*">
-                                        <StackPanel Margin="4,4,4,6">
-                                                <TextBlock Text="Studies" FontWeight="Bold" Foreground="#FF333333" />
-                                                <TextBlock x:Name="StudySummaryText" Foreground="#FF555555" FontSize="12" />
-                                        </StackPanel>
+                                        <Grid ColumnDefinitions="*,Auto" Margin="4,4,4,6">
+                                                <StackPanel>
+                                                        <TextBlock Text="Studies" FontWeight="Bold" Foreground="#FF333333" />
+                                                        <TextBlock x:Name="StudySummaryText" Foreground="#FF555555" FontSize="12" />
+                                                </StackPanel>
+                                                <Button x:Name="ShowPatientPanelButton" Grid.Column="1" Width="108" Height="30" Margin="8,0,0,0" Content="Show patients" Click="OnTogglePatientPanelClick" />
+                                        </Grid>
                                         <DataGrid x:Name="StudyGrid" Grid.Row="1"
                                                           AutoGenerateColumns="False"
                                                           CanUserResizeColumns="True"
@@ -238,7 +264,7 @@
                                                           GridLinesVisibility="All"
                                                           HeadersVisibility="Column"
                                                           IsReadOnly="True"
-                                                          SelectionMode="Single"
+                                                          SelectionMode="Extended"
                                                           PointerPressed="OnStudyGridPointerPressed"
                                                           SelectionChanged="OnStudySelectionChanged"
                                                           DoubleTapped="OnStudyDoubleTapped">
@@ -262,7 +288,19 @@
                                 </Grid>
                         </Border>
 
-                        <Border Grid.Row="1" Grid.Column="1" Grid.ColumnSpan="2" Classes="section" Padding="4" Margin="8,0,0,0">
+                        <GridSplitter x:Name="StudySeriesSplitter"
+                                      Grid.Row="1"
+                                      Grid.Column="1"
+                                      Grid.ColumnSpan="3"
+                                      Height="6"
+                                      Margin="8,0,0,0"
+                                      Background="#FFB8B8B8"
+                                      ResizeDirection="Rows"
+                                      HorizontalAlignment="Stretch"
+                                      VerticalAlignment="Stretch"
+                                      PointerReleased="OnStudySeriesSplitterPointerReleased" />
+
+                        <Border Grid.Row="2" Grid.Column="1" Grid.ColumnSpan="3" Classes="section" Padding="4" Margin="8,0,0,0">
                                 <Grid RowDefinitions="Auto,*">
                                         <TextBlock Text="Series overview" FontWeight="Bold" Foreground="#FF333333" Margin="4,4,4,6" />
                                         <DataGrid x:Name="SeriesGrid" Grid.Row="1"
@@ -284,5 +322,41 @@
                                 </Grid>
                         </Border>
                 </Grid>
-        </DockPanel>
+                </DockPanel>
+
+                <ItemsControl x:Name="ToastItemsControl"
+                              HorizontalAlignment="Right"
+                              VerticalAlignment="Top"
+                              Margin="0,16,16,0"
+                              IsHitTestVisible="False">
+                        <ItemsControl.ItemsPanel>
+                                <ItemsPanelTemplate>
+                                        <StackPanel Spacing="8" />
+                                </ItemsPanelTemplate>
+                        </ItemsControl.ItemsPanel>
+                        <ItemsControl.ItemTemplate>
+                                <DataTemplate>
+                                        <Border Background="{Binding Background}"
+                                                BorderBrush="{Binding BorderBrush}"
+                                                BorderThickness="1"
+                                                CornerRadius="8"
+                                                Padding="10,8"
+                                                MinWidth="260"
+                                                MaxWidth="420"
+                                                BoxShadow="0 8 20 0 #50000000">
+                                                <Grid ColumnDefinitions="Auto,*" ColumnSpacing="10">
+                                                        <TextBlock Text="{Binding Icon}"
+                                                                   FontSize="16"
+                                                                   VerticalAlignment="Top"
+                                                                   Foreground="{Binding Foreground}" />
+                                                        <TextBlock Grid.Column="1"
+                                                                   Text="{Binding Message}"
+                                                                   TextWrapping="Wrap"
+                                                                   Foreground="{Binding Foreground}" />
+                                                </Grid>
+                                        </Border>
+                                </DataTemplate>
+                        </ItemsControl.ItemTemplate>
+                </ItemsControl>
+        </Grid>
 </Window>

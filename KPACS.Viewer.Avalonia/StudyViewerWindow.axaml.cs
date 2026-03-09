@@ -18,6 +18,7 @@ namespace KPACS.Viewer;
 public partial class StudyViewerWindow : Window
 {
     private readonly ViewerStudyContext _context;
+    private readonly RemoteStudyRetrievalSession? _remoteRetrievalSession;
     private readonly List<ViewportSlot> _slots = [];
     private readonly Dictionary<string, DicomSpatialMetadata?> _spatialMetadataCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly DispatcherTimer _actionToolbarHideTimer = new();
@@ -33,6 +34,15 @@ public partial class StudyViewerWindow : Window
         InitializeComponent();
         InitializeMeasurementsUi();
         _context = context;
+        _remoteRetrievalSession = context.RemoteRetrievalSession;
+        if (Application.Current is App app)
+        {
+            app.WindowPlacementService.Register(this, "StudyViewerWindow");
+        }
+        if (_remoteRetrievalSession is not null)
+        {
+            _remoteRetrievalSession.StudyChanged += OnRemoteStudyChanged;
+        }
         InitializeActionToolbar();
         StudyTitleText.Text = context.StudyDetails.Study.PatientName;
         StudySubtitleText.Text = $"{context.StudyDetails.Study.StudyDescription}   {context.StudyDetails.Study.StudyDate}   {context.StudyDetails.Study.Modalities}";
@@ -40,6 +50,7 @@ public partial class StudyViewerWindow : Window
         Deactivated += (_, _) => Clear3DCursor();
         ApplyLayout(context.LayoutRows, context.LayoutColumns);
         InitializeSecondaryCaptureUi();
+        Closed += OnViewerClosed;
     }
 
     private void InitializeActionToolbar()
@@ -142,12 +153,29 @@ public partial class StudyViewerWindow : Window
     {
         if (slot.Series is null || slot.Series.Instances.Count == 0)
         {
+            slot.Panel.ClearImage();
             return;
         }
 
-        slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, slot.Series.Instances.Count - 1);
-        slot.Panel.StackItemCount = slot.Series.Instances.Count;
-        string filePath = slot.Series.Instances[slot.InstanceIndex].FilePath;
+        int totalCount = GetSeriesTotalCount(slot.Series);
+        slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, Math.Max(0, totalCount - 1));
+        slot.Panel.StackItemCount = totalCount;
+        InstanceRecord instance = slot.Series.Instances[Math.Clamp(slot.InstanceIndex, 0, slot.Series.Instances.Count - 1)];
+        if (!IsLocalInstance(instance))
+        {
+            slot.CurrentSpatialMetadata = null;
+            slot.Panel.ClearImage();
+            RequestSlotPriority(slot);
+            if (ReferenceEquals(slot, _activeSlot))
+            {
+                RefreshThumbnailStrip(slot.Series);
+            }
+
+            UpdateSecondaryCaptureIndicator(slot);
+            return;
+        }
+
+        string filePath = instance.FilePath;
         DicomViewPanel.DisplayState? previousState = slot.ViewState;
         slot.Panel.LoadFile(filePath);
         slot.CurrentSpatialMetadata = slot.Panel.SpatialMetadata;
@@ -179,7 +207,9 @@ public partial class StudyViewerWindow : Window
     {
         if (sender is Border border)
         {
-            SetActiveSlot(_slots.FirstOrDefault(slot => ReferenceEquals(slot.Border, border)));
+            ViewportSlot? slot = _slots.FirstOrDefault(candidate => ReferenceEquals(candidate.Border, border));
+            SetActiveSlot(slot);
+            RequestSlotPriority(slot);
         }
     }
 
@@ -188,6 +218,7 @@ public partial class StudyViewerWindow : Window
         _activeSlot = slot;
         UpdateSlotVisualStates();
         RefreshThumbnailStrip(slot?.Series);
+        RequestSlotPriority(slot);
         UpdateStatus();
     }
 
@@ -216,7 +247,8 @@ public partial class StudyViewerWindow : Window
         }
 
         SetActiveSlot(slot);
-        slot.InstanceIndex = Math.Clamp(slot.InstanceIndex + delta, 0, slot.Series.Instances.Count - 1);
+        slot.InstanceIndex = Math.Clamp(slot.InstanceIndex + delta, 0, GetSeriesTotalCount(slot.Series) - 1);
+        RequestSlotPriority(slot, Math.Sign(delta));
         LoadSlot(slot);
         UpdateStatus();
     }
@@ -260,7 +292,8 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
-        _activeSlot.InstanceIndex = Math.Clamp(_activeSlot.InstanceIndex + delta, 0, _activeSlot.Series.Instances.Count - 1);
+        _activeSlot.InstanceIndex = Math.Clamp(_activeSlot.InstanceIndex + delta, 0, GetSeriesTotalCount(_activeSlot.Series) - 1);
+        RequestSlotPriority(_activeSlot, Math.Sign(delta));
         LoadSlot(_activeSlot);
         UpdateStatus();
     }
@@ -297,7 +330,7 @@ public partial class StudyViewerWindow : Window
         ThumbnailStripPanel.Children.Clear();
 
         List<SeriesRecord> seriesList = _context.StudyDetails.Series
-            .Where(series => series.Instances.Count > 0)
+            .Where(series => GetSeriesTotalCount(series) > 0)
             .OrderBy(series => series.SeriesNumber)
             .ThenBy(series => series.SeriesDescription)
             .ToList();
@@ -312,7 +345,8 @@ public partial class StudyViewerWindow : Window
         {
             SeriesRecord series = seriesList[index];
             int representativeIndex = GetRepresentativeInstanceIndex(series);
-            InstanceRecord instance = series.Instances[representativeIndex];
+            InstanceRecord instance = series.Instances[Math.Clamp(representativeIndex, 0, series.Instances.Count - 1)];
+            InstanceRecord? localRepresentative = GetBestLocalRepresentativeInstance(series);
             bool isActiveSeries = activeSeries is not null && string.Equals(activeSeries.SeriesInstanceUid, series.SeriesInstanceUid, StringComparison.Ordinal);
             bool isSecondaryCaptureSeries = IsSecondaryCaptureSeries(series, instance);
 
@@ -338,11 +372,18 @@ public partial class StudyViewerWindow : Window
                 ShowOverlay = false,
                 IsHitTestVisible = false,
             };
-            thumbPanel.LoadFile(instance.FilePath);
+            if (localRepresentative is not null)
+            {
+                thumbPanel.LoadFile(localRepresentative.FilePath);
+            }
+            else
+            {
+                RequestSeriesPriority(series, representativeIndex);
+            }
 
             var label = new TextBlock
             {
-                Text = $"S{Math.Max(series.SeriesNumber, index + 1)}",
+                Text = $"S{Math.Max(series.SeriesNumber, index + 1)}  {GetSeriesLoadedCount(series)}/{GetSeriesTotalCount(series)}",
                 Foreground = Brushes.White,
                 HorizontalAlignment = HorizontalAlignment.Center,
                 Margin = new Thickness(0, 4, 0, 0),
@@ -400,25 +441,27 @@ public partial class StudyViewerWindow : Window
 
     private void JumpToSeries(SeriesRecord series)
     {
-        if (_activeSlot is null || series.Instances.Count == 0)
+        if (_activeSlot is null || GetSeriesTotalCount(series) == 0)
         {
             return;
         }
 
         _activeSlot.Series = series;
         _activeSlot.InstanceIndex = GetRepresentativeInstanceIndex(series);
+        RequestSeriesPriority(series, _activeSlot.InstanceIndex);
         LoadSlot(_activeSlot);
         UpdateStatus();
     }
 
     private static int GetRepresentativeInstanceIndex(SeriesRecord series)
     {
-        if (series.Instances.Count == 0)
+        int total = GetSeriesTotalCount(series);
+        if (total == 0)
         {
             return 0;
         }
 
-        return series.Instances.Count / 2;
+        return total / 2;
     }
 
     private void OnThumbnailPointerPressed(SeriesRecord series, Border border, PointerPressedEventArgs e)
@@ -429,7 +472,7 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
-        border.Tag = new PendingThumbnailDrag(series, e.GetPosition(border));
+        border.Tag = new PendingThumbnailDrag(series, e.GetPosition(border), GetBestThumbnailPath(series));
     }
 
     private void OnThumbnailPointerReleased(SeriesRecord series, Border border, PointerReleasedEventArgs e)
@@ -508,6 +551,7 @@ public partial class StudyViewerWindow : Window
         slot.Series = series;
         slot.InstanceIndex = GetRepresentativeInstanceIndex(series);
         slot.ViewState = null;
+        RequestSeriesPriority(series, slot.InstanceIndex);
         LoadSlot(slot);
         UpdateStatus();
     }
@@ -576,7 +620,10 @@ public partial class StudyViewerWindow : Window
             ShowOverlay = false,
             IsHitTestVisible = false,
         };
-        thumbPanel.LoadFile(thumbnailPath);
+        if (!string.IsNullOrWhiteSpace(thumbnailPath) && File.Exists(thumbnailPath))
+        {
+            thumbPanel.LoadFile(thumbnailPath);
+        }
 
         var label = new TextBlock
         {
@@ -756,6 +803,11 @@ public partial class StudyViewerWindow : Window
 
     private DicomSpatialMetadata? GetSpatialMetadata(InstanceRecord instance)
     {
+        if (!IsLocalInstance(instance))
+        {
+            return null;
+        }
+
         if (_spatialMetadataCache.TryGetValue(instance.FilePath, out DicomSpatialMetadata? cached))
         {
             return cached;
@@ -806,8 +858,120 @@ public partial class StudyViewerWindow : Window
             return $"{toolText}   {measurementText}   {cursorText}";
         }
 
-        return $"{slot.Series.Modality}   Series {slot.Series.SeriesNumber}   Image {slot.InstanceIndex + 1}/{slot.Series.Instances.Count}   {toolText}   {measurementText}   {cursorText}";
+        int total = GetSeriesTotalCount(slot.Series);
+        int loaded = GetSeriesLoadedCount(slot.Series);
+        bool currentAvailable = slot.Series.Instances.Count > 0
+            && slot.InstanceIndex >= 0
+            && slot.InstanceIndex < slot.Series.Instances.Count
+            && IsLocalInstance(slot.Series.Instances[slot.InstanceIndex]);
+        string retrievalText = _remoteRetrievalSession is null
+            ? string.Empty
+            : currentAvailable
+                ? $"   Loaded {loaded}/{total}"
+                : $"   Retrieving image {slot.InstanceIndex + 1}... ({loaded}/{total} local)";
+
+        return $"{slot.Series.Modality}   Series {slot.Series.SeriesNumber}   Image {slot.InstanceIndex + 1}/{total}   {toolText}   {measurementText}{retrievalText}   {cursorText}";
     }
+
+    private void RequestSlotPriority(ViewportSlot? slot, int direction = 0)
+    {
+        if (slot?.Series is null || _remoteRetrievalSession is null)
+        {
+            return;
+        }
+
+        _ = _remoteRetrievalSession.PrioritizeSeriesAsync(slot.Series.SeriesInstanceUid, slot.InstanceIndex, 6, direction);
+        _ = _remoteRetrievalSession.PrioritizeAdjacentSeriesAsync(slot.Series.SeriesInstanceUid, 1);
+    }
+
+    private void RequestSeriesPriority(SeriesRecord series, int focusIndex, int direction = 0)
+    {
+        if (_remoteRetrievalSession is null)
+        {
+            return;
+        }
+
+        _ = _remoteRetrievalSession.PrioritizeSeriesAsync(series.SeriesInstanceUid, focusIndex, 6, direction);
+        _ = _remoteRetrievalSession.PrioritizeAdjacentSeriesAsync(series.SeriesInstanceUid, 1);
+    }
+
+    private void OnRemoteStudyChanged()
+    {
+        Dispatcher.UIThread.Post(RefreshRemoteStudyState);
+    }
+
+    private void RefreshRemoteStudyState()
+    {
+        foreach (ViewportSlot slot in _slots)
+        {
+            if (slot.Series is null)
+            {
+                continue;
+            }
+
+            slot.Panel.StackItemCount = GetSeriesTotalCount(slot.Series);
+            if (slot.Series.Instances.Count == 0)
+            {
+                slot.Panel.ClearImage();
+                continue;
+            }
+
+            slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, GetSeriesTotalCount(slot.Series) - 1);
+            InstanceRecord current = slot.Series.Instances[Math.Clamp(slot.InstanceIndex, 0, slot.Series.Instances.Count - 1)];
+            if (!IsLocalInstance(current))
+            {
+                slot.Panel.ClearImage();
+                continue;
+            }
+
+            if (!string.Equals(slot.Panel.FilePath, current.FilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                LoadSlot(slot);
+            }
+        }
+
+        RefreshThumbnailStrip(_activeSlot?.Series);
+        UpdateStatus();
+    }
+
+    private void OnViewerClosed(object? sender, EventArgs e)
+    {
+        if (_remoteRetrievalSession is not null)
+        {
+            _remoteRetrievalSession.StudyChanged -= OnRemoteStudyChanged;
+        }
+
+        Closed -= OnViewerClosed;
+    }
+
+    private static int GetSeriesTotalCount(SeriesRecord series) => Math.Max(series.InstanceCount, series.Instances.Count);
+
+    private static int GetSeriesLoadedCount(SeriesRecord series) => series.Instances.Count(IsLocalInstance);
+
+    private static bool IsLocalInstance(InstanceRecord instance) =>
+        !string.IsNullOrWhiteSpace(instance.FilePath) && File.Exists(instance.FilePath);
+
+    private static InstanceRecord? GetBestLocalRepresentativeInstance(SeriesRecord series)
+    {
+        if (series.Instances.Count == 0)
+        {
+            return null;
+        }
+
+        int targetIndex = GetRepresentativeInstanceIndex(series);
+        List<InstanceRecord> locals = series.Instances.Where(IsLocalInstance).ToList();
+        if (locals.Count == 0)
+        {
+            return null;
+        }
+
+        return locals
+            .OrderBy(instance => Math.Abs(instance.InstanceNumber - targetIndex))
+            .ThenBy(instance => instance.InstanceNumber)
+            .FirstOrDefault();
+    }
+
+    private static string GetBestThumbnailPath(SeriesRecord series) => GetBestLocalRepresentativeInstance(series)?.FilePath ?? string.Empty;
 
     private MouseWheelMode GetMouseWheelModeForAction() =>
         _actionToolbarMode == ActionToolbarMode.ScrollStack ? MouseWheelMode.StackScroll : MouseWheelMode.Zoom;
@@ -1102,13 +1266,11 @@ public partial class StudyViewerWindow : Window
     }
 
     private sealed record SliceProjection(int InstanceIndex, Point ImagePoint, double DistanceToPlane, bool ContainsImagePoint);
-    private sealed class PendingThumbnailDrag(SeriesRecord series, Point startPoint)
+    private sealed class PendingThumbnailDrag(SeriesRecord series, Point startPoint, string thumbnailPath)
     {
         public SeriesRecord Series { get; } = series;
         public Point StartPoint { get; } = startPoint;
-        public string ThumbnailPath { get; } = series.Instances.Count > 0
-            ? series.Instances[GetRepresentativeInstanceIndex(series)].FilePath
-            : string.Empty;
+        public string ThumbnailPath { get; } = thumbnailPath;
         public bool IsStarted { get; set; }
     }
 }

@@ -16,6 +16,10 @@ public partial class App : Application
     public DicomFilesystemScanService FilesystemScanService { get; private set; } = null!;
     public DicomPseudonymizationService PseudonymizationService { get; private set; } = null!;
     public DicomStudyDeletionService StudyDeletionService { get; private set; } = null!;
+    public WindowPlacementService WindowPlacementService { get; private set; } = null!;
+    public NetworkSettingsService NetworkSettingsService { get; private set; } = null!;
+    public StorageScpService StorageScpService { get; private set; } = null!;
+    public DicomRemoteStudyBrowserService RemoteStudyBrowserService { get; private set; } = null!;
 
     public override void Initialize()
     {
@@ -34,6 +38,12 @@ public partial class App : Application
         FilesystemScanService = new DicomFilesystemScanService();
         PseudonymizationService = new DicomPseudonymizationService(Repository);
         StudyDeletionService = new DicomStudyDeletionService(Paths, Repository);
+        WindowPlacementService = new WindowPlacementService(Path.Combine(Paths.ApplicationDirectory, "window-placement.json"));
+        NetworkSettingsService = new NetworkSettingsService(Path.Combine(Paths.ApplicationDirectory, "network-settings.json"), Paths.ApplicationDirectory);
+        StorageScpService = new StorageScpService(ImportService);
+        RemoteStudyBrowserService = new DicomRemoteStudyBrowserService(NetworkSettingsService, Repository);
+        StorageScpService.ApplySettingsAsync(NetworkSettingsService.CurrentSettings).GetAwaiter().GetResult();
+        NetworkSettingsService.SettingsChanged += settings => StorageScpService.ApplySettingsAsync(settings).GetAwaiter().GetResult();
     }
 
     public override void OnFrameworkInitializationCompleted()

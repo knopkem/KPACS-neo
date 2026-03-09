@@ -23,6 +23,7 @@ public sealed class ImageboxBootstrap
 
         return new ImageboxPaths
         {
+            ApplicationDirectory = _applicationRoot,
             RootDirectory = imageboxRoot,
             DatabasePath = databasePath,
             StudiesDirectory = studiesDirectory,

@@ -1,16 +1,26 @@
 using System.Collections.ObjectModel;
+using System.Text.Json;
+using Avalonia.Media;
 using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Platform.Storage;
+using Avalonia.Threading;
 using Avalonia.VisualTree;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Services;
+using KPACS.Viewer.Windows;
 
 namespace KPACS.Viewer;
 
 public partial class MainWindow : Window
 {
+    private const double DefaultPatientPaneWidth = 320;
+    private const double MinPatientPaneWidth = 240;
+    private const double MaxPatientPaneWidth = 520;
+    private const double DefaultSeriesPaneHeight = 190;
+    private const double MinSeriesPaneHeight = 120;
+    private const double MaxSeriesPaneHeight = 420;
     private readonly App _app;
     private bool _uiReady;
     private bool _showPatientPanel = true;
@@ -18,24 +28,39 @@ public partial class MainWindow : Window
     private List<StudyListItem> _allStudies = [];
     private List<StudyListItem> _filesystemScannedStudies = [];
     private Dictionary<string, StudyDetails> _filesystemPreviewDetails = new(StringComparer.Ordinal);
+    private Dictionary<string, RemoteStudySearchResult> _networkSearchResults = new(StringComparer.Ordinal);
+    private Dictionary<string, StudyDetails> _networkPreviewDetails = new(StringComparer.Ordinal);
+    private Dictionary<string, List<RemoteSeriesPreview>> _networkSeriesPreviews = new(StringComparer.Ordinal);
     private readonly ObservableCollection<StudyListItem> _studies = [];
     private readonly ObservableCollection<PatientRow> _patients = [];
     private readonly ObservableCollection<SeriesGridRow> _seriesRows = [];
     private readonly ObservableCollection<FilesystemFolderNode> _filesystemRoots = [];
+    private readonly ObservableCollection<ToastNotificationItem> _toastNotifications = [];
+    private readonly string _browserLayoutSettingsPath;
     private string? _filesystemRootPath;
     private string? _lastScannedFolderPath;
     private bool _lastScanPreferDicomDir;
+    private string? _lastStorageScpToastMessage;
+    private double _patientPaneWidth = DefaultPatientPaneWidth;
+    private double _seriesPaneHeight = DefaultSeriesPaneHeight;
 
     public MainWindow(App app)
     {
         _app = app;
+        _browserLayoutSettingsPath = Path.Combine(_app.Paths.ApplicationDirectory, "study-browser-layout.json");
         InitializeComponent();
+        _app.WindowPlacementService.Register(this, "StudyBrowserWindow");
+        LoadBrowserLayoutSettings();
 
         PatientGrid.ItemsSource = _patients;
         StudyGrid.ItemsSource = _studies;
         SeriesGrid.ItemsSource = _seriesRows;
         FilesystemTreeView.ItemsSource = _filesystemRoots;
+        ToastItemsControl.ItemsSource = _toastNotifications;
         _uiReady = true;
+        _app.StorageScpService.StatusChanged += OnStorageScpStatusChanged;
+        _app.NetworkSettingsService.SettingsChanged += OnNetworkSettingsChanged;
+        Closed += OnMainWindowClosed;
         Opened += async (_, _) => await InitializeAsync();
     }
 
@@ -43,11 +68,12 @@ public partial class MainWindow : Window
     {
         BrowserModeTabs.SelectedIndex = 1;
         _browserMode = BrowserMode.Database;
+        UpdateNetworkSetupSummary();
         UpdateModeUi();
         await RefreshCurrentModeAsync();
     }
 
-    private async Task RefreshCurrentModeAsync(string? statusOverride = null, bool applySearchFilters = true)
+    private async Task RefreshCurrentModeAsync(string? statusOverride = null, bool applySearchFilters = true, bool userInitiated = false)
     {
         switch (_browserMode)
         {
@@ -58,7 +84,7 @@ public partial class MainWindow : Window
                 LoadFilesystemPreviewStudies(statusOverride, applySearchFilters);
                 break;
             case BrowserMode.Network:
-                ClearStudyResults("Network mode", statusOverride ?? "Network mode is not implemented yet.");
+                await LoadNetworkStudiesAsync(statusOverride, userInitiated);
                 break;
             case BrowserMode.Email:
                 ClearStudyResults("Email mode", statusOverride ?? "Email mode is not implemented yet.");
@@ -101,9 +127,90 @@ public partial class MainWindow : Window
                 : "Filesystem scan loaded. Fresh scan results are shown without applying the search filter yet.");
     }
 
+    private async Task LoadNetworkStudiesAsync(string? statusOverride, bool userInitiated)
+    {
+        StudyQuery query = BuildQuery();
+        if (IsEmptyNetworkQuery(query))
+        {
+            _networkSearchResults.Clear();
+            _networkPreviewDetails.Clear();
+            _networkSeriesPreviews.Clear();
+            _allStudies = [];
+            _studies.Clear();
+            _patients.Clear();
+            _seriesRows.Clear();
+            PatientGrid.SelectedItem = null;
+            StudyGrid.SelectedItem = null;
+
+            RemoteArchiveEndpoint? configuredArchive = _app.NetworkSettingsService.CurrentSettings.GetSelectedArchive();
+            DatabaseStatsText.Text = configuredArchive is null
+                ? "No remote archive configured."
+                : $"Remote archive {configuredArchive.Name} is configured. Enter at least one filter before searching.";
+            StudySummaryText.Text = "Enter at least one search criterion before querying the remote archive.";
+            UpdateNetworkSetupSummary();
+            SetStatus(statusOverride ?? "Network search is idle. Enter at least one filter before querying the remote archive.");
+
+            if (userInitiated)
+            {
+                ShowToast("Remote query blocked: enter at least one filter before searching the archive.", ToastSeverity.Warning, TimeSpan.FromSeconds(7));
+            }
+
+            return;
+        }
+
+        RemoteArchiveEndpoint? archive = _app.NetworkSettingsService.CurrentSettings.GetSelectedArchive();
+        SetStatus(statusOverride ?? (archive is null
+            ? "No remote archive configured."
+            : $"Searching remote archive {archive.Name}..."));
+        if (archive is not null)
+        {
+            ShowToast($"Searching remote archive {archive.Name}.", ToastSeverity.Info);
+        }
+
+        try
+        {
+            List<RemoteStudySearchResult> results = await _app.RemoteStudyBrowserService.SearchStudiesAsync(query);
+            _networkSearchResults = results.ToDictionary(result => result.Study.StudyInstanceUid, StringComparer.Ordinal);
+
+            HashSet<string> availableStudyUids = [.. _networkSearchResults.Keys];
+            _networkPreviewDetails = _networkPreviewDetails
+                .Where(pair => availableStudyUids.Contains(pair.Key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+            _networkSeriesPreviews = _networkSeriesPreviews
+                .Where(pair => availableStudyUids.Contains(pair.Key))
+                .ToDictionary(pair => pair.Key, pair => pair.Value, StringComparer.Ordinal);
+
+            _allStudies = results.Select(result => result.Study).ToList();
+            BuildPatientRows();
+            ApplyPatientFilter();
+
+            DatabaseStatsText.Text = archive is null
+                ? "No remote archive configured."
+                : $"{_allStudies.Count} remote studies from {archive.Name}. Storage SCP: {_app.StorageScpService.LastStatus}";
+            UpdateNetworkSetupSummary();
+            SetStatus(statusOverride ?? (_allStudies.Count == 0
+                ? "No remote studies matched the current query."
+                : $"Loaded {_allStudies.Count} studies from remote archive {archive?.Name}."));
+            ShowToast(_allStudies.Count == 0
+                ? $"No remote studies matched on {archive?.Name ?? "the configured archive"}."
+                : $"Found {_allStudies.Count} remote studies on {archive?.Name ?? "the archive"}.", _allStudies.Count == 0 ? ToastSeverity.Warning : ToastSeverity.Success);
+        }
+        catch (Exception ex)
+        {
+            _networkSearchResults.Clear();
+            _networkPreviewDetails.Clear();
+            _networkSeriesPreviews.Clear();
+            ClearStudyResults("Network mode", $"Remote query failed: {ex.Message}");
+            ShowToast($"Remote query failed: {ex.Message}", ToastSeverity.Error, TimeSpan.FromSeconds(8));
+        }
+    }
+
     private void ClearStudyResults(string statsText, string statusText)
     {
         _allStudies = [];
+        _networkSearchResults.Clear();
+        _networkPreviewDetails.Clear();
+        _networkSeriesPreviews.Clear();
         _studies.Clear();
         _patients.Clear();
         _seriesRows.Clear();
@@ -111,7 +218,7 @@ public partial class MainWindow : Window
         StudyGrid.SelectedItem = null;
         DatabaseStatsText.Text = statsText;
         StudySummaryText.Text = "No studies available in the current mode.";
-        StatusText.Text = statusText;
+        SetStatus(statusText);
     }
 
     private StudyQuery BuildQuery()
@@ -171,7 +278,7 @@ public partial class MainWindow : Window
 
     private void BuildPatientRows()
     {
-        if (_browserMode != BrowserMode.Database || !_showPatientPanel)
+        if (_browserMode is BrowserMode.Filesystem or BrowserMode.Email || !_showPatientPanel)
         {
             _patients.Clear();
             PatientGrid.SelectedItem = null;
@@ -217,7 +324,7 @@ public partial class MainWindow : Window
 
     private void ApplyPatientFilter()
     {
-        string? selectedKey = _browserMode == BrowserMode.Database && _showPatientPanel
+        string? selectedKey = ((_browserMode == BrowserMode.Database) || (_browserMode == BrowserMode.Network)) && _showPatientPanel
             ? (PatientGrid.SelectedItem as PatientRow)?.SelectionKey
             : null;
 
@@ -225,7 +332,7 @@ public partial class MainWindow : Window
             ? _allStudies
             : _allStudies.Where(study => $"{study.PatientId}\u001F{study.PatientName}" == selectedKey).ToList();
 
-        string? previousSelectionId = (StudyGrid.SelectedItem as StudyListItem)?.SelectionId;
+        List<string> previousSelectionIds = GetSelectedStudies().Select(study => study.SelectionId).ToList();
 
         _studies.Clear();
         foreach (StudyListItem study in visibleStudies.OrderByDescending(item => item.StudyDate).ThenBy(item => item.PatientName))
@@ -233,14 +340,16 @@ public partial class MainWindow : Window
             _studies.Add(study);
         }
 
-        StudyGrid.SelectedItem = previousSelectionId is not null
-            ? _studies.FirstOrDefault(study => study.SelectionId == previousSelectionId)
-            : _studies.FirstOrDefault();
+        RestoreStudySelection(previousSelectionIds);
 
         StudySummaryText.Text = _studies.Count == 0
             ? "No studies match the current selection."
             : _browserMode == BrowserMode.Filesystem
                 ? $"{_studies.Count} preview studies match the current filter. Double-click to import and open."
+                : _browserMode == BrowserMode.Network
+                    ? _showPatientPanel
+                        ? $"{_studies.Count} remote studies for the selected patient. Double-click to retrieve and open."
+                        : $"{_studies.Count} remote studies match the current filter. Double-click to retrieve and open."
                 : _showPatientPanel
                     ? $"{_studies.Count} studies for the selected patient. Double-click a study to open it."
                     : $"{_studies.Count} studies match the current filter. Double-click a study to open it.";
@@ -252,24 +361,40 @@ public partial class MainWindow : Window
         {
             BrowserMode.Database => await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey),
             BrowserMode.Filesystem => _filesystemPreviewDetails.GetValueOrDefault(selectedStudy.StudyInstanceUid),
+            BrowserMode.Network => await EnsureNetworkPreviewLoadedAsync(selectedStudy),
             _ => null,
         };
     }
 
     private async Task LoadSelectedStudyDetailsAsync()
     {
-        if (StudyGrid.SelectedItem is not StudyListItem selectedStudy)
+        List<StudyListItem> selectedStudies = GetSelectedStudies();
+        if (selectedStudies.Count == 0)
         {
             _seriesRows.Clear();
             StudySummaryText.Text = "Select a study to see its series overview.";
+            UpdateStudyActionAvailability();
             return;
         }
+
+        if (selectedStudies.Count > 1)
+        {
+            _seriesRows.Clear();
+            int totalSeries = selectedStudies.Sum(study => study.SeriesCount);
+            int totalImages = selectedStudies.Sum(study => study.InstanceCount);
+            StudySummaryText.Text = $"{selectedStudies.Count} studies selected   {totalSeries} series / {totalImages} images   [multi-select]";
+            UpdateStudyActionAvailability();
+            return;
+        }
+
+        StudyListItem selectedStudy = selectedStudies[0];
 
         StudyDetails? details = await LoadStudyDetailsForSelectionAsync(selectedStudy);
         if (details is null)
         {
             _seriesRows.Clear();
             StudySummaryText.Text = "Selected study could not be loaded.";
+            UpdateStudyActionAvailability();
             return;
         }
 
@@ -281,97 +406,269 @@ public partial class MainWindow : Window
                 SeriesNumber = series.SeriesNumber,
                 Modality = series.Modality,
                 SeriesDescription = string.IsNullOrWhiteSpace(series.SeriesDescription) ? "(no description)" : series.SeriesDescription,
-                InstanceCount = series.Instances.Count,
+                InstanceCount = Math.Max(series.InstanceCount, series.Instances.Count),
                 FirstFileName = series.Instances.Count == 0 ? string.Empty : Path.GetFileName(series.Instances[0].FilePath),
             });
         }
 
-        string modeSuffix = _browserMode == BrowserMode.Filesystem ? "preview" : "local";
+        string modeSuffix = _browserMode switch
+        {
+            BrowserMode.Filesystem => "preview",
+            BrowserMode.Network => "remote",
+            _ => "local",
+        };
         StudySummaryText.Text = $"{selectedStudy.PatientName}   {selectedStudy.DisplayPatientBirthDate}   {selectedStudy.DisplayStudyDate}   {selectedStudy.Modalities}   {details.Series.Count} series / {selectedStudy.InstanceCount} images   [{modeSuffix}]";
+        UpdateStudyActionAvailability();
     }
 
     private async Task OpenSelectedStudyAsync()
     {
-        if (StudyGrid.SelectedItem is not StudyListItem selectedStudy)
+        List<StudyListItem> selectedStudies = GetSelectedStudies();
+        if (selectedStudies.Count == 0)
         {
-            StatusText.Text = "Select a study first.";
+            SetStatus("Select a study first.");
+            ShowToast("Select a study first.", ToastSeverity.Warning);
             return;
         }
 
+        if (selectedStudies.Count > 1)
+        {
+            SetStatus("Viewer open is only available for a single selected study.");
+            ShowToast("Viewer open is only available for a single selected study.", ToastSeverity.Warning);
+            return;
+        }
+
+        StudyListItem selectedStudy = selectedStudies[0];
+
+        RemoteStudyRetrievalSession? retrievalSession = null;
         StudyDetails? details = _browserMode switch
         {
             BrowserMode.Database => await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey),
             BrowserMode.Filesystem => await ImportPreviewStudyAsync(selectedStudy),
-            BrowserMode.Network => null,
+            BrowserMode.Network => await RetrieveNetworkStudyAsync(selectedStudy),
             BrowserMode.Email => null,
             _ => null,
         };
 
         if (details is null)
         {
-            if (_browserMode is BrowserMode.Network or BrowserMode.Email)
+            if (_browserMode == BrowserMode.Network)
             {
-                StatusText.Text = "This browser mode does not provide studies yet.";
+                StatusText.Text = "Remote study retrieval did not provide viewable data yet.";
+                ShowToast("Remote study retrieval did not provide viewable data yet.", ToastSeverity.Warning);
+            }
+            else if (_browserMode == BrowserMode.Email)
+            {
+                SetStatus("This browser mode does not provide studies yet.");
             }
             else if (_browserMode == BrowserMode.Database)
             {
-                StatusText.Text = "Selected study could not be loaded from SQLite.";
+                SetStatus("Selected study could not be loaded from SQLite.");
+                ShowToast("Selected study could not be loaded from SQLite.", ToastSeverity.Error);
             }
             return;
+        }
+
+        if (_browserMode == BrowserMode.Network)
+        {
+            if (!_networkSearchResults.TryGetValue(selectedStudy.StudyInstanceUid, out RemoteStudySearchResult? remoteStudy))
+            {
+                SetStatus("Remote study metadata is no longer available. Run the query again.");
+                ShowToast("Remote study metadata is no longer available. Run the query again.", ToastSeverity.Warning);
+                return;
+            }
+
+            if (!_networkSeriesPreviews.TryGetValue(selectedStudy.StudyInstanceUid, out List<RemoteSeriesPreview>? seriesPreviews))
+            {
+                await EnsureNetworkPreviewLoadedAsync(selectedStudy);
+                _networkSeriesPreviews.TryGetValue(selectedStudy.StudyInstanceUid, out seriesPreviews);
+            }
+
+            retrievalSession = await _app.RemoteStudyBrowserService.CreateRetrievalSessionAsync(
+                remoteStudy,
+                details,
+                seriesPreviews ?? [],
+                CancellationToken.None);
+            retrievalSession.StatusChanged += OnRemoteRetrievalStatusChanged;
+            SetStatus($"Opening remote study {selectedStudy.PatientName} with progressive retrieval...");
+            ShowToast($"Starting remote download for {selectedStudy.PatientName}. The viewer opens as soon as the first images arrive.", ToastSeverity.Info, TimeSpan.FromSeconds(6));
+            await retrievalSession.WarmupForViewerOpenAsync();
+            if (retrievalSession.IsFaulted && !HasAnyLocalInstances(retrievalSession.StudyDetails))
+            {
+                string failureMessage = retrievalSession.FaultMessage ?? "Remote retrieval failed before any images were received.";
+                SetStatus(failureMessage);
+                ShowToast(failureMessage, ToastSeverity.Error, TimeSpan.FromSeconds(8));
+                return;
+            }
+
+            details = retrievalSession.StudyDetails;
+            _networkPreviewDetails[selectedStudy.StudyInstanceUid] = details;
+            selectedStudy.SeriesCount = details.Series.Count;
+            selectedStudy.InstanceCount = details.Series.Sum(series => Math.Max(series.InstanceCount, series.Instances.Count));
+            if (!retrievalSession.IsFaulted)
+            {
+                ShowToast($"Remote study {selectedStudy.PatientName} is opening. Remaining series continue downloading in the background.", ToastSeverity.Success, TimeSpan.FromSeconds(6));
+            }
         }
 
         var viewer = new StudyViewerWindow(new ViewerStudyContext
         {
             StudyDetails = details,
+            RemoteRetrievalSession = retrievalSession,
             LayoutRows = 1,
             LayoutColumns = 1,
         });
-        await viewer.ShowDialog(this);
+        viewer.Show(this);
+    }
+
+    private async Task<StudyDetails?> EnsureNetworkPreviewLoadedAsync(StudyListItem selectedStudy)
+    {
+        if (_networkPreviewDetails.TryGetValue(selectedStudy.StudyInstanceUid, out StudyDetails? cachedDetails))
+        {
+            return cachedDetails;
+        }
+
+        if (!_networkSearchResults.TryGetValue(selectedStudy.StudyInstanceUid, out RemoteStudySearchResult? remoteStudy))
+        {
+            return null;
+        }
+
+        try
+        {
+            SetStatus($"Loading remote series for {selectedStudy.PatientName}...");
+            ShowToast($"Loading remote series preview for {selectedStudy.PatientName}.", ToastSeverity.Info);
+            (StudyDetails details, List<RemoteSeriesPreview> seriesPreviews) = await _app.RemoteStudyBrowserService.LoadStudyPreviewAsync(remoteStudy);
+            _networkPreviewDetails[selectedStudy.StudyInstanceUid] = details;
+            _networkSeriesPreviews[selectedStudy.StudyInstanceUid] = seriesPreviews;
+            selectedStudy.SeriesCount = details.Series.Count;
+            selectedStudy.InstanceCount = details.Series.Sum(series => Math.Max(series.InstanceCount, series.Instances.Count));
+            SetStatus($"Loaded remote series preview for {selectedStudy.PatientName}.");
+            ShowToast($"Loaded {details.Series.Count} remote series for {selectedStudy.PatientName}.", ToastSeverity.Success);
+            return details;
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Remote series preview failed: {ex.Message}");
+            ShowToast($"Remote series preview failed: {ex.Message}", ToastSeverity.Error, TimeSpan.FromSeconds(8));
+            return null;
+        }
+    }
+
+    private async Task<StudyDetails?> RetrieveNetworkStudyAsync(StudyListItem selectedStudy)
+    {
+        if (!_networkSearchResults.TryGetValue(selectedStudy.StudyInstanceUid, out RemoteStudySearchResult? remoteStudy))
+        {
+            SetStatus("Remote study metadata is no longer available. Run the query again.");
+            ShowToast("Remote study metadata is no longer available. Run the query again.", ToastSeverity.Warning);
+            return null;
+        }
+
+        if (!_networkSeriesPreviews.TryGetValue(selectedStudy.StudyInstanceUid, out List<RemoteSeriesPreview>? seriesPreviews))
+        {
+            await EnsureNetworkPreviewLoadedAsync(selectedStudy);
+            _networkSeriesPreviews.TryGetValue(selectedStudy.StudyInstanceUid, out seriesPreviews);
+        }
+
+        StudyDetails? details = _networkPreviewDetails.GetValueOrDefault(selectedStudy.StudyInstanceUid);
+        if (details is not null)
+        {
+            _networkPreviewDetails[selectedStudy.StudyInstanceUid] = details;
+            selectedStudy.SeriesCount = details.Series.Count;
+            selectedStudy.InstanceCount = details.Series.Sum(series => Math.Max(series.InstanceCount, series.Instances.Count));
+        }
+
+        return details;
     }
 
     private async Task<StudyDetails?> ImportPreviewStudyAsync(StudyListItem selectedStudy)
     {
         if (!_filesystemPreviewDetails.TryGetValue(selectedStudy.StudyInstanceUid, out StudyDetails? previewDetails))
         {
-            StatusText.Text = "Preview study data is no longer available. Please scan the folder again.";
+            SetStatus("Preview study data is no longer available. Please scan the folder again.");
+            ShowToast("Preview study data is no longer available. Please scan the folder again.", ToastSeverity.Warning);
             return null;
         }
 
+        ShowToast($"Importing preview study {selectedStudy.PatientName} into the local database...", ToastSeverity.Info, TimeSpan.FromSeconds(5));
         ImportResult result = await _app.ImportService.ImportStudyAsync(previewDetails);
         string summary = string.Join("  ", result.Messages.Where(message => !string.IsNullOrWhiteSpace(message)));
         StudyDetails? importedDetails = await _app.Repository.GetStudyDetailsByStudyInstanceUidAsync(selectedStudy.StudyInstanceUid);
         if (importedDetails is null)
         {
-            StatusText.Text = string.IsNullOrWhiteSpace(summary)
+            SetStatus(string.IsNullOrWhiteSpace(summary)
                 ? "Study import finished, but the imported study could not be loaded from SQLite."
-                : summary;
+                : summary);
+            ShowToast("Study import finished, but the imported study could not be loaded from SQLite.", ToastSeverity.Warning, TimeSpan.FromSeconds(7));
             return null;
         }
 
-        StatusText.Text = string.IsNullOrWhiteSpace(summary)
+        SetStatus(string.IsNullOrWhiteSpace(summary)
             ? $"Imported study {selectedStudy.PatientName} into the local database."
-            : summary;
+            : summary);
+        ShowToast($"Imported study {selectedStudy.PatientName} into the local database.", ToastSeverity.Success);
         return importedDetails;
     }
 
-    private async void OnSearchClick(object? sender, RoutedEventArgs e) => await RefreshCurrentModeAsync();
+    private async void OnSearchClick(object? sender, RoutedEventArgs e) => await RefreshCurrentModeAsync(userInitiated: true);
 
-    private async void OnRefreshClick(object? sender, RoutedEventArgs e)
+    private async void OnConfigClick(object? sender, RoutedEventArgs e)
     {
-        if (_browserMode == BrowserMode.Filesystem && !string.IsNullOrWhiteSpace(_lastScannedFolderPath))
+        if (_browserMode != BrowserMode.Network)
         {
-            await ScanFolderAsync(_lastScannedFolderPath, _lastScanPreferDicomDir);
+            StatusText.Text = "Configuration is currently only implemented for Network mode.";
             return;
         }
 
-        await RefreshCurrentModeAsync();
+        var window = new NetworkSettingsWindow(_app.NetworkSettingsService.CurrentSettings);
+        DicomNetworkSettings? updatedSettings = await window.ShowDialog<DicomNetworkSettings?>(this);
+        if (updatedSettings is null)
+        {
+            return;
+        }
+
+        await _app.NetworkSettingsService.SaveAsync(updatedSettings);
+        UpdateNetworkSetupSummary();
+        await RefreshCurrentModeAsync($"Saved network configuration. Storage SCP restarted on port {updatedSettings.LocalPort}.");
+    }
+
+    private async void OnInfoClick(object? sender, RoutedEventArgs e)
+    {
+        if (_browserMode != BrowserMode.Network)
+        {
+            StatusText.Text = _browserMode switch
+            {
+                BrowserMode.Database => "Database mode uses the local SQLite-backed K-PACS imagebox.",
+                BrowserMode.Filesystem => "Filesystem mode scans folders or DICOMDIR media before import.",
+                _ => "No additional information is available for this mode yet.",
+            };
+            return;
+        }
+
+        DicomNetworkSettings settings = _app.NetworkSettingsService.CurrentSettings;
+        RemoteArchiveEndpoint? archive = settings.GetSelectedArchive();
+        string info = $"Local AE: {settings.LocalAeTitle}\n"
+            + $"Local port: {settings.LocalPort}\n"
+            + $"Inbox: {settings.InboxDirectory}\n"
+            + $"Storage SCP: {_app.StorageScpService.LastStatus}\n\n"
+            + (archive is null
+                ? "No remote archive configured."
+                : $"Archive: {archive.Name}\nHost: {archive.Host}\nPort: {archive.Port}\nRemote AE: {archive.RemoteAeTitle}");
+
+        var infoWindow = new NetworkInfoWindow("Network Information", info);
+        await infoWindow.ShowDialog(this);
     }
 
     private async void OnTogglePatientPanelClick(object? sender, RoutedEventArgs e)
     {
+        if (_showPatientPanel)
+        {
+            CapturePatientPaneWidth();
+        }
+
         _showPatientPanel = !_showPatientPanel;
+        SaveBrowserLayoutSettings();
         UpdateModeUi();
-        await RefreshCurrentModeAsync();
+        await RefreshCurrentModeAsync(userInitiated: true);
     }
 
     private async void OnTodayClick(object? sender, RoutedEventArgs e)
@@ -379,7 +676,7 @@ public partial class MainWindow : Window
         string today = DateTime.Now.ToString("dd.MM.yyyy");
         FromDateBox.Text = today;
         ToDateBox.Text = today;
-        await RefreshCurrentModeAsync();
+        await RefreshCurrentModeAsync(userInitiated: true);
     }
 
     private async void OnYesterdayClick(object? sender, RoutedEventArgs e)
@@ -387,7 +684,7 @@ public partial class MainWindow : Window
         string yesterday = DateTime.Now.Date.AddDays(-1).ToString("dd.MM.yyyy");
         FromDateBox.Text = yesterday;
         ToDateBox.Text = yesterday;
-        await RefreshCurrentModeAsync();
+        await RefreshCurrentModeAsync(userInitiated: true);
     }
 
     private async void OnClearClick(object? sender, RoutedEventArgs e)
@@ -402,7 +699,7 @@ public partial class MainWindow : Window
         FromDateBox.Text = string.Empty;
         ToDateBox.Text = string.Empty;
         SetAllModalities(false);
-        await RefreshCurrentModeAsync();
+        await RefreshCurrentModeAsync(userInitiated: true);
     }
 
     private async void OnAllModalitiesClick(object? sender, RoutedEventArgs e)
@@ -438,11 +735,114 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void OnSendSelectedClick(object? sender, RoutedEventArgs e)
+    {
+        if (_browserMode != BrowserMode.Database)
+        {
+            SetStatus("Send is available for local studies in Database mode.");
+            ShowToast("Send is available for local studies in Database mode.", ToastSeverity.Warning);
+            return;
+        }
+
+        List<StudyListItem> selectedStudies = GetSelectedStudies();
+        if (selectedStudies.Count == 0)
+        {
+            SetStatus("Select at least one local study first.");
+            ShowToast("Select at least one local study first.", ToastSeverity.Warning);
+            return;
+        }
+
+        RemoteArchiveEndpoint? archive = _app.NetworkSettingsService.CurrentSettings.GetSelectedArchive();
+        if (archive is null)
+        {
+            SetStatus("No remote archive configured. Open Network configuration first.");
+            ShowToast("No remote archive configured. Open Network configuration first.", ToastSeverity.Warning, TimeSpan.FromSeconds(7));
+            return;
+        }
+
+        try
+        {
+            var studiesToSend = new List<(StudyListItem Study, StudyDetails Details, int LocalFiles)>();
+            foreach (StudyListItem selectedStudy in selectedStudies)
+            {
+                StudyDetails? studyDetails = await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey);
+                if (studyDetails is null)
+                {
+                    continue;
+                }
+
+                int localFiles = studyDetails.Series.Sum(series => series.Instances.Count(instance => !string.IsNullOrWhiteSpace(instance.FilePath) && File.Exists(instance.FilePath)));
+                if (localFiles > 0)
+                {
+                    studiesToSend.Add((selectedStudy, studyDetails, localFiles));
+                }
+            }
+
+            if (studiesToSend.Count == 0)
+            {
+                SetStatus("None of the selected studies has local DICOM files to send.");
+                ShowToast("None of the selected studies has local DICOM files to send.", ToastSeverity.Warning, TimeSpan.FromSeconds(7));
+                return;
+            }
+
+            int totalFiles = studiesToSend.Sum(item => item.LocalFiles);
+            int completedOverall = 0;
+            int successfulStudies = 0;
+
+            ShowToast($"Sending {studiesToSend.Count} local studies to archive {archive.Name} ({totalFiles} images).", ToastSeverity.Info, TimeSpan.FromSeconds(6));
+
+            foreach ((StudyListItem study, StudyDetails details, int localFiles) in studiesToSend)
+            {
+                int studyCompleted = 0;
+                var progress = new Progress<(int completed, int total)>(update =>
+                {
+                    studyCompleted = update.completed;
+                    SetStatus($"Sending {study.PatientName} to {archive.Name}: {completedOverall + update.completed}/{totalFiles} images sent...");
+                });
+
+                try
+                {
+                    bool success = await _app.RemoteStudyBrowserService.SendStudyAsync(details, progress, CancellationToken.None);
+                    completedOverall += Math.Max(studyCompleted, localFiles);
+                    if (success)
+                    {
+                        successfulStudies++;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    completedOverall += Math.Max(studyCompleted, localFiles);
+                    ShowToast($"Send failed for {study.PatientName}: {ex.Message}", ToastSeverity.Error, TimeSpan.FromSeconds(8));
+                }
+            }
+
+            if (successfulStudies == studiesToSend.Count)
+            {
+                string completionMessage = studiesToSend.Count == 1
+                    ? $"Sent study {studiesToSend[0].Study.PatientName} to {archive.Name}."
+                    : $"Sent {successfulStudies} studies to {archive.Name}.";
+                SetStatus(completionMessage);
+                ShowToast(completionMessage, ToastSeverity.Success, TimeSpan.FromSeconds(6));
+            }
+            else
+            {
+                string partialMessage = $"Sent {successfulStudies}/{studiesToSend.Count} selected studies to {archive.Name}.";
+                SetStatus(partialMessage);
+                ShowToast(partialMessage, ToastSeverity.Warning, TimeSpan.FromSeconds(7));
+            }
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Send failed: {ex.Message}");
+            ShowToast($"Send failed: {ex.Message}", ToastSeverity.Error, TimeSpan.FromSeconds(8));
+        }
+    }
+
     private async void OnBrowseFilesystemRootClick(object? sender, RoutedEventArgs e)
     {
         if (_browserMode != BrowserMode.Filesystem)
         {
-            StatusText.Text = "Browse is available in Filesystem mode.";
+            SetStatus("Browse is available in Filesystem mode.");
             return;
         }
 
@@ -473,12 +873,14 @@ public partial class MainWindow : Window
         FilesystemRootText.Text = $"Root: {path}";
         FilesystemHintText.IsVisible = false;
         FilesystemTreeView.IsVisible = true;
-        StatusText.Text = $"Loading filesystem tree: {path}";
+        SetStatus($"Loading filesystem tree: {path}");
+        ShowToast($"Loading filesystem tree for {path}.", ToastSeverity.Info);
 
         FilesystemFolderNode rootNode = await Task.Run(() => BuildFilesystemFolderNode(path));
         _filesystemRoots.Clear();
         _filesystemRoots.Add(rootNode);
-        StatusText.Text = $"Filesystem root loaded: {path}. Right-click a folder and select Scan folder.";
+        SetStatus($"Filesystem root loaded: {path}. Right-click a folder and select Scan folder.");
+        ShowToast($"Filesystem root loaded. You can now scan folders under {path}.", ToastSeverity.Success);
     }
 
     private Task LoadComputerRootAsync()
@@ -490,13 +892,16 @@ public partial class MainWindow : Window
 
         _filesystemRoots.Clear();
         _filesystemRoots.Add(BuildComputerRootNode());
-        StatusText.Text = "Filesystem mode ready. Expand Computer to choose a drive or folder.";
+        SetStatus("Filesystem mode ready. Expand Computer to choose a drive or folder.");
         return Task.CompletedTask;
     }
 
     private async Task ScanFolderAsync(string folderPath, bool preferDicomDir)
     {
-        StatusText.Text = $"Scanning folder: {folderPath}";
+        SetStatus($"Scanning folder: {folderPath}");
+        ShowToast(preferDicomDir
+            ? $"Scanning {folderPath} using DICOMDIR references..."
+            : $"Searching {folderPath} for DICOM files. This can take a while for large folders...", ToastSeverity.Info, TimeSpan.FromSeconds(6));
         FilesystemScanResult scanResult = await _app.FilesystemScanService.ScanPathAsync(folderPath, preferDicomDir);
 
         _lastScannedFolderPath = folderPath;
@@ -508,6 +913,10 @@ public partial class MainWindow : Window
         string statusMessage = string.IsNullOrWhiteSpace(summary)
             ? $"Scanned folder {folderPath}. {_filesystemPreviewDetails.Count} studies available for preview."
             : summary;
+
+        ShowToast(_filesystemPreviewDetails.Count == 0
+            ? $"Scan finished for {folderPath}, but no DICOM studies were found."
+            : $"Scan finished for {folderPath}. {_filesystemPreviewDetails.Count} studies are ready for preview.", _filesystemPreviewDetails.Count == 0 ? ToastSeverity.Warning : ToastSeverity.Success, TimeSpan.FromSeconds(6));
 
         await RefreshCurrentModeAsync(statusMessage, applySearchFilters: false);
     }
@@ -531,6 +940,13 @@ public partial class MainWindow : Window
             return;
         }
 
+        if (GetSelectedStudies().Count > 1)
+        {
+            SetStatus("Modify is only available for a single selected study.");
+            ShowToast("Modify is only available for a single selected study.", ToastSeverity.Warning);
+            return;
+        }
+
         var dialog = new PseudonymizeWindow();
         bool accepted = await dialog.ShowDialog<bool>(this);
         if (!accepted || dialog.Request is null)
@@ -542,7 +958,7 @@ public partial class MainWindow : Window
         {
             int changedFiles = await _app.PseudonymizationService.PseudonymizeStudyAsync(selectedStudy.StudyKey, dialog.Request);
             StatusText.Text = $"Pseudonymized {changedFiles} DICOM files for study {selectedStudy.PatientName}.";
-            await RefreshCurrentModeAsync();
+            await RefreshCurrentModeAsync(userInitiated: true);
         }
         catch (Exception ex)
         {
@@ -569,13 +985,19 @@ public partial class MainWindow : Window
         DataGridRow? row = sourceControl.FindAncestorOfType<DataGridRow>();
         if (row?.DataContext is StudyListItem study)
         {
-            StudyGrid.SelectedItem = study;
+            System.Collections.IList? selectedItems = StudyGrid.SelectedItems;
+            if (selectedItems is null || !selectedItems.OfType<StudyListItem>().Any(item => item.SelectionId == study.SelectionId))
+            {
+                StudyGrid.SelectedItem = study;
+            }
         }
     }
 
     private void OnStudyContextMenuOpened(object? sender, RoutedEventArgs e)
     {
-        DeleteStudyMenuItem.IsEnabled = _browserMode == BrowserMode.Database && StudyGrid.SelectedItem is StudyListItem;
+        List<StudyListItem> selectedStudies = GetSelectedStudies();
+        DeleteStudyMenuItem.IsEnabled = _browserMode == BrowserMode.Database && selectedStudies.Count > 0;
+        DeleteStudyMenuItem.Header = selectedStudies.Count > 1 ? $"Delete {selectedStudies.Count} Studies" : "Delete Study";
     }
 
     private void OnFilesystemTreePointerPressed(object? sender, PointerPressedEventArgs e)
@@ -632,6 +1054,7 @@ public partial class MainWindow : Window
         if (FilesystemTreeView.SelectedItem is not FilesystemFolderNode node)
         {
             StatusText.Text = "Select a folder first.";
+            ShowToast("Select a folder first.", ToastSeverity.Warning);
             return;
         }
 
@@ -665,9 +1088,12 @@ public partial class MainWindow : Window
             || BrowserContentGrid is null
             || FilesystemPanel is null
             || ModePlaceholderPanel is null
-            || TogglePatientPanelButton is null
-            || BrowseFilesystemButton is null
-            || ImportActionButton is null
+            || HidePatientPanelButton is null
+            || ShowPatientPanelButton is null
+            || ViewActionButton is null
+            || SendActionButton is null
+            || PatientStudySplitter is null
+            || StudySeriesSplitter is null
             || ModifyActionButton is null
             || ModePlaceholderText is null)
         {
@@ -687,27 +1113,37 @@ public partial class MainWindow : Window
     private void UpdateModeUi()
     {
         bool databaseMode = _browserMode == BrowserMode.Database;
+        bool networkMode = _browserMode == BrowserMode.Network;
         bool filesystemMode = _browserMode == BrowserMode.Filesystem;
-        bool placeholderMode = _browserMode is BrowserMode.Network or BrowserMode.Email;
-        bool showPatientPanel = databaseMode && _showPatientPanel;
-        bool showMiddlePane = showPatientPanel || filesystemMode || placeholderMode;
+        bool placeholderMode = _browserMode == BrowserMode.Email;
+        bool showPatientPanel = (databaseMode || networkMode) && _showPatientPanel;
+        bool showSidePane = showPatientPanel || filesystemMode || placeholderMode;
 
         PatientPanel.IsVisible = showPatientPanel;
         FilesystemPanel.IsVisible = filesystemMode;
         ModePlaceholderPanel.IsVisible = placeholderMode;
-        if (BrowserContentGrid.ColumnDefinitions.Count > 1)
+        if (BrowserContentGrid.ColumnDefinitions.Count > 3)
         {
-            BrowserContentGrid.ColumnDefinitions[1].Width = showMiddlePane ? new GridLength(220) : new GridLength(0);
+            BrowserContentGrid.ColumnDefinitions[1].Width = showSidePane
+                ? new GridLength(Math.Clamp(_patientPaneWidth, MinPatientPaneWidth, MaxPatientPaneWidth), GridUnitType.Pixel)
+                : new GridLength(0, GridUnitType.Pixel);
+            BrowserContentGrid.ColumnDefinitions[2].Width = showPatientPanel
+                ? new GridLength(6, GridUnitType.Pixel)
+                : new GridLength(0, GridUnitType.Pixel);
         }
-        TogglePatientPanelButton.IsVisible = databaseMode;
-        TogglePatientPanelButton.Content = showPatientPanel ? "Hide patients" : "Show patients";
-        BrowseFilesystemButton.IsEnabled = filesystemMode;
-        ImportActionButton.IsEnabled = filesystemMode;
-        ModifyActionButton.IsEnabled = databaseMode;
+        if (BrowserContentGrid.RowDefinitions.Count > 2)
+        {
+            BrowserContentGrid.RowDefinitions[2].Height = new GridLength(Math.Clamp(_seriesPaneHeight, MinSeriesPaneHeight, MaxSeriesPaneHeight), GridUnitType.Pixel);
+        }
+        PatientStudySplitter.IsVisible = showPatientPanel;
+        StudySeriesSplitter.IsVisible = true;
+        HidePatientPanelButton.IsVisible = showPatientPanel;
+        ShowPatientPanelButton.IsVisible = (databaseMode || networkMode) && !showPatientPanel;
+        ConfigButton.IsEnabled = networkMode;
+        InfoButton.IsEnabled = true;
 
         ModePlaceholderText.Text = _browserMode switch
         {
-            BrowserMode.Network => "Network mode is present for visual parity, but remote query/retrieve is not implemented yet.",
             BrowserMode.Email => "Email mode is present for visual parity, but email/export workflows are not implemented yet.",
             _ => string.Empty,
         };
@@ -720,11 +1156,13 @@ public partial class MainWindow : Window
             FilesystemHintText.IsVisible = _filesystemRoots.Count == 0;
             FilesystemTreeView.IsVisible = _filesystemRoots.Count > 0;
         }
+
+        UpdateStudyActionAvailability();
     }
 
     private void OnPatientSelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        if (_browserMode == BrowserMode.Database && _showPatientPanel)
+        if ((_browserMode == BrowserMode.Database || _browserMode == BrowserMode.Network) && _showPatientPanel)
         {
             ApplyPatientFilter();
         }
@@ -732,9 +1170,10 @@ public partial class MainWindow : Window
 
     private async void OnStudySelectionChanged(object? sender, SelectionChangedEventArgs e)
     {
-        if (_browserMode == BrowserMode.Database && _showPatientPanel && StudyGrid.SelectedItem is StudyListItem study)
+        StudyListItem? primaryStudy = GetPrimarySelectedStudy();
+        if ((_browserMode == BrowserMode.Database || _browserMode == BrowserMode.Network) && _showPatientPanel && primaryStudy is not null)
         {
-            PatientRow? row = _patients.FirstOrDefault(patient => patient.SelectionKey == $"{study.PatientId}\u001F{study.PatientName}");
+            PatientRow? row = _patients.FirstOrDefault(patient => patient.SelectionKey == $"{primaryStudy.PatientId}\u001F{primaryStudy.PatientName}");
             if (row is not null && !ReferenceEquals(PatientGrid.SelectedItem, row))
             {
                 PatientGrid.SelectedItem = row;
@@ -742,6 +1181,186 @@ public partial class MainWindow : Window
         }
 
         await LoadSelectedStudyDetailsAsync();
+    }
+
+    private void OnStorageScpStatusChanged()
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            UpdateNetworkSetupSummary();
+            if (_browserMode == BrowserMode.Network)
+            {
+                DatabaseStatsText.Text = $"{_allStudies.Count} remote studies. Storage SCP: {_app.StorageScpService.LastStatus}";
+            }
+
+            MaybeToastStorageScpStatus(_app.StorageScpService.LastStatus);
+        });
+    }
+
+    private void OnNetworkSettingsChanged(DicomNetworkSettings settings)
+    {
+        Dispatcher.UIThread.Post(UpdateNetworkSetupSummary);
+    }
+
+    private void OnRemoteRetrievalStatusChanged(string message)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            SetStatus(message);
+
+            if (string.IsNullOrWhiteSpace(message))
+            {
+                return;
+            }
+
+            string lower = message.ToLowerInvariant();
+            if (lower.Contains("failed") || lower.Contains("error"))
+            {
+                ShowToast(message, ToastSeverity.Error, TimeSpan.FromSeconds(8));
+            }
+            else if (lower.Contains("completed") || lower.Contains("ready"))
+            {
+                ShowToast(message, ToastSeverity.Success, TimeSpan.FromSeconds(5));
+            }
+        });
+    }
+
+    private void OnMainWindowClosed(object? sender, EventArgs e)
+    {
+        CapturePatientPaneWidth();
+        CaptureSeriesPaneHeight();
+        SaveBrowserLayoutSettings();
+        _app.StorageScpService.StatusChanged -= OnStorageScpStatusChanged;
+        _app.NetworkSettingsService.SettingsChanged -= OnNetworkSettingsChanged;
+        Closed -= OnMainWindowClosed;
+    }
+
+    private void SetStatus(string message)
+    {
+        StatusText.Text = message;
+    }
+
+    private void MaybeToastStorageScpStatus(string message)
+    {
+        if (string.IsNullOrWhiteSpace(message) || string.Equals(message, _lastStorageScpToastMessage, StringComparison.Ordinal))
+        {
+            return;
+        }
+
+        _lastStorageScpToastMessage = message;
+        string lower = message.ToLowerInvariant();
+        if (lower.Contains("failed") || lower.Contains("exception") || lower.Contains("stopped"))
+        {
+            ShowToast(message, ToastSeverity.Error, TimeSpan.FromSeconds(8));
+        }
+        else if (lower.Contains("listening on port"))
+        {
+            ShowToast(message, ToastSeverity.Success, TimeSpan.FromSeconds(5));
+        }
+    }
+
+    private void ShowToast(string message, ToastSeverity severity, TimeSpan? duration = null)
+    {
+        if (string.IsNullOrWhiteSpace(message) || ToastItemsControl is null)
+        {
+            return;
+        }
+
+        if (_toastNotifications.Any(toast => string.Equals(toast.Message, message, StringComparison.Ordinal)))
+        {
+            return;
+        }
+
+        ToastNotificationItem toast = CreateToast(message, severity);
+        _toastNotifications.Add(toast);
+        while (_toastNotifications.Count > 5)
+        {
+            _toastNotifications.RemoveAt(0);
+        }
+
+        _ = DismissToastAsync(toast.Id, duration ?? GetToastDuration(severity));
+    }
+
+    private async Task DismissToastAsync(Guid toastId, TimeSpan duration)
+    {
+        try
+        {
+            await Task.Delay(duration);
+        }
+        catch
+        {
+            return;
+        }
+
+        await Dispatcher.UIThread.InvokeAsync(() =>
+        {
+            ToastNotificationItem? toast = _toastNotifications.FirstOrDefault(item => item.Id == toastId);
+            if (toast is not null)
+            {
+                _toastNotifications.Remove(toast);
+            }
+        });
+    }
+
+    private static TimeSpan GetToastDuration(ToastSeverity severity) => severity switch
+    {
+        ToastSeverity.Success => TimeSpan.FromSeconds(4),
+        ToastSeverity.Warning => TimeSpan.FromSeconds(6),
+        ToastSeverity.Error => TimeSpan.FromSeconds(8),
+        _ => TimeSpan.FromSeconds(4),
+    };
+
+    private static ToastNotificationItem CreateToast(string message, ToastSeverity severity)
+    {
+        return severity switch
+        {
+            ToastSeverity.Success => new ToastNotificationItem
+            {
+                Icon = "✓",
+                Message = message,
+                Background = new SolidColorBrush(Color.Parse("#F0174D28")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#FF2F8F3A")),
+                Foreground = Brushes.White,
+            },
+            ToastSeverity.Warning => new ToastNotificationItem
+            {
+                Icon = "⚠",
+                Message = message,
+                Background = new SolidColorBrush(Color.Parse("#F07A4E00")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#FFFFB14A")),
+                Foreground = Brushes.White,
+            },
+            ToastSeverity.Error => new ToastNotificationItem
+            {
+                Icon = "✕",
+                Message = message,
+                Background = new SolidColorBrush(Color.Parse("#F07D2222")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#FFFF7575")),
+                Foreground = Brushes.White,
+            },
+            _ => new ToastNotificationItem
+            {
+                Icon = "ℹ",
+                Message = message,
+                Background = new SolidColorBrush(Color.Parse("#F0215D8B")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#FF65B7F7")),
+                Foreground = Brushes.White,
+            },
+        };
+    }
+
+    private void UpdateNetworkSetupSummary()
+    {
+        if (NetworkSetupSummaryText is null)
+        {
+            return;
+        }
+
+        DicomNetworkSettings settings = _app.NetworkSettingsService.CurrentSettings;
+        RemoteArchiveEndpoint? archive = settings.GetSelectedArchive();
+        NetworkSetupSummaryText.Text = archive is null
+            ? $"No remote archive configured yet. Local Storage SCP listens as {settings.LocalAeTitle} on port {settings.LocalPort}. Use 'Configure network...' to set the remote archive and receive settings."
+            : $"Remote archive: {archive.Name} ({archive.Host}:{archive.Port}, AE {archive.RemoteAeTitle})\nLocal Storage SCP: AE {settings.LocalAeTitle}, port {settings.LocalPort}\nInbox: {settings.InboxDirectory}\nStatus: {_app.StorageScpService.LastStatus}";
     }
 
     private async void OnStudyDoubleTapped(object? sender, TappedEventArgs e) => await OpenSelectedStudyAsync();
@@ -754,30 +1373,183 @@ public partial class MainWindow : Window
             return;
         }
 
-        if (StudyGrid.SelectedItem is not StudyListItem selectedStudy)
+        List<StudyListItem> selectedStudies = GetSelectedStudies();
+        if (selectedStudies.Count == 0)
         {
             StatusText.Text = "Select a study first.";
             return;
         }
 
-        var confirmWindow = new ConfirmDeleteStudyWindow(selectedStudy);
+        var confirmWindow = new ConfirmDeleteStudyWindow(selectedStudies);
         bool confirmed = await confirmWindow.ShowDialog<bool>(this);
         if (!confirmed)
         {
-            StatusText.Text = "Delete study cancelled.";
+            StatusText.Text = selectedStudies.Count > 1 ? "Delete studies cancelled." : "Delete study cancelled.";
             return;
         }
 
         try
         {
-            await _app.StudyDeletionService.DeleteStudyAsync(selectedStudy);
-            await RefreshCurrentModeAsync($"Deleted study {selectedStudy.PatientName} ({selectedStudy.DisplayStudyDate}) from the K-PACS imagebox.");
+            foreach (StudyListItem selectedStudy in selectedStudies)
+            {
+                await _app.StudyDeletionService.DeleteStudyAsync(selectedStudy);
+            }
+
+            string statusMessage = selectedStudies.Count == 1
+                ? $"Deleted study {selectedStudies[0].PatientName} ({selectedStudies[0].DisplayStudyDate}) from the K-PACS imagebox."
+                : $"Deleted {selectedStudies.Count} studies from the K-PACS imagebox.";
+            await RefreshCurrentModeAsync(statusMessage);
         }
         catch (Exception ex)
         {
             StatusText.Text = $"Delete study failed: {ex.Message}";
         }
     }
+
+    private List<StudyListItem> GetSelectedStudies()
+    {
+        System.Collections.IList? selectedItems = StudyGrid.SelectedItems;
+        List<StudyListItem> selectedStudies = selectedItems?.OfType<StudyListItem>().ToList() ?? [];
+        if (selectedStudies.Count == 0 && StudyGrid.SelectedItem is StudyListItem selectedStudy)
+        {
+            selectedStudies.Add(selectedStudy);
+        }
+
+        return selectedStudies
+            .GroupBy(study => study.SelectionId)
+            .Select(group => group.First())
+            .ToList();
+    }
+
+    private StudyListItem? GetPrimarySelectedStudy() => GetSelectedStudies().FirstOrDefault();
+
+    private void RestoreStudySelection(IReadOnlyCollection<string> selectionIds)
+    {
+        if (_studies.Count == 0)
+        {
+            StudyGrid.SelectedItem = null;
+            UpdateStudyActionAvailability();
+            return;
+        }
+
+        List<StudyListItem> matches = _studies.Where(study => selectionIds.Contains(study.SelectionId)).ToList();
+        if (matches.Count == 0)
+        {
+            StudyGrid.SelectedItem = _studies.FirstOrDefault();
+            UpdateStudyActionAvailability();
+            return;
+        }
+
+        System.Collections.IList? selectedItems = StudyGrid.SelectedItems;
+        if (selectedItems is not null)
+        {
+            selectedItems.Clear();
+            foreach (StudyListItem study in matches)
+            {
+                selectedItems.Add(study);
+            }
+        }
+
+        StudyGrid.SelectedItem = matches[0];
+        UpdateStudyActionAvailability();
+    }
+
+    private void UpdateStudyActionAvailability()
+    {
+        if (ViewActionButton is null || SendActionButton is null || ModifyActionButton is null)
+        {
+            return;
+        }
+
+        int selectedCount = GetSelectedStudies().Count;
+        bool singleSelected = selectedCount == 1;
+        bool anySelected = selectedCount > 0;
+
+        ViewActionButton.IsEnabled = singleSelected;
+        SendActionButton.IsEnabled = _browserMode == BrowserMode.Database && anySelected;
+        ModifyActionButton.IsEnabled = _browserMode == BrowserMode.Database && singleSelected;
+    }
+
+    private void OnPatientStudySplitterPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        CapturePatientPaneWidth();
+        SaveBrowserLayoutSettings();
+    }
+
+    private void OnStudySeriesSplitterPointerReleased(object? sender, PointerReleasedEventArgs e)
+    {
+        CaptureSeriesPaneHeight();
+        SaveBrowserLayoutSettings();
+    }
+
+    private void CapturePatientPaneWidth()
+    {
+        if (BrowserContentGrid?.ColumnDefinitions.Count > 1)
+        {
+            double width = BrowserContentGrid.ColumnDefinitions[1].ActualWidth;
+            if (width > 0)
+            {
+                _patientPaneWidth = Math.Clamp(width, MinPatientPaneWidth, MaxPatientPaneWidth);
+            }
+        }
+    }
+
+    private void CaptureSeriesPaneHeight()
+    {
+        if (BrowserContentGrid?.RowDefinitions.Count > 2)
+        {
+            double height = BrowserContentGrid.RowDefinitions[2].ActualHeight;
+            if (height > 0)
+            {
+                _seriesPaneHeight = Math.Clamp(height, MinSeriesPaneHeight, MaxSeriesPaneHeight);
+            }
+        }
+    }
+
+    private void LoadBrowserLayoutSettings()
+    {
+        try
+        {
+            if (!File.Exists(_browserLayoutSettingsPath))
+            {
+                return;
+            }
+
+            BrowserLayoutSettings? settings = JsonSerializer.Deserialize<BrowserLayoutSettings>(File.ReadAllText(_browserLayoutSettingsPath));
+            if (settings is not null)
+            {
+                _patientPaneWidth = Math.Clamp(settings.PatientPaneWidth, MinPatientPaneWidth, MaxPatientPaneWidth);
+                _seriesPaneHeight = Math.Clamp(settings.SeriesPaneHeight, MinSeriesPaneHeight, MaxSeriesPaneHeight);
+            }
+        }
+        catch
+        {
+            _patientPaneWidth = DefaultPatientPaneWidth;
+            _seriesPaneHeight = DefaultSeriesPaneHeight;
+        }
+    }
+
+    private void SaveBrowserLayoutSettings()
+    {
+        try
+        {
+            Directory.CreateDirectory(Path.GetDirectoryName(_browserLayoutSettingsPath) ?? _app.Paths.ApplicationDirectory);
+            BrowserLayoutSettings settings = new()
+            {
+                PatientPaneWidth = Math.Clamp(_patientPaneWidth, MinPatientPaneWidth, MaxPatientPaneWidth),
+                SeriesPaneHeight = Math.Clamp(_seriesPaneHeight, MinSeriesPaneHeight, MaxSeriesPaneHeight),
+            };
+
+            File.WriteAllText(_browserLayoutSettingsPath, JsonSerializer.Serialize(settings, new JsonSerializerOptions { WriteIndented = true }));
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool HasAnyLocalInstances(StudyDetails details) =>
+        details.Series.SelectMany(series => series.Instances)
+            .Any(instance => !string.IsNullOrWhiteSpace(instance.FilePath) && File.Exists(instance.FilePath));
 
     protected override async void OnKeyDown(KeyEventArgs e)
     {
@@ -798,6 +1570,20 @@ public partial class MainWindow : Window
     private static bool ContainsIgnoreCase(string? source, string value)
     {
         return !string.IsNullOrWhiteSpace(source) && source.Contains(value, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static bool IsEmptyNetworkQuery(StudyQuery query)
+    {
+        return string.IsNullOrWhiteSpace(query.PatientId)
+            && string.IsNullOrWhiteSpace(query.PatientName)
+            && string.IsNullOrWhiteSpace(query.PatientBirthDate)
+            && string.IsNullOrWhiteSpace(query.AccessionNumber)
+            && string.IsNullOrWhiteSpace(query.ReferringPhysician)
+            && string.IsNullOrWhiteSpace(query.StudyDescription)
+            && string.IsNullOrWhiteSpace(query.QuickSearch)
+            && query.FromStudyDate is null
+            && query.ToStudyDate is null
+            && query.Modalities.Count == 0;
     }
 
     private List<string> GetSelectedModalities()
@@ -1010,5 +1796,11 @@ public partial class MainWindow : Window
         public string SeriesDescription { get; init; } = string.Empty;
         public int InstanceCount { get; init; }
         public string FirstFileName { get; init; } = string.Empty;
+    }
+
+    private sealed class BrowserLayoutSettings
+    {
+        public double PatientPaneWidth { get; init; } = DefaultPatientPaneWidth;
+        public double SeriesPaneHeight { get; init; } = DefaultSeriesPaneHeight;
     }
 }

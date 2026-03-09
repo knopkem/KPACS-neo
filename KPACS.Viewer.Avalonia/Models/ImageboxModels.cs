@@ -4,6 +4,7 @@ namespace KPACS.Viewer.Models;
 
 public sealed class ImageboxPaths
 {
+    public required string ApplicationDirectory { get; init; }
     public required string RootDirectory { get; init; }
     public required string DatabasePath { get; init; }
     public required string StudiesDirectory { get; init; }
