@@ -144,7 +144,7 @@ dotnet build KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj
 
 ## Release Packaging
 
-The repository includes a GitHub Actions workflow at [.github/workflows/release-packages.yml](../.github/workflows/release-packages.yml) that builds three native self-contained release artifacts for the Avalonia viewer:
+The repository includes a GitHub Actions workflow at [.github/workflows/release-packages.yml](.github/workflows/release-packages.yml) that builds three native self-contained release artifacts for the Avalonia viewer:
 
 - `win-x64` — single-file `.exe` packed as `.zip`
 - `linux-x64` — single-file executable packed as `.tar.gz`

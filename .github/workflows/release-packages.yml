@@ -1,0 +1,207 @@
+name: Build Release Packages
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: Version label for artifact names (for example v0.1.0)
+        required: false
+        type: string
+  release:
+    types:
+      - published
+
+permissions:
+  contents: write
+
+env:
+  APP_NAME: KPACS-neo
+  PROJECT_PATH: KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj
+
+jobs:
+  build:
+    name: ${{ matrix.label }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            rid: win-x64
+            label: Windows x64
+          - os: ubuntu-22.04
+            rid: linux-x64
+            label: Linux x64
+          - os: macos-14
+            rid: osx-arm64
+            label: macOS Apple Silicon
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup .NET 10
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 10.0.x
+
+      - name: Resolve version label
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            VERSION="dev-${GITHUB_RUN_NUMBER}"
+          fi
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
+      - name: Publish self-contained single-file app
+        shell: bash
+        run: |
+          dotnet publish "$PROJECT_PATH" \
+            -c Release \
+            -r "${{ matrix.rid }}" \
+            --self-contained true \
+            -p:PublishSingleFile=true \
+            -p:EnableCompressionInSingleFile=true \
+            -p:IncludeNativeLibrariesForSelfExtract=true \
+            -p:DebugType=None \
+            -p:DebugSymbols=false \
+            -o "artifacts/publish/${{ matrix.rid }}"
+
+      - name: Package Windows release
+        if: matrix.rid == 'win-x64'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.version.outputs.value }}"
+          $publishDir = "artifacts/publish/${{ matrix.rid }}"
+          $packageName = "${env:APP_NAME}-$version-${{ matrix.rid }}.zip"
+          @"
+          KPACS-neo for Windows
+
+          Extract this archive to any folder and start:
+          - KPACS.Viewer.exe
+          "@ | Set-Content -Path "$publishDir/README.txt"
+          New-Item -ItemType Directory -Force -Path artifacts/release | Out-Null
+          Compress-Archive -Path "$publishDir/*" -DestinationPath "artifacts/release/$packageName" -Force
+
+      - name: Package Linux release
+        if: matrix.rid == 'linux-x64'
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          package_name="${APP_NAME}-${version}-${{ matrix.rid }}.tar.gz"
+          chmod +x "artifacts/publish/${{ matrix.rid }}/KPACS.Viewer"
+          cp "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" "artifacts/publish/${{ matrix.rid }}/k-pacs.png"
+          cp "KPACS.Viewer.Avalonia/Assets/Branding/KPACS-neo.desktop" "artifacts/publish/${{ matrix.rid }}/KPACS-neo.desktop"
+          cat > "artifacts/publish/${{ matrix.rid }}/README.txt" <<'README'
+          KPACS-neo for Linux
+
+          Extract this archive to any folder and start:
+          - ./KPACS.Viewer
+
+          Optional desktop integration files included:
+          - KPACS-neo.desktop
+          - k-pacs.png
+          README
+          mkdir -p artifacts/release
+          tar -C "artifacts/publish/${{ matrix.rid }}" -czf "artifacts/release/${package_name}" KPACS.Viewer KPACS-neo.desktop k-pacs.png README.txt
+
+      - name: Build macOS app bundle
+        if: matrix.rid == 'osx-arm64'
+        shell: bash
+        run: |
+          mkdir -p "artifacts/app/KPACS-neo.app/Contents/MacOS"
+          mkdir -p "artifacts/app/KPACS-neo.app/Contents/Resources"
+          cp "artifacts/publish/${{ matrix.rid }}/KPACS.Viewer" "artifacts/app/KPACS-neo.app/Contents/MacOS/KPACS.Viewer"
+          chmod +x "artifacts/app/KPACS-neo.app/Contents/MacOS/KPACS.Viewer"
+          mkdir -p artifacts/k-pacs.iconset
+          sips -z 16 16   "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_16x16.png >/dev/null
+          sips -z 32 32   "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_16x16@2x.png >/dev/null
+          sips -z 32 32   "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_32x32.png >/dev/null
+          sips -z 64 64   "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_32x32@2x.png >/dev/null
+          sips -z 128 128 "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_128x128.png >/dev/null
+          sips -z 256 256 "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_128x128@2x.png >/dev/null
+          sips -z 256 256 "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_256x256.png >/dev/null
+          sips -z 512 512 "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_256x256@2x.png >/dev/null
+          sips -z 512 512 "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_512x512.png >/dev/null
+          cp "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" "artifacts/k-pacs.iconset/icon_512x512@2x.png"
+          iconutil -c icns artifacts/k-pacs.iconset -o "artifacts/app/KPACS-neo.app/Contents/Resources/k-pacs.icns"
+          cat > "artifacts/app/KPACS-neo.app/Contents/Info.plist" <<'PLIST'
+          <?xml version="1.0" encoding="UTF-8"?>
+          <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+          <plist version="1.0">
+          <dict>
+            <key>CFBundleDevelopmentRegion</key>
+            <string>en</string>
+            <key>CFBundleDisplayName</key>
+            <string>KPACS-neo</string>
+            <key>CFBundleExecutable</key>
+            <string>KPACS.Viewer</string>
+            <key>CFBundleIconFile</key>
+            <string>k-pacs.icns</string>
+            <key>CFBundleIdentifier</key>
+            <string>com.kpacs.neo.viewer</string>
+            <key>CFBundleInfoDictionaryVersion</key>
+            <string>6.0</string>
+            <key>CFBundleName</key>
+            <string>KPACS-neo</string>
+            <key>CFBundlePackageType</key>
+            <string>APPL</string>
+            <key>CFBundleShortVersionString</key>
+            <string>${{ steps.version.outputs.value }}</string>
+            <key>CFBundleVersion</key>
+            <string>${{ github.run_number }}</string>
+            <key>LSMinimumSystemVersion</key>
+            <string>13.0</string>
+            <key>NSHighResolutionCapable</key>
+            <true/>
+          </dict>
+          </plist>
+          cat > "artifacts/app/README.txt" <<'README'
+          KPACS-neo for macOS
+
+          Open KPACS-neo.app after extracting the zip.
+
+          This is an unsigned first-release app bundle.
+          If macOS blocks the first launch, right-click the app and choose Open once.
+          After that, it behaves like a normal local app.
+          README
+
+      - name: Package macOS release
+        if: matrix.rid == 'osx-arm64'
+        shell: bash
+        run: |
+          version="${{ steps.version.outputs.value }}"
+          package_name="${APP_NAME}-${version}-${{ matrix.rid }}.zip"
+          mkdir -p artifacts/release
+          ditto -c -k --sequesterRsrc --keepParent "artifacts/app/KPACS-neo.app" "artifacts/release/${package_name}"
+
+      - name: Upload packaged artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: release-${{ matrix.rid }}
+          path: artifacts/release/*
+          if-no-files-found: error
+
+  attach-to-release:
+    name: Attach packages to GitHub release
+    if: github.event_name == 'release'
+    runs-on: ubuntu-latest
+    needs:
+      - build
+
+    steps:
+      - name: Download packaged artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts/release
+          merge-multiple: true
+
+      - name: Upload assets to release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/release/*
