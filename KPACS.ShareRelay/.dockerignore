@@ -1,0 +1,9 @@
+bin/
+obj/
+App_Data/
+.vs/
+.git/
+.gitignore
+*.user
+*.suo
+*.cache

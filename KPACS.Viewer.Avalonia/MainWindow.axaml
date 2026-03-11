@@ -303,7 +303,38 @@
                                                                 </StackPanel>
                                                         </TabItem>
                                                         <TabItem Header="Email">
-                                                                <TextBlock Margin="8" Text="Email/export workflow is not implemented yet." Foreground="#FF555555" />
+                                                                <StackPanel Margin="6" Spacing="8">
+                                                                        <TextBlock Text="Receive studies through the secure relay. Set it up once, then refresh and use Download + Import." Foreground="#FF555555" TextWrapping="Wrap" />
+                                                                        <Border Background="#FFF2F6FA" BorderBrush="#FFD3DEE7" BorderThickness="1" CornerRadius="12" Padding="8">
+                                                                                <StackPanel Spacing="8">
+                                                                                        <Grid ColumnDefinitions="*,Auto,Auto,Auto" ColumnSpacing="8">
+                                                                                                <TextBlock Text="Relay inbox" FontWeight="SemiBold" Foreground="#FF25343E" VerticalAlignment="Center" />
+                                                                                                <Button Grid.Column="1" Content="Set up relay" Click="OnRelaySetupClick" />
+                                                                                                <Button x:Name="RelayInboxRefreshButton" Grid.Column="2" Content="Refresh" Click="OnRefreshRelayInboxClick" />
+                                                                                                <Button x:Name="RelayInboxDownloadButton" Grid.Column="3" Content="Download + Import" Click="OnRelayDownloadImportClick" />
+                                                                                        </Grid>
+                                                                                        <TextBlock x:Name="RelayInboxSummaryText" Classes="networkCardBody" TextWrapping="Wrap" />
+                                                                                        <TextBlock x:Name="RelayInboxStatusText" Classes="networkCardBody" TextWrapping="Wrap" />
+                                                                                        <DataGrid x:Name="RelayInboxGrid"
+                                                                                                  AutoGenerateColumns="False"
+                                                                                                  HeadersVisibility="Column"
+                                                                                                  CanUserResizeColumns="True"
+                                                                                                  CanUserSortColumns="True"
+                                                                                                  IsReadOnly="True"
+                                                                                                  MinHeight="170"
+                                                                                                  MaxHeight="220"
+                                                                                                  SelectionChanged="OnRelayInboxSelectionChanged">
+                                                                                                <DataGrid.Columns>
+                                                                                                        <DataGridTextColumn Header="From" Binding="{Binding SenderLabel}" Width="2*" />
+                                                                                                        <DataGridTextColumn Header="Subject" Binding="{Binding Subject}" Width="2*" />
+                                                                                                        <DataGridTextColumn Header="Received" Binding="{Binding AgeLabel}" Width="130" />
+                                                                                                        <DataGridTextColumn Header="Package" Binding="{Binding PackageLabel}" Width="2*" />
+                                                                                                        <DataGridTextColumn Header="Status" Binding="{Binding Status}" Width="120" />
+                                                                                                </DataGrid.Columns>
+                                                                                        </DataGrid>
+                                                                                </StackPanel>
+                                                                        </Border>
+                                                                </StackPanel>
                                                         </TabItem>
                                                 </TabControl>
                                         </Border>
@@ -327,6 +358,7 @@
                                         <TextBlock Text="Actions" FontWeight="Bold" Foreground="#FF333333" HorizontalAlignment="Center" Margin="0,0,0,4" />
                                         <Button x:Name="ViewActionButton" Classes="action" Content="View" Click="OnOpenViewerClick" />
                                         <Button x:Name="SendActionButton" Classes="action" Content="Send" Click="OnSendSelectedClick" />
+                                        <Button x:Name="RelayActionButton" Classes="action" Content="Share" Click="OnRelayShareClick" />
                                         <Button x:Name="ModifyActionButton" Classes="action" Content="Modify" Click="OnPseudonymizeClick" />
                                         <Button x:Name="GuideActionButton" Content="Guide" Click="OnGuideClick" ToolTip.Tip="Show the onboarding tour again." />
                                         <StackPanel Spacing="4" Margin="0,8,0,0">

@@ -1,0 +1,13 @@
+@KPACS.ShareRelay_HostAddress = http://localhost:5124
+@KPACS.ShareRelay_ApiKey = dev-relay-key
+
+GET {{KPACS.ShareRelay_HostAddress}}/health
+Accept: application/json
+
+###
+
+GET {{KPACS.ShareRelay_HostAddress}}/api/v1/contacts/search?query=
+X-Relay-Api-Key: {{KPACS.ShareRelay_ApiKey}}
+Accept: application/json
+
+###

@@ -39,6 +39,7 @@ public partial class MainWindow : Window
     private readonly ObservableCollection<PatientRow> _patients = [];
     private readonly ObservableCollection<SeriesGridRow> _seriesRows = [];
     private readonly ObservableCollection<FilesystemFolderNode> _filesystemRoots = [];
+    private readonly ObservableCollection<RelayInboxItem> _relayInboxItems = [];
     private readonly ObservableCollection<ToastNotificationItem> _toastNotifications = [];
     private readonly IReadOnlyList<OnboardingStep> _onboardingSteps = CreateOnboardingSteps();
     private readonly string _browserLayoutSettingsPath;
@@ -47,6 +48,7 @@ public partial class MainWindow : Window
     private bool _lastScanPreferDicomDir;
     private string? _lastStorageScpToastMessage;
     private bool _filesystemScanInProgress;
+    private bool _relayInboxBusy;
     private bool _onboardingVisible;
     private int _networkInfoRefreshVersion;
     private int _databaseInfoRefreshVersion;
@@ -71,6 +73,7 @@ public partial class MainWindow : Window
         SeriesGrid.ItemsSource = _seriesRows;
         BackgroundJobsGrid.ItemsSource = _backgroundJobs;
         FilesystemTreeView.ItemsSource = _filesystemRoots;
+        RelayInboxGrid.ItemsSource = _relayInboxItems;
         ToastItemsControl.ItemsSource = _toastNotifications;
         _uiReady = true;
         _app.BackgroundJobs.JobsChanged += OnBackgroundJobsChanged;
@@ -112,7 +115,8 @@ public partial class MainWindow : Window
                 await LoadNetworkStudiesAsync(statusOverride, userInitiated);
                 break;
             case BrowserMode.Email:
-                ClearStudyResults("Email mode", statusOverride ?? "Email mode is not implemented yet.");
+                ClearStudyResults("Relay inbox", statusOverride ?? "Relay inbox ready.");
+                await RefreshRelayInboxAsync(statusOverride, showToast: false);
                 break;
         }
     }
@@ -1085,6 +1089,123 @@ public partial class MainWindow : Window
         }
     }
 
+    private async void OnRelayShareClick(object? sender, RoutedEventArgs e)
+    {
+        if (_browserMode is not (BrowserMode.Database or BrowserMode.Filesystem))
+        {
+            SetStatus("Share is available for local studies in Database or Filesystem mode.");
+            ShowToast("Share is available for local studies in Database or Filesystem mode.", ToastSeverity.Warning);
+            return;
+        }
+
+        if (_browserMode == BrowserMode.Filesystem && _filesystemScanInProgress)
+        {
+            SetStatus("Wait until the filesystem scan finishes before sharing studies.");
+            ShowToast("Wait until the filesystem scan finishes before sharing studies.", ToastSeverity.Warning);
+            return;
+        }
+
+        List<StudyDetails> studiesToShare = [];
+        foreach (StudyListItem selectedStudy in GetSelectedStudies())
+        {
+            StudyDetails? details = _browserMode switch
+            {
+                BrowserMode.Database => await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey),
+                BrowserMode.Filesystem => _filesystemPreviewDetails.GetValueOrDefault(selectedStudy.StudyInstanceUid),
+                _ => null,
+            };
+
+            if (details is not null && HasAnyLocalInstances(details))
+            {
+                studiesToShare.Add(details);
+            }
+        }
+
+        if (studiesToShare.Count == 0)
+        {
+            SetStatus("Select at least one local study with local DICOM files before sharing.");
+            ShowToast("Select at least one local study with local DICOM files before sharing.", ToastSeverity.Warning, TimeSpan.FromSeconds(7));
+            return;
+        }
+
+        var window = new RelayShareWindow(_app.ShareRelayService, _app.ShareRelaySettingsService, studiesToShare);
+        RelayShareResult? result = await window.ShowDialog<RelayShareResult?>(this);
+        if (result is null)
+        {
+            return;
+        }
+
+        string shareMessage = $"Shared {result.StudyCount} study(s) to {result.RecipientCount} recipient(s) via relay as '{result.Subject}'. Package size: {FormatFileSize(result.PackageSizeBytes)}.";
+        SetStatus(shareMessage);
+        ShowToast(shareMessage, ToastSeverity.Info, TimeSpan.FromSeconds(8));
+    }
+
+    private async void OnRelaySetupClick(object? sender, RoutedEventArgs e)
+    {
+        var window = new RelaySettingsWindow(_app.ShareRelaySettingsService.CurrentSettings);
+        ShareRelaySettings? settings = await window.ShowDialog<ShareRelaySettings?>(this);
+        if (settings is null)
+        {
+            return;
+        }
+
+        await _app.ShareRelaySettingsService.SaveAsync(settings);
+        await RefreshRelayInboxAsync("Relay settings saved.", showToast: true);
+    }
+
+    private async void OnRefreshRelayInboxClick(object? sender, RoutedEventArgs e) => await RefreshRelayInboxAsync("Relay inbox refreshed.", showToast: true);
+
+    private async void OnRelayDownloadImportClick(object? sender, RoutedEventArgs e)
+    {
+        if (RelayInboxGrid.SelectedItem is not RelayInboxItem inboxItem)
+        {
+            SetStatus("Select a relay inbox item first.");
+            ShowToast("Select a relay inbox item first.", ToastSeverity.Warning);
+            return;
+        }
+
+        if (!inboxItem.PackageAvailable)
+        {
+            SetStatus("The selected relay item does not have a downloadable package yet.");
+            ShowToast("The selected relay item does not have a downloadable package yet.", ToastSeverity.Warning);
+            return;
+        }
+
+        try
+        {
+            _relayInboxBusy = true;
+            UpdateRelayInboxActionAvailability();
+            RelayInboxStatusText.Text = $"Downloading and importing '{inboxItem.Subject}'...";
+
+            (ShareRelaySettings updatedSettings, RelayImportResult result) = await _app.ShareRelayService.DownloadAndImportShareAsync(
+                _app.ShareRelaySettingsService.CurrentSettings,
+                inboxItem,
+                _app.ImportService,
+                CancellationToken.None);
+
+            await _app.ShareRelaySettingsService.SaveAsync(updatedSettings);
+            await RefreshRelayInboxAsync($"Imported '{result.Subject}'.", showToast: false);
+            await SetBrowserModeAsync(BrowserMode.Database);
+            await RefreshCurrentModeAsync($"Imported '{result.Subject}' from relay ({result.ImportResult.ImportedStudies} studies, {result.ImportResult.ImportedInstances} instances).", userInitiated: true);
+
+            string message = $"Imported '{result.Subject}' from relay ({result.ImportResult.ImportedStudies} studies, {result.ImportResult.ImportedInstances} instances).";
+            SetStatus(message);
+            ShowToast(message, ToastSeverity.Info, TimeSpan.FromSeconds(8));
+        }
+        catch (Exception ex)
+        {
+            SetStatus($"Relay import failed: {ex.Message}");
+            ShowToast($"Relay import failed: {ex.Message}", ToastSeverity.Error, TimeSpan.FromSeconds(8));
+        }
+        finally
+        {
+            _relayInboxBusy = false;
+            UpdateRelayInboxActionAvailability();
+        }
+    }
+
+    private void OnRelayInboxSelectionChanged(object? sender, SelectionChangedEventArgs e) => UpdateRelayInboxActionAvailability();
+
     private async Task BrowseFilesystemRootAsync(bool allowModeSwitch)
     {
         if (_browserMode != BrowserMode.Filesystem)
@@ -1423,7 +1544,7 @@ public partial class MainWindow : Window
 
         ModePlaceholderText.Text = _browserMode switch
         {
-            BrowserMode.Email => "Email mode is present for visual parity, but email/export workflows are not implemented yet.",
+            BrowserMode.Email => "Use the Email tab above to refresh the relay inbox and download/import shared studies.",
             _ => string.Empty,
         };
 
@@ -1437,6 +1558,81 @@ public partial class MainWindow : Window
         }
 
         UpdateStudyActionAvailability();
+        UpdateRelayInboxActionAvailability();
+    }
+
+    private async Task RefreshRelayInboxAsync(string? statusOverride, bool showToast)
+    {
+        if (RelayInboxSummaryText is null || RelayInboxStatusText is null)
+        {
+            return;
+        }
+
+        ShareRelaySettings settings = _app.ShareRelaySettingsService.CurrentSettings;
+        settings.Normalize();
+        RelayInboxSummaryText.Text = string.IsNullOrWhiteSpace(settings.UserEmail)
+            ? "Relay is not set up yet. Click 'Set up relay' and enter the relay URL, API key, and your email."
+            : $"Signed in as {settings.DisplayName} <{settings.UserEmail}> on device '{settings.DeviceName}'.";
+
+        if (string.IsNullOrWhiteSpace(settings.BaseUrl) || string.IsNullOrWhiteSpace(settings.ApiKey) || string.IsNullOrWhiteSpace(settings.UserEmail) || string.IsNullOrWhiteSpace(settings.DisplayName))
+        {
+            _relayInboxItems.Clear();
+            RelayInboxStatusText.Text = "Enter your relay details once, then press Refresh to load incoming studies.";
+            UpdateRelayInboxActionAvailability();
+            return;
+        }
+
+        try
+        {
+            _relayInboxBusy = true;
+            UpdateRelayInboxActionAvailability();
+            RelayInboxStatusText.Text = "Loading incoming studies...";
+
+            (ShareRelaySettings updatedSettings, IReadOnlyList<RelayInboxItem> items) = await _app.ShareRelayService.GetInboxAsync(settings, CancellationToken.None);
+            await _app.ShareRelaySettingsService.SaveAsync(updatedSettings, CancellationToken.None);
+
+            _relayInboxItems.Clear();
+            foreach (RelayInboxItem item in items)
+            {
+                _relayInboxItems.Add(item);
+            }
+
+            RelayInboxSummaryText.Text = $"Signed in as {updatedSettings.DisplayName} <{updatedSettings.UserEmail}> on device '{updatedSettings.DeviceName}'.";
+            RelayInboxStatusText.Text = items.Count == 0
+                ? "No incoming studies at the moment."
+                : $"{items.Count} incoming share(s) ready. Select one and click 'Download + Import'.";
+
+            if (showToast && !string.IsNullOrWhiteSpace(statusOverride))
+            {
+                ShowToast(statusOverride, ToastSeverity.Info, TimeSpan.FromSeconds(5));
+            }
+        }
+        catch (Exception ex)
+        {
+            RelayInboxStatusText.Text = $"Inbox unavailable: {ex.Message}";
+            if (showToast)
+            {
+                ShowToast($"Inbox unavailable: {ex.Message}", ToastSeverity.Warning, TimeSpan.FromSeconds(7));
+            }
+        }
+        finally
+        {
+            _relayInboxBusy = false;
+            UpdateRelayInboxActionAvailability();
+        }
+    }
+
+    private void UpdateRelayInboxActionAvailability()
+    {
+        if (RelayInboxRefreshButton is null || RelayInboxDownloadButton is null || RelayInboxGrid is null)
+        {
+            return;
+        }
+
+        RelayInboxRefreshButton.IsEnabled = !_relayInboxBusy;
+        RelayInboxDownloadButton.IsEnabled = !_relayInboxBusy
+            && RelayInboxGrid.SelectedItem is RelayInboxItem selected
+            && selected.PackageAvailable;
     }
 
     private void OnPatientSelectionChanged(object? sender, SelectionChangedEventArgs e)
@@ -2128,7 +2324,7 @@ public partial class MainWindow : Window
 
     private void UpdateStudyActionAvailability()
     {
-        if (ViewActionButton is null || SendActionButton is null || ModifyActionButton is null)
+        if (ViewActionButton is null || SendActionButton is null || RelayActionButton is null || ModifyActionButton is null)
         {
             return;
         }
@@ -2143,6 +2339,7 @@ public partial class MainWindow : Window
 
         ViewActionButton.IsEnabled = singleSelected;
         SendActionButton.IsEnabled = sendEnabled;
+        RelayActionButton.IsEnabled = sendEnabled;
         ModifyActionButton.IsEnabled = _browserMode == BrowserMode.Database
             && singleSelected
             && selectedStudy?.Availability == StudyAvailability.Imported;

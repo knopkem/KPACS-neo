@@ -5,6 +5,7 @@ using FellowOakDicom;
 using KPACS.DCMClasses;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Services;
+using System.Reflection;
 using System.Globalization;
 
 namespace KPACS.Viewer;
@@ -20,6 +21,8 @@ public partial class App : Application
     public DicomStudyDeletionService StudyDeletionService { get; private set; } = null!;
     public WindowPlacementService WindowPlacementService { get; private set; } = null!;
     public NetworkSettingsService NetworkSettingsService { get; private set; } = null!;
+    public ShareRelaySettingsService ShareRelaySettingsService { get; private set; } = null!;
+    public ShareRelayService ShareRelayService { get; private set; } = null!;
     public StorageScpService StorageScpService { get; private set; } = null!;
     public DicomRemoteStudyBrowserService RemoteStudyBrowserService { get; private set; } = null!;
     public PriorStudyLookupService PriorStudyLookupService { get; private set; } = null!;
@@ -44,6 +47,9 @@ public partial class App : Application
         StudyDeletionService = new DicomStudyDeletionService(Paths, Repository);
         WindowPlacementService = new WindowPlacementService(Path.Combine(Paths.ApplicationDirectory, "window-placement.json"));
         NetworkSettingsService = new NetworkSettingsService(Path.Combine(Paths.ApplicationDirectory, "network-settings.json"), Paths.ApplicationDirectory);
+        ShareRelaySettingsService = new ShareRelaySettingsService(Path.Combine(Paths.ApplicationDirectory, "share-relay-settings.json"), Paths.ApplicationDirectory);
+        string viewerVersion = Assembly.GetExecutingAssembly().GetName().Version?.ToString() ?? "0.0.0";
+        ShareRelayService = new ShareRelayService(Paths.ApplicationDirectory, viewerVersion);
         DicomCommunicationTrace.Configure(
             NetworkSettingsService.CurrentSettings.EnableDicomCommunicationLogging,
             NetworkSettingsService.CurrentSettings.DicomCommunicationLogPath);
