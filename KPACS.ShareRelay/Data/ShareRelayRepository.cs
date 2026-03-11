@@ -124,7 +124,7 @@ public sealed class ShareRelayRepository
             """;
 
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        UserResponse? existing = await connection.QuerySingleOrDefaultAsync<UserResponse>(
+        UserQueryRow? existing = await connection.QuerySingleOrDefaultAsync<UserQueryRow>(
             new CommandDefinition(lookupSql, new { Email = normalizedEmail }, cancellationToken: cancellationToken));
 
         if (existing is null)
@@ -142,12 +142,13 @@ public sealed class ShareRelayRepository
             return created;
         }
 
-        UserResponse updated = existing with
-        {
-            DisplayName = request.DisplayName.Trim(),
-            Organization = NormalizeOptional(request.Organization),
-            UpdatedUtc = now,
-        };
+        UserResponse updated = new(
+            existing.Id,
+            existing.Email,
+            request.DisplayName.Trim(),
+            NormalizeOptional(request.Organization),
+            ToUtcOffset(existing.CreatedUtc),
+            now);
         await connection.ExecuteAsync(new CommandDefinition(updateSql, new
         {
             updated.Id,
@@ -193,7 +194,7 @@ public sealed class ShareRelayRepository
             """;
 
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        DeviceResponse? existing = await connection.QuerySingleOrDefaultAsync<DeviceResponse>(
+        DeviceQueryRow? existing = await connection.QuerySingleOrDefaultAsync<DeviceQueryRow>(
             new CommandDefinition(lookupSql, new { request.UserId, DeviceName = request.DeviceName.Trim() }, cancellationToken: cancellationToken));
 
         if (existing is null)
@@ -226,15 +227,17 @@ public sealed class ShareRelayRepository
             return created;
         }
 
-        DeviceResponse updated = existing with
-        {
-            Platform = request.Platform.Trim(),
-            ViewerVersion = NormalizeOptional(request.ViewerVersion),
-            PublicEncryptionKey = request.PublicEncryptionKey.Trim(),
-            PublicSigningKey = request.PublicSigningKey.Trim(),
-            UpdatedUtc = now,
-            LastSeenUtc = now,
-        };
+        DeviceResponse updated = new(
+            existing.Id,
+            existing.UserId,
+            existing.DeviceName,
+            request.Platform.Trim(),
+            NormalizeOptional(request.ViewerVersion),
+            request.PublicEncryptionKey.Trim(),
+            request.PublicSigningKey.Trim(),
+            ToUtcOffset(existing.CreatedUtc),
+            now,
+            now);
 
         await connection.ExecuteAsync(new CommandDefinition(updateSql, new
         {
@@ -269,7 +272,7 @@ public sealed class ShareRelayRepository
             """;
 
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        List<UserResponse> results = (await connection.QueryAsync<UserResponse>(new CommandDefinition(
+        List<UserQueryRow> rows = (await connection.QueryAsync<UserQueryRow>(new CommandDefinition(
             sql,
             new
             {
@@ -278,7 +281,15 @@ public sealed class ShareRelayRepository
                 Pattern = $"%{normalizedQuery}%",
             },
             cancellationToken: cancellationToken))).ToList();
-        return results;
+        return rows
+            .Select(row => new UserResponse(
+                row.Id,
+                row.Email,
+                row.DisplayName,
+                row.Organization,
+                ToUtcOffset(row.CreatedUtc),
+                ToUtcOffset(row.UpdatedUtc)))
+            .ToList();
     }
 
     public async Task<IReadOnlyList<ContactDeviceResponse>> GetDevicesForUserAsync(Guid userId, CancellationToken cancellationToken)
@@ -303,10 +314,23 @@ public sealed class ShareRelayRepository
             """;
 
         await using NpgsqlConnection connection = await _dataSource.OpenConnectionAsync(cancellationToken);
-        return (await connection.QueryAsync<ContactDeviceResponse>(new CommandDefinition(
+        List<ContactDeviceQueryRow> rows = (await connection.QueryAsync<ContactDeviceQueryRow>(new CommandDefinition(
             sql,
             new { UserId = userId },
             cancellationToken: cancellationToken))).ToList();
+
+        return rows.Select(row => new ContactDeviceResponse(
+            row.Id,
+            row.UserId,
+            row.DeviceName,
+            row.Platform,
+            row.ViewerVersion,
+            row.PublicEncryptionKey,
+            row.PublicSigningKey,
+            ToUtcOffset(row.CreatedUtc),
+            ToUtcOffset(row.UpdatedUtc),
+            row.LastSeenUtc is null ? null : ToUtcOffset(row.LastSeenUtc.Value)))
+            .ToList();
     }
 
     public async Task<CreateShareResponse> CreateShareAsync(CreateShareRequest request, CancellationToken cancellationToken)
@@ -545,9 +569,20 @@ public sealed class ShareRelayRepository
 
     private async Task<IReadOnlyList<ShareRecipientResponse>> LoadRecipientsAsync(NpgsqlConnection connection, Guid shareId, CancellationToken cancellationToken)
     {
-        return (await connection.QueryAsync<ShareRecipientResponse>(new CommandDefinition(
+        List<RecipientQueryRow> rows = (await connection.QueryAsync<RecipientQueryRow>(new CommandDefinition(
             RecipientSql + " where sr.share_id = @ShareId order by u.display_name, u.email;",
             new { ShareId = shareId }, cancellationToken: cancellationToken))).ToList();
+
+        return rows.Select(row => new ShareRecipientResponse(
+            row.RecipientUserId,
+            row.RecipientEmail,
+            row.RecipientDisplayName,
+            row.Status,
+            row.ViewedUtc is null ? null : ToUtcOffset(row.ViewedUtc.Value),
+            row.DownloadedUtc is null ? null : ToUtcOffset(row.DownloadedUtc.Value),
+            row.ImportedUtc is null ? null : ToUtcOffset(row.ImportedUtc.Value),
+            row.AcknowledgedUtc is null ? null : ToUtcOffset(row.AcknowledgedUtc.Value)))
+            .ToList();
     }
 
     private async Task<Dictionary<Guid, IReadOnlyList<ShareRecipientResponse>>> LoadRecipientsByShareAsync(NpgsqlConnection connection, Guid[] shareIds, CancellationToken cancellationToken)
@@ -578,10 +613,10 @@ public sealed class ShareRelayRepository
                     row.RecipientEmail,
                     row.RecipientDisplayName,
                     row.Status,
-                    row.ViewedUtc,
-                    row.DownloadedUtc,
-                    row.ImportedUtc,
-                    row.AcknowledgedUtc)).ToList());
+                    row.ViewedUtc is null ? null : ToUtcOffset(row.ViewedUtc.Value),
+                    row.DownloadedUtc is null ? null : ToUtcOffset(row.DownloadedUtc.Value),
+                    row.ImportedUtc is null ? null : ToUtcOffset(row.ImportedUtc.Value),
+                    row.AcknowledgedUtc is null ? null : ToUtcOffset(row.AcknowledgedUtc.Value))).ToList());
     }
 
     private static ShareSummaryResponse ToSummary(ShareQueryRow row, IReadOnlyList<ShareRecipientResponse> recipients) =>
@@ -597,14 +632,26 @@ public sealed class ShareRelayRepository
             row.IsAnonymized,
             row.Status,
             row.CipherSuite,
-            row.CreatedUtc,
-            row.ExpiresUtc,
-            row.UploadedUtc,
+            ToUtcOffset(row.CreatedUtc),
+            ToUtcOffset(row.ExpiresUtc),
+            row.UploadedUtc is null ? null : ToUtcOffset(row.UploadedUtc.Value),
             row.PackageAvailable,
             row.PackageFileName,
             row.PackageSizeBytes,
             row.ViewerDownloadUrl,
             recipients);
+
+    private static DateTimeOffset ToUtcOffset(DateTime value)
+    {
+        DateTime utc = value.Kind switch
+        {
+            DateTimeKind.Utc => value,
+            DateTimeKind.Local => value.ToUniversalTime(),
+            _ => DateTime.SpecifyKind(value, DateTimeKind.Utc),
+        };
+
+        return new DateTimeOffset(utc);
+    }
 
     private static async Task AppendEventAsync(NpgsqlConnection connection, IDbTransaction transaction, Guid shareId, Guid? actorUserId, Guid? recipientUserId, string eventType, object? details, CancellationToken cancellationToken)
     {
@@ -684,13 +731,45 @@ public sealed class ShareRelayRepository
         bool IsAnonymized,
         string Status,
         string CipherSuite,
-        DateTimeOffset CreatedUtc,
-        DateTimeOffset ExpiresUtc,
-        DateTimeOffset? UploadedUtc,
+        DateTime CreatedUtc,
+        DateTime ExpiresUtc,
+        DateTime? UploadedUtc,
         bool PackageAvailable,
         string? PackageFileName,
         long? PackageSizeBytes,
         string? ViewerDownloadUrl);
+
+    private sealed record UserQueryRow(
+        Guid Id,
+        string Email,
+        string DisplayName,
+        string? Organization,
+        DateTime CreatedUtc,
+        DateTime UpdatedUtc);
+
+    private sealed record DeviceQueryRow(
+        Guid Id,
+        Guid UserId,
+        string DeviceName,
+        string Platform,
+        string? ViewerVersion,
+        string PublicEncryptionKey,
+        string PublicSigningKey,
+        DateTime CreatedUtc,
+        DateTime UpdatedUtc,
+        DateTime? LastSeenUtc);
+
+    private sealed record ContactDeviceQueryRow(
+        Guid Id,
+        Guid UserId,
+        string DeviceName,
+        string Platform,
+        string? ViewerVersion,
+        string PublicEncryptionKey,
+        string PublicSigningKey,
+        DateTime CreatedUtc,
+        DateTime UpdatedUtc,
+        DateTime? LastSeenUtc);
 
     private sealed record RecipientQueryRow(
         Guid ShareId,
@@ -698,8 +777,8 @@ public sealed class ShareRelayRepository
         string RecipientEmail,
         string RecipientDisplayName,
         string Status,
-        DateTimeOffset? ViewedUtc,
-        DateTimeOffset? DownloadedUtc,
-        DateTimeOffset? ImportedUtc,
-        DateTimeOffset? AcknowledgedUtc);
+        DateTime? ViewedUtc,
+        DateTime? DownloadedUtc,
+        DateTime? ImportedUtc,
+        DateTime? AcknowledgedUtc);
 }
