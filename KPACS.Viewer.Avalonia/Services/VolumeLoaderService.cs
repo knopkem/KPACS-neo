@@ -79,6 +79,9 @@ public sealed class VolumeLoaderService
 
             if (!IsParallel(slice.Normal, reference.Normal))
                 return null;
+
+            if (!string.Equals(slice.FrameOfReferenceUid, reference.FrameOfReferenceUid, StringComparison.Ordinal))
+                return null;
         }
 
         // Phase 2: Sort slices by position along the normal direction
@@ -184,6 +187,7 @@ public sealed class VolumeLoaderService
         Vector3D volumeNormal = actualDirection.Dot(computedNormal) >= 0 ? computedNormal : computedNormal * -1;
 
         var sliceFilePaths = slices.Select(s => s.FilePath).ToList();
+        var sliceSopInstanceUids = slices.Select(s => s.SopInstanceUid).ToList();
 
         return new SeriesVolume(
             voxels,
@@ -195,7 +199,10 @@ public sealed class VolumeLoaderService
             globalMin, globalMax,
             reference.IsMonochrome1,
             reference.SeriesInstanceUid,
-            sliceFilePaths);
+            reference.FrameOfReferenceUid,
+            reference.AcquisitionNumber,
+            sliceFilePaths,
+            sliceSopInstanceUids);
     }
 
     private static SliceData? LoadSlice(string filePath)
@@ -272,6 +279,9 @@ public sealed class VolumeLoaderService
                 WindowCenter = wc,
                 WindowWidth = ww,
                 SeriesInstanceUid = spatial.SeriesInstanceUid,
+                SopInstanceUid = spatial.SopInstanceUid,
+                FrameOfReferenceUid = spatial.FrameOfReferenceUid,
+                AcquisitionNumber = spatial.AcquisitionNumber,
             };
         }
         catch
@@ -307,6 +317,9 @@ public sealed class VolumeLoaderService
         public double WindowCenter { get; init; }
         public double WindowWidth { get; init; }
         public string SeriesInstanceUid { get; init; } = "";
+        public string SopInstanceUid { get; init; } = "";
+        public string FrameOfReferenceUid { get; init; } = "";
+        public string AcquisitionNumber { get; init; } = "";
         public double SortPosition { get; set; }
     }
 }

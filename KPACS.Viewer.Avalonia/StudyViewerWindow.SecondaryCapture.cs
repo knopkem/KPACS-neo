@@ -4,6 +4,7 @@ using FellowOakDicom;
 using KPACS.DCMClasses;
 using KPACS.Viewer.Controls;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.Rendering;
 using KPACS.Viewer.Services;
 
 namespace KPACS.Viewer;
@@ -29,7 +30,7 @@ public partial class StudyViewerWindow
         {
             foreach (InstanceRecord instance in series.Instances)
             {
-                if (!IsSecondaryCaptureSeries(series, instance))
+                if (!IsManagedSecondaryCapture(series, instance))
                 {
                     continue;
                 }
@@ -76,7 +77,7 @@ public partial class StudyViewerWindow
 
     private void UpdateSecondaryCaptureIndicator(ViewportSlot slot)
     {
-        InstanceRecord? instance = GetCurrentInstance(slot);
+        InstanceRecord? instance = ResolveSecondaryCaptureSourceInstance(slot);
         bool isVisible = instance is not null && slot.Series is not null && CanToggleSecondaryCapture(slot.Series, instance);
         bool hasCapture = instance is not null && _secondaryCaptureLinksBySourceSop.ContainsKey(instance.SopInstanceUid);
         slot.Panel.SetSecondaryCaptureState(isVisible, hasCapture, !_secondaryCaptureBusy);
@@ -89,7 +90,7 @@ public partial class StudyViewerWindow
             return;
         }
 
-        InstanceRecord? sourceInstance = GetCurrentInstance(slot);
+        InstanceRecord? sourceInstance = ResolveSecondaryCaptureSourceInstance(slot);
         if (sourceInstance is null || !CanToggleSecondaryCapture(slot.Series, sourceInstance))
         {
             return;
@@ -135,7 +136,7 @@ public partial class StudyViewerWindow
             ? 1
             : secondaryCaptureSeries.Instances.Max(item => item.InstanceNumber) + 1;
 
-        string sopInstanceUid = DicomFunctions.CreateUniqueUid();
+        string sopInstanceUid = DicomFunctions.CreateUniqueUidWithRoot(DicomTagConstants.KPACSUidRoot);
         string outputDirectory = Path.Combine(_context.StudyDetails.Study.StoragePath, SanitizePathComponent(secondaryCaptureSeries.SeriesInstanceUid));
         Directory.CreateDirectory(outputDirectory);
         string outputFile = Path.Combine(outputDirectory, SanitizePathComponent(sopInstanceUid) + ".dcm");
@@ -261,7 +262,7 @@ public partial class StudyViewerWindow
             string.Equals(series.Modality, "OT", StringComparison.OrdinalIgnoreCase)
             && string.Equals(series.SeriesDescription, SecondaryCaptureSeriesDescription, StringComparison.OrdinalIgnoreCase));
 
-        if (existingSeries is not null)
+        if (existingSeries is not null && HasManagedSecondaryCapture(existingSeries))
         {
             return existingSeries;
         }
@@ -330,6 +331,62 @@ public partial class StudyViewerWindow
         return slot.Series.Instances[index];
     }
 
+    private InstanceRecord? ResolveSecondaryCaptureSourceInstance(ViewportSlot slot)
+    {
+        if (slot.Series is null || slot.Series.Instances.Count == 0)
+        {
+            return null;
+        }
+
+        if (!slot.Panel.IsVolumeBound)
+        {
+            return GetCurrentInstance(slot);
+        }
+
+        string filePath = slot.Panel.SpatialMetadata?.FilePath ?? string.Empty;
+        if (!string.IsNullOrWhiteSpace(filePath))
+        {
+            InstanceRecord? byPath = slot.Series.Instances.FirstOrDefault(instance =>
+                string.Equals(instance.FilePath, filePath, StringComparison.OrdinalIgnoreCase)
+                || string.Equals(instance.SourceFilePath, filePath, StringComparison.OrdinalIgnoreCase));
+            if (byPath is not null)
+            {
+                return byPath;
+            }
+        }
+
+        if (slot.Panel.VolumeOrientation == SliceOrientation.Axial)
+        {
+            return GetCurrentInstance(slot);
+        }
+
+        DicomSpatialMetadata? displayedSpatial = slot.Panel.SpatialMetadata;
+        if (displayedSpatial is null)
+        {
+            return GetCurrentInstance(slot);
+        }
+
+        InstanceRecord? bestInstance = null;
+        double bestDistance = double.MaxValue;
+        foreach (InstanceRecord candidate in slot.Series.Instances)
+        {
+            DicomSpatialMetadata? candidateSpatial = GetSpatialMetadata(candidate);
+            if (candidateSpatial is null || !candidateSpatial.IsCompatibleWith(displayedSpatial))
+            {
+                continue;
+            }
+
+            double distance = candidateSpatial.DistanceToPlane(displayedSpatial.Origin);
+            if (distance < bestDistance)
+            {
+                bestDistance = distance;
+                bestInstance = candidate;
+            }
+        }
+
+        return bestInstance ?? GetCurrentInstance(slot);
+    }
+
     private static bool TryGetSourceSopInstanceUid(DicomDataset dataset, out string sourceSopInstanceUid)
     {
         sourceSopInstanceUid = string.Empty;
@@ -373,6 +430,17 @@ public partial class StudyViewerWindow
         return string.Equals(instance.SopClassUid, DicomTagConstants.UID_SecondaryCaptureImageStorage, StringComparison.OrdinalIgnoreCase)
             || (string.Equals(series.Modality, "OT", StringComparison.OrdinalIgnoreCase)
                 && string.Equals(series.SeriesDescription, SecondaryCaptureSeriesDescription, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static bool IsManagedSecondaryCapture(SeriesRecord series, InstanceRecord instance)
+    {
+        return IsSecondaryCaptureSeries(series, instance)
+            && DicomFunctions.IsUidFromRoot(instance.SopInstanceUid, DicomTagConstants.KPACSUidRoot);
+    }
+
+    private static bool HasManagedSecondaryCapture(SeriesRecord series)
+    {
+        return series.Instances.Any(instance => IsManagedSecondaryCapture(series, instance));
     }
 
     private static string SanitizePathComponent(string value)

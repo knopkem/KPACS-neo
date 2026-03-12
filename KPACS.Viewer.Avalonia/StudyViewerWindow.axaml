@@ -241,14 +241,42 @@
             <Popup x:Name="LayoutPopup" Placement="Top" IsLightDismissEnabled="True" Closed="OnAnyActionPopupClosed">
                 <Border Background="#F0262626" BorderBrush="#FF5A5A5A" BorderThickness="1" CornerRadius="8" Padding="8"
                         PointerEntered="OnActionToolbarPointerEntered" PointerExited="OnActionToolbarPointerExited">
-                    <StackPanel Width="160" Spacing="6">
-                        <Button Classes="popupAction" Content="1:1" Tag="1x1" Click="OnLayoutPopupClick" />
-                        <Button Classes="popupAction" Content="2:1" Tag="2x1" Click="OnLayoutPopupClick" />
-                        <Button Classes="popupAction" Content="3:1" Tag="3x1" Click="OnLayoutPopupClick" />
-                        <Button Classes="popupAction" Content="2:2" Tag="2x2" Click="OnLayoutPopupClick" />
-                        <Button Classes="popupAction" Content="3:2" Tag="3x2" Click="OnLayoutPopupClick" />
-                        <Button Classes="popupAction" Content="3:3" Tag="3x3" Click="OnLayoutPopupClick" />
-                        <Button Classes="popupAction" Content="4:3" Tag="4x3" Click="OnLayoutPopupClick" />
+                    <StackPanel Width="320" Spacing="10">
+                        <StackPanel Spacing="6">
+                            <TextBlock Classes="popupSectionTitle" Text="Standard layouts" />
+                            <WrapPanel ItemWidth="96" Orientation="Horizontal">
+                                <Button Classes="popupAction" Content="1:1" Tag="1x1" Click="OnLayoutPopupClick" />
+                                <Button Classes="popupAction" Content="2:1" Tag="2x1" Click="OnLayoutPopupClick" />
+                                <Button Classes="popupAction" Content="3:1" Tag="3x1" Click="OnLayoutPopupClick" />
+                                <Button Classes="popupAction" Content="2:2" Tag="2x2" Click="OnLayoutPopupClick" />
+                                <Button Classes="popupAction" Content="3:2" Tag="3x2" Click="OnLayoutPopupClick" />
+                                <Button Classes="popupAction" Content="3:3" Tag="3x3" Click="OnLayoutPopupClick" />
+                                <Button Classes="popupAction" Content="4:3" Tag="4x3" Click="OnLayoutPopupClick" />
+                            </WrapPanel>
+                        </StackPanel>
+
+                        <Border Height="1" Background="#404A4A4A" />
+
+                        <StackPanel Spacing="6">
+                            <TextBlock Classes="popupSectionTitle" Text="Custom layout" />
+                            <TextBlock Foreground="#FFBDBDBD"
+                                       FontSize="11"
+                                       Text="Beispiele: 2:3 für 2 Reihen mit je 3 Bildern oder 1,2 für Reihe 1 = 1 Bild und Reihe 2 = 2 Bilder." />
+                            <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="6">
+                                <TextBox x:Name="CustomLayoutTextBox"
+                                         Watermark="z.B. 2:3 oder 1,2"
+                                         KeyUp="OnCustomLayoutTextBoxKeyUp" />
+                                <Button Grid.Column="1" Classes="popupAction" Content="Apply" Click="OnApplyCustomLayoutClick" />
+                                <Button Grid.Column="2" Classes="popupAction" Content="Save" Click="OnSaveCustomLayoutClick" />
+                            </Grid>
+                        </StackPanel>
+
+                        <Border Height="1" Background="#404A4A4A" />
+
+                        <StackPanel Spacing="6">
+                            <TextBlock Classes="popupSectionTitle" Text="Saved custom layouts" />
+                            <WrapPanel x:Name="SavedCustomLayoutsPanel" ItemWidth="148" Orientation="Horizontal" />
+                        </StackPanel>
                     </StackPanel>
                 </Border>
             </Popup>

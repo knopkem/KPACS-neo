@@ -135,6 +135,17 @@ public static class VolumeReslicer
         };
     }
 
+    public static DicomSpatialMetadata GetSliceSpatialMetadata(SeriesVolume volume, SliceOrientation orientation, int sliceIndex)
+    {
+        return orientation switch
+        {
+            SliceOrientation.Axial => GetAxialSpatialMetadata(volume, sliceIndex),
+            SliceOrientation.Coronal => GetCoronalSpatialMetadata(volume, sliceIndex),
+            SliceOrientation.Sagittal => GetSagittalSpatialMetadata(volume, sliceIndex),
+            _ => GetAxialSpatialMetadata(volume, sliceIndex),
+        };
+    }
+
     private static ReslicedImage ExtractAxial(SeriesVolume volume, int z)
     {
         z = Math.Clamp(z, 0, volume.SizeZ - 1);
@@ -144,22 +155,7 @@ public static class VolumeReslicer
 
         int srcOffset = z * volume.SizeY * volume.SizeX;
         Array.Copy(volume.Voxels, srcOffset, pixels, 0, pixels.Length);
-
-        Vector3D sliceOrigin = volume.Origin + volume.Normal * (z * volume.SpacingZ);
-
-        var spatial = new DicomSpatialMetadata(
-            FilePath: z < volume.SliceFilePaths.Count ? volume.SliceFilePaths[z] : "",
-            SopInstanceUid: "",
-            SeriesInstanceUid: volume.SeriesInstanceUid,
-            FrameOfReferenceUid: "",
-            AcquisitionNumber: "",
-            width, height,
-            RowSpacing: volume.SpacingY,
-            ColumnSpacing: volume.SpacingX,
-            sliceOrigin,
-            volume.RowDirection,
-            volume.ColumnDirection,
-            volume.Normal);
+        DicomSpatialMetadata spatial = GetAxialSpatialMetadata(volume, z);
 
         return new ReslicedImage
         {
@@ -191,23 +187,7 @@ public static class VolumeReslicer
             }
         }
 
-        Vector3D sliceOrigin = volume.Origin
-            + volume.ColumnDirection * (y * volume.SpacingY)
-            + volume.Normal * ((volume.SizeZ - 1) * volume.SpacingZ);
-
-        var spatial = new DicomSpatialMetadata(
-            FilePath: "",
-            SopInstanceUid: "",
-            SeriesInstanceUid: volume.SeriesInstanceUid,
-            FrameOfReferenceUid: "",
-            AcquisitionNumber: "",
-            width, height,
-            RowSpacing: targetSpacingY,
-            ColumnSpacing: volume.SpacingX,
-            sliceOrigin,
-            volume.RowDirection,
-            volume.Normal * -1,
-            volume.ColumnDirection);
+        DicomSpatialMetadata spatial = GetCoronalSpatialMetadata(volume, y);
 
         return new ReslicedImage
         {
@@ -239,23 +219,7 @@ public static class VolumeReslicer
             }
         }
 
-        Vector3D sliceOrigin = volume.Origin
-            + volume.RowDirection * (x * volume.SpacingX)
-            + volume.Normal * ((volume.SizeZ - 1) * volume.SpacingZ);
-
-        var spatial = new DicomSpatialMetadata(
-            FilePath: "",
-            SopInstanceUid: "",
-            SeriesInstanceUid: volume.SeriesInstanceUid,
-            FrameOfReferenceUid: "",
-            AcquisitionNumber: "",
-            width, height,
-            RowSpacing: targetSpacingY,
-            ColumnSpacing: volume.SpacingY,
-            sliceOrigin,
-            volume.ColumnDirection,
-            volume.Normal * -1,
-            volume.RowDirection);
+        DicomSpatialMetadata spatial = GetSagittalSpatialMetadata(volume, x);
 
         return new ReslicedImage
         {
@@ -266,6 +230,76 @@ public static class VolumeReslicer
             PixelSpacingY = targetSpacingY,
             SpatialMetadata = spatial,
         };
+    }
+
+    private static DicomSpatialMetadata GetAxialSpatialMetadata(SeriesVolume volume, int sliceIndex)
+    {
+        sliceIndex = Math.Clamp(sliceIndex, 0, volume.SizeZ - 1);
+        Vector3D sliceOrigin = volume.Origin + volume.Normal * (sliceIndex * volume.SpacingZ);
+        return new DicomSpatialMetadata(
+            FilePath: sliceIndex < volume.SliceFilePaths.Count ? volume.SliceFilePaths[sliceIndex] : "",
+            SopInstanceUid: sliceIndex < volume.SliceSopInstanceUids.Count ? volume.SliceSopInstanceUids[sliceIndex] : "",
+            SeriesInstanceUid: volume.SeriesInstanceUid,
+            FrameOfReferenceUid: volume.FrameOfReferenceUid,
+            AcquisitionNumber: volume.AcquisitionNumber,
+            volume.SizeX,
+            volume.SizeY,
+            RowSpacing: volume.SpacingY,
+            ColumnSpacing: volume.SpacingX,
+            sliceOrigin,
+            volume.RowDirection,
+            volume.ColumnDirection,
+            volume.Normal);
+    }
+
+    private static DicomSpatialMetadata GetCoronalSpatialMetadata(SeriesVolume volume, int sliceIndex)
+    {
+        sliceIndex = Math.Clamp(sliceIndex, 0, volume.SizeY - 1);
+        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
+        Vector3D sliceOrigin = volume.Origin
+            + volume.ColumnDirection * (sliceIndex * volume.SpacingY)
+            + volume.Normal * ((volume.SizeZ - 1) * volume.SpacingZ);
+
+        return new DicomSpatialMetadata(
+            FilePath: string.Empty,
+            SopInstanceUid: string.Empty,
+            SeriesInstanceUid: volume.SeriesInstanceUid,
+            FrameOfReferenceUid: volume.FrameOfReferenceUid,
+            AcquisitionNumber: volume.AcquisitionNumber,
+            volume.SizeX,
+            height,
+            RowSpacing: targetSpacingY,
+            ColumnSpacing: volume.SpacingX,
+            sliceOrigin,
+            volume.RowDirection,
+            volume.Normal * -1,
+            volume.ColumnDirection);
+    }
+
+    private static DicomSpatialMetadata GetSagittalSpatialMetadata(SeriesVolume volume, int sliceIndex)
+    {
+        sliceIndex = Math.Clamp(sliceIndex, 0, volume.SizeX - 1);
+        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
+        Vector3D sliceOrigin = volume.Origin
+            + volume.RowDirection * (sliceIndex * volume.SpacingX)
+            + volume.Normal * ((volume.SizeZ - 1) * volume.SpacingZ);
+
+        return new DicomSpatialMetadata(
+            FilePath: string.Empty,
+            SopInstanceUid: string.Empty,
+            SeriesInstanceUid: volume.SeriesInstanceUid,
+            FrameOfReferenceUid: volume.FrameOfReferenceUid,
+            AcquisitionNumber: volume.AcquisitionNumber,
+            volume.SizeY,
+            height,
+            RowSpacing: targetSpacingY,
+            ColumnSpacing: volume.SpacingY,
+            sliceOrigin,
+            volume.ColumnDirection,
+            volume.Normal * -1,
+            volume.RowDirection);
     }
 
     private static int GetResampledDepth(int sliceCount, double sliceSpacing, double targetSpacing)

@@ -278,6 +278,7 @@ public static class DicomFunctions
     // ==============================================================================================
 
     private static readonly object _uidLock = new();
+    private static long _uidCounter;
 
     /// <summary>
     /// Creates a unique DICOM UID using fo-dicom's UID generator.
@@ -292,6 +293,54 @@ public static class DicomFunctions
             var uid = DicomUIDGenerator.GenerateDerivedFromUUID();
             return uid.UID;
         }
+    }
+
+    /// <summary>
+    /// Creates a unique DICOM UID under a specific organizational root.
+    /// </summary>
+    public static string CreateUniqueUidWithRoot(string root)
+    {
+        lock (_uidLock)
+        {
+            string normalizedRoot = string.IsNullOrWhiteSpace(root)
+                ? DicomTagConstants.KPACSUidRoot
+                : root.Trim().TrimEnd('.');
+
+            long timestamp = DateTimeOffset.UtcNow.ToUnixTimeMilliseconds();
+            long counter = ++_uidCounter;
+            string uid = $"{normalizedRoot}.{timestamp}.{Environment.ProcessId}.{counter}";
+            if (uid.Length <= 64)
+            {
+                return uid;
+            }
+
+            uid = $"{normalizedRoot}.{timestamp}.{counter}";
+            if (uid.Length <= 64)
+            {
+                return uid;
+            }
+
+            int suffixLength = Math.Max(1, 64 - normalizedRoot.Length - 1);
+            string suffix = $"{timestamp}{counter}";
+            if (suffix.Length > suffixLength)
+            {
+                suffix = suffix[^suffixLength..];
+            }
+
+            return $"{normalizedRoot}.{suffix}";
+        }
+    }
+
+    public static bool IsUidFromRoot(string? uid, string root)
+    {
+        if (string.IsNullOrWhiteSpace(uid) || string.IsNullOrWhiteSpace(root))
+        {
+            return false;
+        }
+
+        string normalizedRoot = root.Trim().TrimEnd('.');
+        return string.Equals(uid, normalizedRoot, StringComparison.Ordinal)
+            || uid.StartsWith(normalizedRoot + ".", StringComparison.Ordinal);
     }
 
     /// <summary>

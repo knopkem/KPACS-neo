@@ -68,11 +68,23 @@ public sealed class SeriesVolume
     /// <summary>Series Instance UID this volume was built from.</summary>
     public string SeriesInstanceUid { get; }
 
+    /// <summary>Frame of Reference UID shared by the source slices.</summary>
+    public string FrameOfReferenceUid { get; }
+
+    /// <summary>Acquisition number shared by the source slices, if available.</summary>
+    public string AcquisitionNumber { get; }
+
     /// <summary>
     /// Ordered file paths of the instances that make up this volume.
     /// Index i corresponds to slice z = i.
     /// </summary>
     public IReadOnlyList<string> SliceFilePaths { get; }
+
+    /// <summary>
+    /// Ordered SOP Instance UIDs of the instances that make up this volume.
+    /// Index i corresponds to slice z = i.
+    /// </summary>
+    public IReadOnlyList<string> SliceSopInstanceUids { get; }
 
     public SeriesVolume(
         short[] voxels,
@@ -84,7 +96,10 @@ public sealed class SeriesVolume
         short minValue, short maxValue,
         bool isMonochrome1,
         string seriesInstanceUid,
-        IReadOnlyList<string> sliceFilePaths)
+        string frameOfReferenceUid,
+        string acquisitionNumber,
+        IReadOnlyList<string> sliceFilePaths,
+        IReadOnlyList<string> sliceSopInstanceUids)
     {
         Voxels = voxels;
         SizeX = sizeX;
@@ -103,7 +118,10 @@ public sealed class SeriesVolume
         MaxValue = maxValue;
         IsMonochrome1 = isMonochrome1;
         SeriesInstanceUid = seriesInstanceUid;
+        FrameOfReferenceUid = frameOfReferenceUid;
+        AcquisitionNumber = acquisitionNumber;
         SliceFilePaths = sliceFilePaths;
+        SliceSopInstanceUids = sliceSopInstanceUids;
     }
 
     /// <summary>
@@ -186,10 +204,10 @@ public sealed class SeriesVolume
         string filePath = sliceIndex < SliceFilePaths.Count ? SliceFilePaths[sliceIndex] : "";
         return new DicomSpatialMetadata(
             filePath,
-            SopInstanceUid: "",
+            SopInstanceUid: sliceIndex < SliceSopInstanceUids.Count ? SliceSopInstanceUids[sliceIndex] : "",
             SeriesInstanceUid,
-            FrameOfReferenceUid: "",
-            AcquisitionNumber: "",
+            FrameOfReferenceUid,
+            AcquisitionNumber,
             SizeX, SizeY,
             SpacingY, SpacingX,
             sliceOrigin,

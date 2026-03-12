@@ -91,7 +91,8 @@ public static class DicomTagConstants
     public const string UID_MediaStorageDirectoryStorage = "1.2.840.10008.1.3.10";
 
     // KPACS-specific constants
-    public const string KPACSImplementationClassUID = "1.2.826.0.1.3680043.2.22014.1";
+    public const string KPACSUidRoot = "1.2.826.0.1.3680043.2.22014";
+    public const string KPACSImplementationClassUID = KPACSUidRoot + ".1";
     public const string KPACSImplementationVersionName = "KPACS";
     public const string KPACS = "K-PACS";
     public const string KPACSManufacturer = KPACS;

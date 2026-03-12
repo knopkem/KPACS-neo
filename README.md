@@ -33,7 +33,7 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
 ├── App.axaml / App.axaml.cs      — Application entry point, imagebox bootstrap, Semi.Avalonia light theme
 ├── Program.cs                    — Avalonia desktop entry point
 ├── MainWindow.axaml / .cs        — K-PACS-style study browser with Database / Network / Filesystem modes
-├── StudyViewerWindow.axaml / .cs — Multi-viewport study viewer with thumbnails, LUTs, stack tool, progressive remote loading, and volume-aware slab navigation
+├── StudyViewerWindow.axaml / .cs — Multi-viewport study viewer with thumbnails, custom layouts, linked synchronization, progressive remote loading, and volume-aware slab navigation
 ├── ViewerTypes.cs                — ColorScheme, ViewerTool, MouseWheelMode enumerations
 ├── Models/
 │   ├── BackgroundJobModels.cs    — Background import/send job states and metadata
@@ -41,7 +41,7 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
 │   ├── NetworkModels.cs          — Remote archive and network settings models
 │   └── ToastNotificationItem.cs  — Transient in-window notification models
 ├── Controls/
-│   └── DicomViewPanel.axaml / .cs— Core viewer control: zoom, pan, window/level, stack scrolling, overlays, and in-panel volume controls
+│   └── DicomViewPanel.axaml / .cs— Core viewer control: zoom, pan, window/level, stack scrolling, DICOM bitmap overlays, color photometric handling, and in-panel volume controls
 ├── Services/
 │   ├── BackgroundJobService.cs   — Central job tracking and per-job log files for import/send
 │   ├── ImageboxBootstrap.cs      — Local imagebox path setup under LocalApplicationData
@@ -55,6 +55,7 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
 │   ├── RemoteStudyRetrievalSession.cs — Progressive representative-image-first retrieval
 │   ├── StorageScpService.cs      — Local Storage SCP receiver with import pipeline
 │   ├── VolumeLoaderService.cs    — Series-to-volume loader for axial/coronal/sagittal reconstruction
+│   ├── VolumeRegistrationService.cs — Lightweight translation-based prior/cross-modality registration for linked navigation
 │   ├── ViewerStudyContext.cs     — Study viewer input context
 │   └── WindowPlacementService.cs — Window geometry persistence
 ├── Windows/
@@ -90,12 +91,15 @@ The Avalonia application has moved beyond a single-file viewer and now includes 
 - **Preview-before-import workflow**: filesystem scans build preview studies first, and opening a study can copy it into the local imagebox in the background while it is already viewable
 - **Study actions**: view, send to remote archive, pseudonymize, and delete study (including multi-select send/delete for local studies)
 - **Background job monitor** for import/send tasks with progress, per-job logs, and optional DICOM communication trace inspection
-- **Multi-window study viewing** with configurable 1-4 viewer windows, persisted placement per viewer, and a safety-first clear-all-open-viewers flow before opening a new study
-- **Multi-viewport study viewer** with thumbnail strip, layout selection, LUT switching, stack-tool drag behavior, direct active-viewport selection, and drag-reassignable series layouting
-- **Interactive orientation/navigation overlays** including patient left/right markers and a Shift-held transient 3D cursor for cross-view localization
+- **Multi-window study viewing** with configurable 1-4 viewer windows, persisted placement per viewer, cross-window linked navigation, and a safety-first clear-all-open-viewers flow before opening a new study
+- **Multi-viewport study viewer** with thumbnail strip, standard and custom layouts, double-click single-view focus toggle, LUT switching, stack-tool drag behavior, direct active-viewport selection, and drag-reassignable series layouting
+- **Interactive orientation/navigation overlays** including patient left/right markers and a Shift-held transient 3D cursor for cross-view localization within the same viewer or across open viewers
 - **Editable measurement tools** including pixel lens, line, angle, rectangular ROI, and polygon ROI, anchored to the referenced slice geometry in patient space
 - **Volume-aware series viewing** for real volumetric CT/MR stacks with cached in-memory voxel volumes, axial/coronal/sagittal reslicing, and slab projection modes
 - **In-panel volume interaction badges** shown only for true volume datasets: orientation switching, projection-mode switching, and drag-adjustable slab thickness in mm
+- **Linked slice synchronization** for same-space series plus lightweight prior-study / CT-MR fallback registration based on cached voxel volumes
+- **Key-image workflow** with K-PACS-root Secondary Capture generation, volume-mode key-image toggling, and preview-strip marking only for K-PACS-managed key-image series
+- **DICOM rendering coverage** including bitmap overlay planes (60xx), embedded overlay bits, RGB Secondary Capture, and multiple YBR photometric interpretations
 - **Search/filter support** in Database, Filesystem, and Network mode, including wildcard remote matching and safe blocking of empty remote queries
 - **Local Storage SCP receiving** backed by fo-dicom with automatic import into the local imagebox
 - **Operational polish** including toast notifications, persisted browser/viewer window placement, persisted study browser splitters, and non-modal viewer windows
@@ -241,6 +245,15 @@ Additional runtime configuration files are stored alongside the imagebox root:
 - The orientation badge inside the view panel switches between Axial, Coronal, and Sagittal.
 - The projection badge inside the view panel switches between MPR, MipPR, MinPR, and MPVRT.
 - Dragging on the projection badge changes slab thickness in millimeters; holding Shift while dragging enables finer adjustment.
+- Linked navigation continues to use exact patient-space matching for compatible series and can fall back to a lightweight translation-only volume registration for prior studies or cross-modality comparisons when both sides have volumes.
+- Open viewer windows for the same patient can broadcast linked navigation and Shift-based 3D cursor updates across monitors.
+
+### Viewer interaction notes
+
+- The layout popup supports both standard grids and custom row-based layouts such as `2:3` or `1,2`.
+- Double-clicking a viewport toggles between the current layout and a focused single-view mode.
+- Key-image preview badges are reserved for K-PACS-managed Secondary Capture series generated under the K-PACS UID root.
+- Bitmap overlays from 60xx groups are rendered directly in the panel, with fallback extraction from embedded overlay bits when needed.
 
 ### Remote DICOM archive configuration examples
 

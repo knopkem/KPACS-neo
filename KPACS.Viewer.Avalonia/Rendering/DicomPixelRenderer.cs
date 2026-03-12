@@ -27,12 +27,17 @@ public static class DicomPixelRenderer
         double windowCenter, double windowWidth,
         byte[] lutR, byte[] lutG, byte[] lutB,
         bool isMonochrome1,
+        string photometricInterpretation,
+        int planarConfiguration,
         byte[] outputBgra)
     {
         if (samplesPerPixel >= 3)
         {
             RenderRgb(rawPixels, width, height,
-                windowCenter, windowWidth, outputBgra);
+                windowCenter, windowWidth,
+                photometricInterpretation,
+                planarConfiguration,
+                outputBgra);
         }
         else if (bitsAllocated >= 16)
         {
@@ -253,12 +258,15 @@ public static class DicomPixelRenderer
     private static void RenderRgb(
         byte[] rawPixels, int width, int height,
         double windowCenter, double windowWidth,
+        string photometricInterpretation,
+        int planarConfiguration,
         byte[] outputBgra)
     {
         int pixelCount = width * height;
         byte[]? contrastLut = null;
         bool needsContrast = !(Math.Abs(windowCenter - 127) < 1 && Math.Abs(windowWidth - 255) < 1)
                              && windowWidth > 0;
+        string photometric = (photometricInterpretation ?? "RGB").Trim().ToUpperInvariant();
 
         if (needsContrast)
         {
@@ -271,15 +279,9 @@ public static class DicomPixelRenderer
             }
         }
 
-        int srcIdx = 0;
-        int dstIdx = 0;
-
-        for (int p = 0; p < pixelCount && srcIdx + 2 < rawPixels.Length; p++)
+        for (int pixelIndex = 0, dstIdx = 0; pixelIndex < pixelCount; pixelIndex++, dstIdx += 4)
         {
-            byte r = rawPixels[srcIdx];
-            byte g = rawPixels[srcIdx + 1];
-            byte b = rawPixels[srcIdx + 2];
-            srcIdx += 3;
+            ReadColorPixel(rawPixels, pixelCount, pixelIndex, photometric, planarConfiguration, out byte r, out byte g, out byte b);
 
             if (contrastLut != null)
             {
@@ -292,7 +294,203 @@ public static class DicomPixelRenderer
             outputBgra[dstIdx + 1] = g;
             outputBgra[dstIdx + 2] = r;
             outputBgra[dstIdx + 3] = 255;
-            dstIdx += 4;
         }
     }
+
+    private static void ReadColorPixel(
+        byte[] rawPixels,
+        int pixelCount,
+        int pixelIndex,
+        string photometricInterpretation,
+        int planarConfiguration,
+        out byte r,
+        out byte g,
+        out byte b)
+    {
+        switch (photometricInterpretation)
+        {
+            case "RGB":
+                ReadRgbPixel(rawPixels, pixelCount, pixelIndex, planarConfiguration, out r, out g, out b);
+                return;
+            case "YBR_FULL":
+                ReadYbrFullPixel(rawPixels, pixelCount, pixelIndex, planarConfiguration, out r, out g, out b);
+                return;
+            case "YBR_FULL_422":
+                ReadYbrFull422Pixel(rawPixels, pixelCount, pixelIndex, out r, out g, out b);
+                return;
+            case "YBR_PARTIAL_422":
+                ReadYbrPartial422Pixel(rawPixels, pixelCount, pixelIndex, out r, out g, out b);
+                return;
+            case "YBR_ICT":
+                ReadYbrIctPixel(rawPixels, pixelCount, pixelIndex, out r, out g, out b);
+                return;
+            case "YBR_RCT":
+                ReadYbrRctPixel(rawPixels, pixelCount, pixelIndex, out r, out g, out b);
+                return;
+            default:
+                ReadRgbPixel(rawPixels, pixelCount, pixelIndex, planarConfiguration, out r, out g, out b);
+                return;
+        }
+    }
+
+    private static void ReadRgbPixel(
+        byte[] rawPixels,
+        int pixelCount,
+        int pixelIndex,
+        int planarConfiguration,
+        out byte r,
+        out byte g,
+        out byte b)
+    {
+        if (planarConfiguration == 1)
+        {
+            int planeSize = pixelCount;
+            r = ReadByteOrDefault(rawPixels, pixelIndex);
+            g = ReadByteOrDefault(rawPixels, planeSize + pixelIndex);
+            b = ReadByteOrDefault(rawPixels, (planeSize * 2) + pixelIndex);
+            return;
+        }
+
+        int offset = pixelIndex * 3;
+        r = ReadByteOrDefault(rawPixels, offset);
+        g = ReadByteOrDefault(rawPixels, offset + 1);
+        b = ReadByteOrDefault(rawPixels, offset + 2);
+    }
+
+    private static void ReadYbrFullPixel(
+        byte[] rawPixels,
+        int pixelCount,
+        int pixelIndex,
+        int planarConfiguration,
+        out byte r,
+        out byte g,
+        out byte b)
+    {
+        byte y;
+        byte cb;
+        byte cr;
+
+        if (planarConfiguration == 1)
+        {
+            int planeSize = pixelCount;
+            y = ReadByteOrDefault(rawPixels, pixelIndex);
+            cb = ReadByteOrDefault(rawPixels, planeSize + pixelIndex);
+            cr = ReadByteOrDefault(rawPixels, (planeSize * 2) + pixelIndex);
+        }
+        else
+        {
+            int offset = pixelIndex * 3;
+            y = ReadByteOrDefault(rawPixels, offset);
+            cb = ReadByteOrDefault(rawPixels, offset + 1);
+            cr = ReadByteOrDefault(rawPixels, offset + 2);
+        }
+
+        ConvertYbrFullToRgb(y, cb, cr, out r, out g, out b);
+    }
+
+    private static void ReadYbrFull422Pixel(
+        byte[] rawPixels,
+        int pixelCount,
+        int pixelIndex,
+        out byte r,
+        out byte g,
+        out byte b)
+    {
+        int pairIndex = pixelIndex / 2;
+        int offset = pairIndex * 4;
+        byte y = ReadByteOrDefault(rawPixels, offset + (pixelIndex % 2));
+        byte cb = ReadByteOrDefault(rawPixels, offset + 2);
+        byte cr = ReadByteOrDefault(rawPixels, offset + 3);
+        ConvertYbrFullToRgb(y, cb, cr, out r, out g, out b);
+    }
+
+    private static void ReadYbrPartial422Pixel(
+        byte[] rawPixels,
+        int pixelCount,
+        int pixelIndex,
+        out byte r,
+        out byte g,
+        out byte b)
+    {
+        int pairIndex = pixelIndex / 2;
+        int offset = pairIndex * 4;
+        byte y = ReadByteOrDefault(rawPixels, offset + (pixelIndex % 2));
+        byte cb = ReadByteOrDefault(rawPixels, offset + 2);
+        byte cr = ReadByteOrDefault(rawPixels, offset + 3);
+        ConvertYbrPartialToRgb(y, cb, cr, out r, out g, out b);
+    }
+
+    private static void ReadYbrIctPixel(
+        byte[] rawPixels,
+        int pixelCount,
+        int pixelIndex,
+        out byte r,
+        out byte g,
+        out byte b)
+    {
+        int offset = pixelIndex * 3;
+        double y = ReadByteOrDefault(rawPixels, offset);
+        double cb = ReadByteOrDefault(rawPixels, offset + 1);
+        double cr = ReadByteOrDefault(rawPixels, offset + 2);
+        double green = y - (0.34413 * cb) - (0.71414 * cr);
+        double red = y + (1.402 * cr);
+        double blue = y + (1.772 * cb);
+        r = ClampToByte(red);
+        g = ClampToByte(green);
+        b = ClampToByte(blue);
+    }
+
+    private static void ReadYbrRctPixel(
+        byte[] rawPixels,
+        int pixelCount,
+        int pixelIndex,
+        out byte r,
+        out byte g,
+        out byte b)
+    {
+        int offset = pixelIndex * 3;
+        int y = ReadByteOrDefault(rawPixels, offset);
+        int cb = unchecked((sbyte)ReadByteOrDefault(rawPixels, offset + 1));
+        int cr = unchecked((sbyte)ReadByteOrDefault(rawPixels, offset + 2));
+        int green = y - ((cr + cb) / 4);
+        int red = cr + green;
+        int blue = cb + green;
+        r = ClampToByte(red);
+        g = ClampToByte(green);
+        b = ClampToByte(blue);
+    }
+
+    private static void ConvertYbrFullToRgb(byte y, byte cb, byte cr, out byte r, out byte g, out byte b)
+    {
+        double chromaBlue = cb - 128.0;
+        double chromaRed = cr - 128.0;
+        double red = y + (1.4020 * chromaRed);
+        double green = y - (0.344136 * chromaBlue) - (0.714136 * chromaRed);
+        double blue = y + (1.7720 * chromaBlue);
+        r = ClampToByte(red);
+        g = ClampToByte(green);
+        b = ClampToByte(blue);
+    }
+
+    private static void ConvertYbrPartialToRgb(byte y, byte cb, byte cr, out byte r, out byte g, out byte b)
+    {
+        double luminance = Math.Max(0, y - 16.0);
+        double chromaBlue = cb - 128.0;
+        double chromaRed = cr - 128.0;
+        double red = (1.1644 * luminance) + (1.5960 * chromaRed);
+        double green = (1.1644 * luminance) - (0.3918 * chromaBlue) - (0.8130 * chromaRed);
+        double blue = (1.1644 * luminance) + (2.0172 * chromaBlue);
+        r = ClampToByte(red);
+        g = ClampToByte(green);
+        b = ClampToByte(blue);
+    }
+
+    private static byte ReadByteOrDefault(byte[] buffer, int index) =>
+        index >= 0 && index < buffer.Length ? buffer[index] : (byte)0;
+
+    private static byte ClampToByte(double value) =>
+        (byte)Math.Clamp((int)Math.Round(value), 0, 255);
+
+    private static byte ClampToByte(int value) =>
+        (byte)Math.Clamp(value, 0, 255);
 }

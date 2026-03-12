@@ -72,9 +72,12 @@ public partial class DicomViewPanel : UserControl
     private int _bitsStored = 8;
     private bool _isSigned;
     private int _samplesPerPixel = 1;
+    private int _planarConfiguration;
     private double _rescaleSlope = 1.0;
     private double _rescaleIntercept;
     private bool _isMonochrome1;
+    private string _photometricInterpretation = "MONOCHROME2";
+    private readonly List<BitmapOverlayPlane> _bitmapOverlays = [];
 
     // DICOM metadata for overlay
     private string _patientName = "";
@@ -241,6 +244,7 @@ public partial class DicomViewPanel : UserControl
     public event Action<int>? StackScrollRequested;
     public event Action? ViewStateChanged;
     public event Action<DicomHoverInfo?>? HoveredImagePointChanged;
+    public event Action? ImageDoubleClicked;
 
     public MouseWheelMode WheelMode { get; set; } = MouseWheelMode.Zoom;
     public ActionToolbarMode ActionMode
@@ -404,14 +408,15 @@ public partial class DicomViewPanel : UserControl
             _bitsAllocated = dataset.GetSingleValueOrDefault(DicomTag.BitsAllocated, 8);
             _bitsStored = dataset.GetSingleValueOrDefault(DicomTag.BitsStored, _bitsAllocated);
             _samplesPerPixel = dataset.GetSingleValueOrDefault(DicomTag.SamplesPerPixel, 1);
+            _planarConfiguration = dataset.GetSingleValueOrDefault(DicomTag.PlanarConfiguration, 0);
             _isSigned = dataset.GetSingleValueOrDefault(DicomTag.PixelRepresentation, 0) == 1;
             _rescaleSlope = dataset.GetSingleValueOrDefault<double>(DicomTag.RescaleSlope, 1.0);
             _rescaleIntercept = dataset.GetSingleValueOrDefault<double>(DicomTag.RescaleIntercept, 0.0);
 
             if (_rescaleSlope == 0) _rescaleSlope = 1.0;
 
-            string photometric = dataset.GetSingleValueOrDefault(DicomTag.PhotometricInterpretation, "MONOCHROME2");
-            _isMonochrome1 = photometric.Contains("MONOCHROME1");
+            _photometricInterpretation = dataset.GetSingleValueOrDefault(DicomTag.PhotometricInterpretation, "MONOCHROME2").Trim().ToUpperInvariant();
+            _isMonochrome1 = _photometricInterpretation.Contains("MONOCHROME1");
 
             // --- Patient / study metadata for overlay ---
             _patientName = dataset.GetSingleValueOrDefault(DicomTag.PatientName, "");
@@ -442,7 +447,7 @@ public partial class DicomViewPanel : UserControl
             _rawPixelData = frame.Data;
 
             // Sanity check: verify decompressed buffer matches expected size
-            int expectedBytes = _imageWidth * _imageHeight * _samplesPerPixel * (_bitsAllocated / 8);
+            int expectedBytes = ComputeExpectedPixelBytes(_imageWidth, _imageHeight, _samplesPerPixel, _bitsAllocated, _photometricInterpretation);
             if (_rawPixelData.Length < expectedBytes)
             {
                 LastError = $"Pixel data size mismatch: got {_rawPixelData.Length} bytes, " +
@@ -450,6 +455,8 @@ public partial class DicomViewPanel : UserControl
                     $"{_bitsAllocated}-bit, {_samplesPerPixel} spp).";
                 return false;
             }
+
+            LoadBitmapOverlays(dataset);
 
             // --- Window Center / Width ---
             if (!TryGetDefaultWindowPreset(dataset, out double wc, out double ww))
@@ -608,6 +615,9 @@ public partial class DicomViewPanel : UserControl
         _volumeSlicePixels = null;
         _isProjectionThicknessDragging = false;
         _projectionPointer = null;
+        _bitmapOverlays.Clear();
+        _photometricInterpretation = "MONOCHROME2";
+        _planarConfiguration = 0;
         _displayBitmap = null;
         _imageWidth = 0;
         _imageHeight = 0;
@@ -646,9 +656,12 @@ public partial class DicomViewPanel : UserControl
         _samplesPerPixel = 1;
         _bitsAllocated = 16;
         _bitsStored = 16;
+        _planarConfiguration = 0;
         _isSigned = true;
         _rescaleSlope = 1.0;
         _rescaleIntercept = 0.0;
+        _photometricInterpretation = volume.IsMonochrome1 ? "MONOCHROME1" : "MONOCHROME2";
+        _bitmapOverlays.Clear();
 
         // Window defaults from volume
         _windowCenter = volume.DefaultWindowCenter;
@@ -860,7 +873,11 @@ public partial class DicomViewPanel : UserControl
                 _windowCenter, _windowWidth,
                 _lutR, _lutG, _lutB,
                 _isMonochrome1,
+                _photometricInterpretation,
+                _planarConfiguration,
                 outputBgra);
+
+            ApplyBitmapOverlays(outputBgra);
 
             CopyToDisplayBitmap(outputBgra);
         }
@@ -888,6 +905,199 @@ public partial class DicomViewPanel : UserControl
         }
 
         DicomImage.InvalidateVisual();
+    }
+
+    private void LoadBitmapOverlays(DicomDataset dataset)
+    {
+        _bitmapOverlays.Clear();
+
+        for (ushort group = 0x6000; group <= 0x601E; group += 2)
+        {
+            var rowsTag = new DicomTag(group, 0x0010);
+            var colsTag = new DicomTag(group, 0x0011);
+            if (!dataset.Contains(rowsTag) || !dataset.Contains(colsTag))
+            {
+                continue;
+            }
+
+            int rows = dataset.GetSingleValueOrDefault(rowsTag, 0);
+            int columns = dataset.GetSingleValueOrDefault(colsTag, 0);
+            if (rows <= 0 || columns <= 0)
+            {
+                continue;
+            }
+
+            int originRow = 1;
+            int originColumn = 1;
+            var originTag = new DicomTag(group, 0x0050);
+            if (dataset.Contains(originTag))
+            {
+                try
+                {
+                    short[] originValues = dataset.GetValues<short>(originTag);
+                    if (originValues.Length >= 2)
+                    {
+                        originRow = originValues[0];
+                        originColumn = originValues[1];
+                    }
+                }
+                catch
+                {
+                }
+            }
+
+            byte[]? overlayBytes = ReadTagValueAsBytes(dataset, new DicomTag(group, 0x3000));
+            bool[]? pixels = overlayBytes is { Length: > 0 }
+                ? UnpackOverlayBits(overlayBytes, rows * columns)
+                : TryExtractEmbeddedOverlay(dataset, group, rows, columns);
+
+            if (pixels is null)
+            {
+                continue;
+            }
+
+            _bitmapOverlays.Add(new BitmapOverlayPlane(
+                group,
+                columns,
+                rows,
+                originColumn - 1,
+                originRow - 1,
+                pixels));
+        }
+    }
+
+    private bool[]? TryExtractEmbeddedOverlay(DicomDataset dataset, ushort group, int rows, int columns)
+    {
+        var bitsAllocatedTag = new DicomTag(group, 0x0100);
+        var bitPositionTag = new DicomTag(group, 0x0102);
+        if (_rawPixelData is null || !dataset.Contains(bitsAllocatedTag) || !dataset.Contains(bitPositionTag))
+        {
+            return null;
+        }
+
+        int overlayBitsAllocated = dataset.GetSingleValueOrDefault(bitsAllocatedTag, 0);
+        int overlayBitPosition = dataset.GetSingleValueOrDefault(bitPositionTag, -1);
+        if (overlayBitsAllocated <= 1 || overlayBitPosition < 0)
+        {
+            return null;
+        }
+
+        int pixelCount = rows * columns;
+        bool[] pixels = new bool[pixelCount];
+
+        if (_bitsAllocated >= 16)
+        {
+            var source = MemoryMarshal.Cast<byte, ushort>(_rawPixelData.AsSpan());
+            int count = Math.Min(source.Length, pixelCount);
+            for (int index = 0; index < count; index++)
+            {
+                pixels[index] = ((source[index] >> overlayBitPosition) & 0x1) != 0;
+            }
+        }
+        else
+        {
+            int count = Math.Min(_rawPixelData.Length, pixelCount);
+            for (int index = 0; index < count; index++)
+            {
+                pixels[index] = (((int)_rawPixelData[index] >> overlayBitPosition) & 0x1) != 0;
+            }
+        }
+
+        return pixels;
+    }
+
+    private void ApplyBitmapOverlays(byte[] outputBgra)
+    {
+        if (_bitmapOverlays.Count == 0)
+        {
+            return;
+        }
+
+        const int overlayR = 255;
+        const int overlayG = 216;
+        const int overlayB = 32;
+        const double overlayWeight = 0.72;
+        const double baseWeight = 1.0 - overlayWeight;
+
+        foreach (BitmapOverlayPlane overlay in _bitmapOverlays)
+        {
+            for (int overlayY = 0; overlayY < overlay.Height; overlayY++)
+            {
+                int imageY = overlay.OriginY + overlayY;
+                if (imageY < 0 || imageY >= _imageHeight)
+                {
+                    continue;
+                }
+
+                for (int overlayX = 0; overlayX < overlay.Width; overlayX++)
+                {
+                    int maskIndex = (overlayY * overlay.Width) + overlayX;
+                    if (!overlay.Pixels[maskIndex])
+                    {
+                        continue;
+                    }
+
+                    int imageX = overlay.OriginX + overlayX;
+                    if (imageX < 0 || imageX >= _imageWidth)
+                    {
+                        continue;
+                    }
+
+                    int outputIndex = ((imageY * _imageWidth) + imageX) * 4;
+                    outputBgra[outputIndex] = (byte)Math.Clamp((outputBgra[outputIndex] * baseWeight) + (overlayB * overlayWeight), 0, 255);
+                    outputBgra[outputIndex + 1] = (byte)Math.Clamp((outputBgra[outputIndex + 1] * baseWeight) + (overlayG * overlayWeight), 0, 255);
+                    outputBgra[outputIndex + 2] = (byte)Math.Clamp((outputBgra[outputIndex + 2] * baseWeight) + (overlayR * overlayWeight), 0, 255);
+                    outputBgra[outputIndex + 3] = 255;
+                }
+            }
+        }
+    }
+
+    private static int ComputeExpectedPixelBytes(int width, int height, int samplesPerPixel, int bitsAllocated, string photometricInterpretation)
+    {
+        int bytesPerSample = Math.Max(1, bitsAllocated / 8);
+        string photometric = (photometricInterpretation ?? string.Empty).Trim().ToUpperInvariant();
+        if (samplesPerPixel >= 3 && (photometric == "YBR_FULL_422" || photometric == "YBR_PARTIAL_422"))
+        {
+            return width * height * 2 * bytesPerSample;
+        }
+
+        return width * height * samplesPerPixel * bytesPerSample;
+    }
+
+    private static byte[]? ReadTagValueAsBytes(DicomDataset dataset, DicomTag tag)
+    {
+        try
+        {
+            var item = dataset.GetDicomItem<DicomItem>(tag);
+            if (item is DicomElement element)
+            {
+                return element.Buffer?.Data;
+            }
+        }
+        catch
+        {
+        }
+
+        return null;
+    }
+
+    private static bool[] UnpackOverlayBits(byte[] packedBits, int pixelCount)
+    {
+        bool[] pixels = new bool[pixelCount];
+        for (int index = 0; index < pixelCount; index++)
+        {
+            int byteIndex = index >> 3;
+            int bitIndex = index & 0x7;
+            if (byteIndex >= packedBits.Length)
+            {
+                break;
+            }
+
+            pixels[index] = ((packedBits[byteIndex] >> bitIndex) & 0x1) != 0;
+        }
+
+        return pixels;
     }
 
     // ==============================================================================================
@@ -1297,6 +1507,14 @@ public partial class DicomViewPanel : UserControl
         return label.Length > 0 ? label : string.Empty;
     }
 
+    private sealed record BitmapOverlayPlane(
+        ushort Group,
+        int Width,
+        int Height,
+        int OriginX,
+        int OriginY,
+        bool[] Pixels);
+
     public bool TryGetImagePoint(Point controlPoint, out Point imagePoint)
     {
         imagePoint = default;
@@ -1525,12 +1743,10 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
-        // Double-click left: fit to window
+        // Double-click left: let the host window decide how to handle layout focus.
         if (point.Properties.IsLeftButtonPressed && e.ClickCount == 2)
         {
-            _fitToWindow = true;
-            ApplyFitToWindow();
-            UpdateOverlay();
+            ImageDoubleClicked?.Invoke();
             e.Handled = true;
             return;
         }

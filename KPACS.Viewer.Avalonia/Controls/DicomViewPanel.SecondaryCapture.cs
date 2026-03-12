@@ -85,7 +85,7 @@ public partial class DicomViewPanel
             return;
         }
 
-        KeyImageButton.IsVisible = _showKeyImageButton && _rawPixelData is not null;
+        KeyImageButton.IsVisible = _showKeyImageButton && IsImageLoaded;
         KeyImageButton.IsEnabled = _secondaryCaptureEnabled;
         KeyImageButton.Background = _hasSecondaryCapture
             ? new SolidColorBrush(Color.Parse("#FFF6D04D"))
