@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Text.Json;
 using Microsoft.Data.Sqlite;
 using KPACS.Viewer.Models;
 
@@ -86,6 +87,7 @@ public sealed class ImageboxRepository
                 normalized_size_y REAL NOT NULL,
                 normalized_size_z REAL NOT NULL,
                 estimated_volume_mm3 REAL NOT NULL DEFAULT 0,
+                structure_signature_json TEXT NOT NULL DEFAULT '',
                 source_study_instance_uid TEXT NOT NULL DEFAULT '',
                 source_series_instance_uid TEXT NOT NULL DEFAULT '',
                 use_count INTEGER NOT NULL DEFAULT 1,
@@ -112,6 +114,7 @@ public sealed class ImageboxRepository
         await EnsureColumnExistsAsync(connection, "series", "body_part_examined", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync(connection, "instances", "sop_class_uid", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync(connection, "instances", "source_file_path", "TEXT NOT NULL DEFAULT ''", cancellationToken);
+        await EnsureColumnExistsAsync(connection, "volume_roi_anatomy_priors", "structure_signature_json", "TEXT NOT NULL DEFAULT ''", cancellationToken);
     }
 
     public async Task<List<StudyListItem>> SearchStudiesAsync(StudyQuery query, CancellationToken cancellationToken = default)
@@ -400,13 +403,13 @@ public sealed class ImageboxRepository
                 signature, anatomy_label, region_label, modality, body_part_examined, study_description, series_description,
                 normalized_center_x, normalized_center_y, normalized_center_z,
                 normalized_size_x, normalized_size_y, normalized_size_z,
-                estimated_volume_mm3, source_study_instance_uid, source_series_instance_uid,
+                estimated_volume_mm3, structure_signature_json, source_study_instance_uid, source_series_instance_uid,
                 use_count, created_at_utc, updated_at_utc)
             VALUES (
                 $signature, $anatomyLabel, $regionLabel, $modality, $bodyPartExamined, $studyDescription, $seriesDescription,
                 $centerX, $centerY, $centerZ,
                 $sizeX, $sizeY, $sizeZ,
-                $estimatedVolumeMm3, $sourceStudyInstanceUid, $sourceSeriesInstanceUid,
+                $estimatedVolumeMm3, $structureSignatureJson, $sourceStudyInstanceUid, $sourceSeriesInstanceUid,
                 $useCount, $createdAtUtc, $updatedAtUtc)
             ON CONFLICT(signature) DO UPDATE SET
                 anatomy_label = excluded.anatomy_label,
@@ -422,6 +425,7 @@ public sealed class ImageboxRepository
                 normalized_size_y = excluded.normalized_size_y,
                 normalized_size_z = excluded.normalized_size_z,
                 estimated_volume_mm3 = excluded.estimated_volume_mm3,
+                structure_signature_json = excluded.structure_signature_json,
                 source_study_instance_uid = excluded.source_study_instance_uid,
                 source_series_instance_uid = excluded.source_series_instance_uid,
                 use_count = volume_roi_anatomy_priors.use_count + 1,
@@ -441,7 +445,7 @@ public sealed class ImageboxRepository
                 SELECT prior_key, signature, anatomy_label, region_label, modality, body_part_examined, study_description, series_description,
                        normalized_center_x, normalized_center_y, normalized_center_z,
                        normalized_size_x, normalized_size_y, normalized_size_z,
-                       estimated_volume_mm3, source_study_instance_uid, source_series_instance_uid,
+                      estimated_volume_mm3, structure_signature_json, source_study_instance_uid, source_series_instance_uid,
                        updated_at_utc, use_count
                 FROM volume_roi_anatomy_priors
                 ORDER BY updated_at_utc DESC
@@ -451,7 +455,7 @@ public sealed class ImageboxRepository
                 SELECT prior_key, signature, anatomy_label, region_label, modality, body_part_examined, study_description, series_description,
                        normalized_center_x, normalized_center_y, normalized_center_z,
                        normalized_size_x, normalized_size_y, normalized_size_z,
-                       estimated_volume_mm3, source_study_instance_uid, source_series_instance_uid,
+                      estimated_volume_mm3, structure_signature_json, source_study_instance_uid, source_series_instance_uid,
                        updated_at_utc, use_count
                 FROM volume_roi_anatomy_priors
                 WHERE modality = $modality OR modality = ''
@@ -484,10 +488,11 @@ public sealed class ImageboxRepository
                 reader.GetDouble(12),
                 reader.GetDouble(13),
                 reader.GetDouble(14),
-                reader.GetString(15),
+                DeserializeStructureSignature(reader.GetString(15)),
                 reader.GetString(16),
-                DateTime.TryParse(reader.GetString(17), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTime updatedAtUtc) ? updatedAtUtc : DateTime.UtcNow,
-                reader.GetInt32(18)));
+                reader.GetString(17),
+                DateTime.TryParse(reader.GetString(18), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTime updatedAtUtc) ? updatedAtUtc : DateTime.UtcNow,
+                reader.GetInt32(19)));
         }
 
         return results;
@@ -710,11 +715,34 @@ public sealed class ImageboxRepository
         command.Parameters.AddWithValue("$sizeY", prior.NormalizedSizeY);
         command.Parameters.AddWithValue("$sizeZ", prior.NormalizedSizeZ);
         command.Parameters.AddWithValue("$estimatedVolumeMm3", prior.EstimatedVolumeCubicMillimeters);
+        command.Parameters.AddWithValue("$structureSignatureJson", SerializeStructureSignature(prior.StructureSignature));
         command.Parameters.AddWithValue("$sourceStudyInstanceUid", prior.SourceStudyInstanceUid);
         command.Parameters.AddWithValue("$sourceSeriesInstanceUid", prior.SourceSeriesInstanceUid);
         command.Parameters.AddWithValue("$useCount", Math.Max(1, prior.UseCount));
         command.Parameters.AddWithValue("$createdAtUtc", timestamp);
         command.Parameters.AddWithValue("$updatedAtUtc", timestamp);
+    }
+
+    private static string SerializeStructureSignature(AnatomyStructureSignature? signature)
+    {
+        return signature is null ? string.Empty : JsonSerializer.Serialize(signature);
+    }
+
+    private static AnatomyStructureSignature? DeserializeStructureSignature(string json)
+    {
+        if (string.IsNullOrWhiteSpace(json))
+        {
+            return null;
+        }
+
+        try
+        {
+            return JsonSerializer.Deserialize<AnatomyStructureSignature>(json);
+        }
+        catch
+        {
+            return null;
+        }
     }
 
     private static StudyListItem MapStudyListItem(SqliteDataReader reader)

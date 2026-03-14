@@ -9,6 +9,7 @@ using System.Globalization;
 using KPACS.Viewer.Controls;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
+using KPACS.Viewer.Services;
 using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer;
@@ -186,6 +187,7 @@ public partial class StudyViewerWindow
 
     private static readonly string[] s_reportRegionOptions =
     [
+        "Unassigned",
         "Neuro",
         "Upper thorax",
         "Lower thorax",
@@ -315,6 +317,10 @@ public partial class StudyViewerWindow
             CombineReportHints(region.Hint, anatomy.Hint),
             measurement.Id == _selectedMeasurementId,
             GetAccentColor(typeLabel),
+            region.IsLearned,
+            region.Confidence,
+            anatomy.IsLearned,
+            anatomy.Confidence,
             IsRegionEditable: true,
             anatomy.IsManual,
             IsAnatomyEditable: true,
@@ -360,6 +366,10 @@ public partial class StudyViewerWindow
             CombineReportHints(region.Hint, anatomy.Hint),
             measurement.Id == _selectedMeasurementId,
             "#FF89CFF0",
+            region.IsLearned,
+            region.Confidence,
+            anatomy.IsLearned,
+            anatomy.Confidence,
             IsRegionEditable: false,
             anatomy.IsManual,
             IsAnatomyEditable: false,
@@ -408,6 +418,10 @@ public partial class StudyViewerWindow
             CombineReportHints(region.Hint, anatomy.Hint),
             measurement.Id == _selectedMeasurementId,
             "#FFC9A4FF",
+            region.IsLearned,
+            region.Confidence,
+            anatomy.IsLearned,
+            anatomy.Confidence,
             IsRegionEditable: false,
             anatomy.IsManual,
             IsAnatomyEditable: false,
@@ -550,6 +564,16 @@ public partial class StudyViewerWindow
         if (entry.IsRegionManual)
         {
             row.Children.Add(CreateBadge("Manual region", "#FF88D7FF", bold: false));
+        }
+
+        if (entry.IsRegionLearned)
+        {
+            row.Children.Add(CreateBadge($"Learned region {entry.RegionConfidence:P0}", "#FF73C7FF", bold: false));
+        }
+
+        if (entry.IsAnatomyLearned)
+        {
+            row.Children.Add(CreateBadge($"Learned anatomy {entry.AnatomyConfidence:P0}", "#FF7FDFA2", bold: false));
         }
 
         if (!string.Equals(entry.ReviewState, "Auto", StringComparison.OrdinalIgnoreCase))
@@ -865,28 +889,33 @@ public partial class StudyViewerWindow
 
     private RegionGuess ResolveMeasurementRegion(StudyMeasurement measurement, ViewportSlot? slot)
     {
-        if (measurement.Kind == MeasurementKind.VolumeRoi &&
-            TryFindLearnedVolumeRoiPriorMatch(measurement, slot, out VolumeRoiAnatomyPriorMatch? learnedMatch))
-        {
-            RegionGuess learnedRegion = new(
-                learnedMatch.Prior.RegionLabel,
-                learnedMatch.Prior.RegionLabel,
-                learnedMatch.Hint);
-
-            if (_reportRegionOverrides.TryGetValue(measurement.Id, out string? manualLabel) &&
-                !string.IsNullOrWhiteSpace(manualLabel))
-            {
-                return new RegionGuess(manualLabel.Trim(), learnedRegion.AutoLabel, $"Manual region override. Auto suggestion: {learnedRegion.AutoLabel}.", true);
-            }
-
-            return learnedRegion;
-        }
-
-        RegionGuess estimated = EstimateMeasurementRegion(measurement, slot);
         if (_reportRegionOverrides.TryGetValue(measurement.Id, out string? manualOverride) &&
             !string.IsNullOrWhiteSpace(manualOverride))
         {
-            return new RegionGuess(manualOverride.Trim(), estimated.AutoLabel, $"Manual region override. Auto suggestion: {estimated.AutoLabel}.", true);
+            string estimatedAutoLabel = EstimateMeasurementRegion(measurement, slot).AutoLabel;
+            return new RegionGuess(manualOverride.Trim(), estimatedAutoLabel, $"Manual region override. Auto suggestion: {estimatedAutoLabel}.", true);
+        }
+
+        RegionGuess estimated = EstimateMeasurementRegion(measurement, slot);
+
+        if (!string.Equals(estimated.Label, "Unassigned", StringComparison.OrdinalIgnoreCase))
+        {
+            return estimated;
+        }
+
+        if (TryFindLearnedSeriesRegionMatch(slot, out RegionGuess learnedSeriesRegion))
+        {
+            return learnedSeriesRegion;
+        }
+
+        if (TryFindLearnedMeasurementPriorMatch(measurement, slot, requiredRegionLabel: null, out VolumeRoiAnatomyPriorMatch learnedMeasurementMatch))
+        {
+            return new RegionGuess(
+                learnedMeasurementMatch.Prior.RegionLabel,
+                learnedMeasurementMatch.Prior.RegionLabel,
+                learnedMeasurementMatch.Hint,
+                IsLearned: true,
+                Confidence: learnedMeasurementMatch.Score);
         }
 
         return estimated;
@@ -896,19 +925,23 @@ public partial class StudyViewerWindow
     {
         RegionGuess region = resolvedRegion ?? ResolveMeasurementRegion(measurement, slot);
 
-        if (measurement.Kind == MeasurementKind.VolumeRoi &&
-            !_reportAnatomyOverrides.ContainsKey(measurement.Id) &&
-            TryFindLearnedVolumeRoiPriorMatch(measurement, slot, out VolumeRoiAnatomyPriorMatch learnedMatch))
-        {
-            return new AnatomyGuess(learnedMatch.Prior.AnatomyLabel, learnedMatch.Hint);
-        }
-
-        AnatomyGuess estimated = EstimateMeasurementAnatomy(measurement, slot, region);
         if (_reportAnatomyOverrides.TryGetValue(measurement.Id, out string? manualLabel) &&
             !string.IsNullOrWhiteSpace(manualLabel))
         {
-            return new AnatomyGuess(manualLabel.Trim(), $"Manually confirmed in report panel. Auto suggestion: {estimated.DisplayLabel}.", true);
+            AnatomyGuess estimatedOverride = EstimateMeasurementAnatomy(measurement, slot, region);
+            return new AnatomyGuess(manualLabel.Trim(), $"Manually confirmed in report panel. Auto suggestion: {estimatedOverride.DisplayLabel}.", true);
         }
+
+        if (TryFindLearnedMeasurementPriorMatch(
+            measurement,
+            slot,
+            string.Equals(region.Label, "Unassigned", StringComparison.OrdinalIgnoreCase) ? null : region.Label,
+            out VolumeRoiAnatomyPriorMatch learnedMatch))
+        {
+            return new AnatomyGuess(learnedMatch.Prior.AnatomyLabel, learnedMatch.Hint, IsLearned: true, Confidence: learnedMatch.Score);
+        }
+
+        AnatomyGuess estimated = EstimateMeasurementAnatomy(measurement, slot, region);
 
         return estimated;
     }
@@ -1058,7 +1091,7 @@ public partial class StudyViewerWindow
             return new AnatomyGuess("Mediastinum", "Thoracic central compartment.");
         }
 
-        if (abdomenContext || string.Equals(slot?.Series?.Modality, "CT", StringComparison.OrdinalIgnoreCase) || string.Equals(slot?.Series?.Modality, "MR", StringComparison.OrdinalIgnoreCase))
+        if (abdomenContext)
         {
             if (laterality == "right" && vertical == "upper")
             {
@@ -1167,7 +1200,7 @@ public partial class StudyViewerWindow
             AnatomyRegionProfile.Shoulder => new RegionGuess("Shoulder", "Shoulder", "Fallback region profile suggests shoulder."),
             AnatomyRegionProfile.Knee => new RegionGuess("Knee", "Knee", "Fallback region profile suggests knee."),
             AnatomyRegionProfile.Ankle => new RegionGuess("Ankle", "Ankle", "Fallback region profile suggests ankle."),
-            _ => new RegionGuess("Lower thorax", "Lower thorax", BuildSoftBodyPartHint(bodyPart, "Fallback region remained ambiguous.")),
+            _ => new RegionGuess("Unassigned", "Unassigned", BuildSoftBodyPartHint(bodyPart, "Auto-detect found no reliable region context.")),
         };
     }
 
@@ -1203,10 +1236,8 @@ public partial class StudyViewerWindow
             slot?.Series?.BodyPart,
             FindLegacySeriesInfo(slot?.Series)?.BodyPart,
             slot?.Series?.SeriesDescription,
-            _context.StudyDetails.Study.StudyDescription,
-            _context.StudyDetails.Study.Modalities,
-            _selectedPriorStudy?.StudyDescription,
-            _selectedPriorStudy?.Modalities,
+            ResolveMeasurementStudyDescription(slot),
+            ResolveMeasurementModalities(slot),
         }.Where(value => !string.IsNullOrWhiteSpace(value))).Trim();
 
     private AnatomyRegionProfile ResolveAnatomyRegionProfile(StudyMeasurement measurement, ViewportSlot? slot, string context)
@@ -1274,12 +1305,9 @@ public partial class StudyViewerWindow
             return bodyPartProfile;
         }
 
-        AnatomyProfileGuess estimated = EstimateProfileFromMeasurementPosition(measurement, slot);
-        return estimated.Profile != AnatomyRegionProfile.Unknown
-            ? estimated.Profile
-            : TryResolveSoftBodyPartProfile(bodyPart, out bodyPartProfile)
-                ? bodyPartProfile
-                : estimated.Profile;
+        return TryResolveSoftBodyPartProfile(bodyPart, out bodyPartProfile)
+            ? bodyPartProfile
+            : AnatomyRegionProfile.Unknown;
     }
 
     private AnatomyProfileGuess EstimateProfileFromMeasurementPosition(StudyMeasurement measurement, ViewportSlot? slot)
@@ -1402,6 +1430,30 @@ public partial class StudyViewerWindow
 
     private static bool TryResolveSoftBodyPartProfile(string bodyPart, out AnatomyRegionProfile profile)
     {
+        if (ContainsAny(bodyPart, "brain", "head", "skull", "cran", "neuro"))
+        {
+            profile = AnatomyRegionProfile.Neuro;
+            return true;
+        }
+
+        if (ContainsAny(bodyPart, "chest", "thorax", "lung", "pulmonary"))
+        {
+            profile = AnatomyRegionProfile.Thorax;
+            return true;
+        }
+
+        if (ContainsAny(bodyPart, "abdomen", "abdominal", "liver", "renal", "kidney", "pancreas", "spleen"))
+        {
+            profile = AnatomyRegionProfile.Abdomen;
+            return true;
+        }
+
+        if (ContainsAny(bodyPart, "pelvis", "pelvic", "bladder", "prostate", "uterus", "ovary", "rectum"))
+        {
+            profile = AnatomyRegionProfile.Pelvis;
+            return true;
+        }
+
         if (ContainsAny(bodyPart, "shoulder", "acromioclavicular", "clavicle", "scapula"))
         {
             profile = AnatomyRegionProfile.Shoulder;
@@ -1422,6 +1474,32 @@ public partial class StudyViewerWindow
 
         profile = AnatomyRegionProfile.Unknown;
         return false;
+    }
+
+    private string ResolveMeasurementStudyDescription(ViewportSlot? slot)
+    {
+        if (slot?.Series is null)
+        {
+            return _context.StudyDetails.Study.StudyDescription;
+        }
+
+        return _context.StudyDetails.Series.Any(candidate =>
+            string.Equals(candidate.SeriesInstanceUid, slot.Series.SeriesInstanceUid, StringComparison.OrdinalIgnoreCase))
+            ? _context.StudyDetails.Study.StudyDescription
+            : _selectedPriorStudy?.StudyDescription ?? string.Empty;
+    }
+
+    private string ResolveMeasurementModalities(ViewportSlot? slot)
+    {
+        if (slot?.Series is null)
+        {
+            return _context.StudyDetails.Study.Modalities;
+        }
+
+        return _context.StudyDetails.Series.Any(candidate =>
+            string.Equals(candidate.SeriesInstanceUid, slot.Series.SeriesInstanceUid, StringComparison.OrdinalIgnoreCase))
+            ? _context.StudyDetails.Study.Modalities
+            : _selectedPriorStudy?.Modalities ?? string.Empty;
     }
 
     private static AnatomyRegionProfile MapRegionLabelToProfile(string regionLabel) => regionLabel switch
@@ -1498,6 +1576,13 @@ public partial class StudyViewerWindow
 
         SaveViewerSettings();
         RefreshReportPanel(forceVisible: true);
+
+        if (_reportAnatomyOverrides.TryGetValue(measurementId, out string? anatomyLabel) &&
+            !string.IsNullOrWhiteSpace(anatomyLabel) &&
+            !string.Equals(anatomyLabel, "Auto", StringComparison.OrdinalIgnoreCase))
+        {
+            _ = PersistVolumeRoiAnatomyPriorAsync(measurementId, anatomyLabel.Trim());
+        }
     }
 
     private static string BuildSoftBodyPartHint(string bodyPart, string fallbackHint)
@@ -1607,29 +1692,91 @@ public partial class StudyViewerWindow
         _volumeRoiAnatomyPriorsLoaded = true;
     }
 
-    private bool TryFindLearnedVolumeRoiPriorMatch(StudyMeasurement measurement, ViewportSlot? slot, out VolumeRoiAnatomyPriorMatch match)
+    private bool TryFindLearnedSeriesRegionMatch(ViewportSlot? slot, out RegionGuess region)
     {
-        match = null!;
-        if (measurement.Kind != MeasurementKind.VolumeRoi || !_volumeRoiAnatomyPriorsLoaded || _volumeRoiAnatomyPriors.Count == 0)
+        region = default!;
+        if (slot?.Series is null || !_volumeRoiAnatomyPriorsLoaded || _volumeRoiAnatomyPriors.Count == 0)
         {
             return false;
         }
 
-        if (!TryBuildVolumeRoiPriorProbe(measurement, slot, out VolumeRoiPriorProbe probe))
-        {
-            return false;
-        }
+        string modality = slot.Series.Modality?.Trim() ?? string.Empty;
+        string bodyPart = ResolveSoftBodyPartExamined(slot);
+        string studyDescription = ResolveMeasurementStudyDescription(slot).Trim();
+        string seriesDescription = slot.Series.SeriesDescription?.Trim() ?? string.Empty;
+        string context = $"{studyDescription} {seriesDescription} {bodyPart}".Trim();
 
-        VolumeRoiAnatomyPriorMatch? bestMatch = null;
+        Dictionary<string, double> regionScores = new(StringComparer.OrdinalIgnoreCase);
         foreach (VolumeRoiAnatomyPriorRecord prior in _volumeRoiAnatomyPriors)
         {
-            double score = ScoreVolumeRoiPrior(probe, prior);
-            if (score < 0.55)
+            if (string.IsNullOrWhiteSpace(prior.RegionLabel) || string.Equals(prior.RegionLabel, "Unassigned", StringComparison.OrdinalIgnoreCase))
             {
                 continue;
             }
 
-            string hint = $"Learned from similar labeled 3D ROI ({prior.AnatomyLabel}, {prior.RegionLabel}, match {score:P0}).";
+            double score = ScoreSeriesRegionPrior(modality, bodyPart, context, prior);
+            if (score < 0.22)
+            {
+                continue;
+            }
+
+            regionScores[prior.RegionLabel] = regionScores.GetValueOrDefault(prior.RegionLabel) + score;
+        }
+
+        if (regionScores.Count == 0)
+        {
+            return false;
+        }
+
+        KeyValuePair<string, double> best = regionScores.OrderByDescending(pair => pair.Value).First();
+        double secondBest = regionScores.Count > 1
+            ? regionScores.OrderByDescending(pair => pair.Value).Skip(1).First().Value
+            : 0;
+
+        if (best.Value < 0.42 || best.Value - secondBest < 0.08)
+        {
+            return false;
+        }
+
+        region = new RegionGuess(
+            best.Key,
+            best.Key,
+            $"Learned from previously labeled 3D ROI context in similar series ({best.Key}, confidence {Math.Min(0.99, best.Value):P0}).",
+            IsLearned: true,
+            Confidence: Math.Min(0.99, best.Value));
+        return true;
+    }
+
+    private bool TryFindLearnedMeasurementPriorMatch(StudyMeasurement measurement, ViewportSlot? slot, string? requiredRegionLabel, out VolumeRoiAnatomyPriorMatch match)
+    {
+        match = null!;
+        if (!_volumeRoiAnatomyPriorsLoaded || _volumeRoiAnatomyPriors.Count == 0)
+        {
+            return false;
+        }
+
+        if (!TryBuildMeasurementPriorProbe(measurement, slot, out VolumeRoiPriorProbe probe))
+        {
+            return false;
+        }
+
+        bool compareShape = measurement.Kind == MeasurementKind.VolumeRoi;
+        VolumeRoiAnatomyPriorMatch? bestMatch = null;
+        foreach (VolumeRoiAnatomyPriorRecord prior in _volumeRoiAnatomyPriors)
+        {
+            if (!string.IsNullOrWhiteSpace(requiredRegionLabel) &&
+                !string.Equals(requiredRegionLabel, prior.RegionLabel, StringComparison.OrdinalIgnoreCase))
+            {
+                continue;
+            }
+
+            double score = ScoreAnatomyPriorMatch(probe, prior, compareShape);
+            if (score < (compareShape ? 0.55 : 0.50))
+            {
+                continue;
+            }
+
+            string hint = $"Learned from stored 3D anatomy definition ({prior.AnatomyLabel}, {prior.RegionLabel}, match {score:P0}).";
             if (bestMatch is null || score > bestMatch.Score)
             {
                 bestMatch = new VolumeRoiAnatomyPriorMatch(prior, score, hint);
@@ -1643,6 +1790,17 @@ public partial class StudyViewerWindow
 
         match = bestMatch;
         return true;
+    }
+
+    private bool TryFindLearnedVolumeRoiPriorMatch(StudyMeasurement measurement, ViewportSlot? slot, out VolumeRoiAnatomyPriorMatch match)
+    {
+        match = null!;
+        if (measurement.Kind != MeasurementKind.VolumeRoi)
+        {
+            return false;
+        }
+
+        return TryFindLearnedMeasurementPriorMatch(measurement, slot, requiredRegionLabel: null, out match);
     }
 
     private bool TryBuildVolumeRoiPriorRecord(StudyMeasurement measurement, ViewportSlot? slot, string anatomyLabel, string regionLabel, out VolumeRoiAnatomyPriorRecord prior)
@@ -1683,6 +1841,7 @@ public partial class StudyViewerWindow
             probe.NormalizedSizeY,
             probe.NormalizedSizeZ,
             probe.EstimatedVolumeCubicMillimeters,
+            probe.StructureSignature,
             _context.StudyDetails.Study.StudyInstanceUid,
             slot?.Series?.SeriesInstanceUid ?? string.Empty,
             DateTime.UtcNow,
@@ -1698,9 +1857,15 @@ public partial class StudyViewerWindow
             return false;
         }
 
+        return TryBuildMeasurementPriorProbe(measurement, slot, out probe);
+    }
+
+    private bool TryBuildMeasurementPriorProbe(StudyMeasurement measurement, ViewportSlot? slot, out VolumeRoiPriorProbe probe)
+    {
+        probe = null!;
+
         SpatialBounds? bounds = GetSpatialBounds(slot?.Volume);
-        SpatialVector3D[] points = measurement.VolumeContours
-            .SelectMany(contour => contour.Anchors)
+        SpatialVector3D[] points = measurement.Anchors
             .Where(anchor => anchor.PatientPoint is not null)
             .Select(anchor => anchor.PatientPoint!.Value)
             .ToArray();
@@ -1722,7 +1887,7 @@ public partial class StudyViewerWindow
         probe = new VolumeRoiPriorProbe(
             slot?.Series?.Modality?.Trim() ?? string.Empty,
             ResolveSoftBodyPartExamined(slot),
-            _context.StudyDetails.Study.StudyDescription?.Trim() ?? string.Empty,
+            ResolveMeasurementStudyDescription(slot).Trim(),
             slot?.Series?.SeriesDescription?.Trim() ?? string.Empty,
             Normalize(center.X, bounds.Value.MinX, bounds.Value.MaxX),
             Normalize(center.Y, bounds.Value.MinY, bounds.Value.MaxY),
@@ -1730,11 +1895,41 @@ public partial class StudyViewerWindow
             Math.Clamp((maxX - minX) / rangeX, 0, 1),
             Math.Clamp((maxY - minY) / rangeY, 0, 1),
             Math.Clamp((maxZ - minZ) / rangeZ, 0, 1),
-            EstimateMeasurementVolumeCubicMillimeters(measurement.VolumeContours));
+            measurement.Kind == MeasurementKind.VolumeRoi && measurement.VolumeContours is { Length: > 0 }
+                ? EstimateMeasurementVolumeCubicMillimeters(measurement.VolumeContours)
+                : 0,
+            TryBuildMeasurementStructureSignature(measurement, slot?.Volume, out AnatomyStructureSignature? structureSignature)
+                ? structureSignature
+                : null);
+        return true;
+    }
+
+    private static bool TryBuildMeasurementStructureSignature(StudyMeasurement measurement, SeriesVolume? volume, out AnatomyStructureSignature? signature)
+    {
+        signature = null;
+        if (volume is null)
+        {
+            return false;
+        }
+
+        bool success = measurement.Kind == MeasurementKind.VolumeRoi && measurement.VolumeContours is { Length: > 0 }
+            ? AnatomyStructureSignatureService.TryCreateForStoredPrior(measurement, volume, out AnatomyStructureSignature built)
+            : AnatomyStructureSignatureService.TryCreateForMeasurementProbe(measurement, volume, out built);
+        if (!success)
+        {
+            return false;
+        }
+
+        signature = built;
         return true;
     }
 
     private double ScoreVolumeRoiPrior(VolumeRoiPriorProbe probe, VolumeRoiAnatomyPriorRecord prior)
+    {
+        return ScoreAnatomyPriorMatch(probe, prior, compareShape: true);
+    }
+
+    private double ScoreAnatomyPriorMatch(VolumeRoiPriorProbe probe, VolumeRoiAnatomyPriorRecord prior, bool compareShape)
     {
         double score = 0;
 
@@ -1749,24 +1944,64 @@ public partial class StudyViewerWindow
             Math.Pow(probe.NormalizedCenterX - prior.NormalizedCenterX, 2) +
             Math.Pow(probe.NormalizedCenterY - prior.NormalizedCenterY, 2) +
             Math.Pow(probe.NormalizedCenterZ - prior.NormalizedCenterZ, 2));
-        score += Math.Max(0, 0.46 - (centerDistance * 0.85));
+        score += Math.Max(0, 0.36 - (centerDistance * 0.72));
 
-        double sizeDistance = (
-            Math.Abs(probe.NormalizedSizeX - prior.NormalizedSizeX) +
-            Math.Abs(probe.NormalizedSizeY - prior.NormalizedSizeY) +
-            Math.Abs(probe.NormalizedSizeZ - prior.NormalizedSizeZ)) / 3.0;
-        score += Math.Max(0, 0.16 - (sizeDistance * 0.30));
-
-        if (probe.EstimatedVolumeCubicMillimeters > 0 && prior.EstimatedVolumeCubicMillimeters > 0)
+        if (IsProbeCenterWithinPrior(probe, prior))
         {
-            double ratio = Math.Max(probe.EstimatedVolumeCubicMillimeters, prior.EstimatedVolumeCubicMillimeters) /
-                           Math.Max(1.0, Math.Min(probe.EstimatedVolumeCubicMillimeters, prior.EstimatedVolumeCubicMillimeters));
-            score += Math.Max(0, 0.10 - (Math.Log(ratio) * 0.06));
+            score += 0.22;
         }
 
         score += 0.12 * ComputeContextTokenOverlap(probe.ContextText, $"{prior.StudyDescription} {prior.SeriesDescription} {prior.BodyPartExamined}");
+
+        if (compareShape)
+        {
+            double sizeDistance = (
+                Math.Abs(probe.NormalizedSizeX - prior.NormalizedSizeX) +
+                Math.Abs(probe.NormalizedSizeY - prior.NormalizedSizeY) +
+                Math.Abs(probe.NormalizedSizeZ - prior.NormalizedSizeZ)) / 3.0;
+            score += Math.Max(0, 0.16 - (sizeDistance * 0.30));
+
+            if (probe.EstimatedVolumeCubicMillimeters > 0 && prior.EstimatedVolumeCubicMillimeters > 0)
+            {
+                double ratio = Math.Max(probe.EstimatedVolumeCubicMillimeters, prior.EstimatedVolumeCubicMillimeters) /
+                               Math.Max(1.0, Math.Min(probe.EstimatedVolumeCubicMillimeters, prior.EstimatedVolumeCubicMillimeters));
+                score += Math.Max(0, 0.10 - (Math.Log(ratio) * 0.06));
+            }
+        }
+
+        double structureSimilarity = AnatomyStructureSignatureService.Compare(probe.StructureSignature, prior.StructureSignature, compareShape);
+        if (structureSimilarity > 0)
+        {
+            score += structureSimilarity * (compareShape ? 0.26 : 0.22);
+        }
+
         score += Math.Min(0.08, Math.Max(0, (prior.UseCount - 1) * 0.01));
         return score;
+    }
+
+    private double ScoreSeriesRegionPrior(string modality, string bodyPart, string context, VolumeRoiAnatomyPriorRecord prior)
+    {
+        double score = 0;
+        if (!string.IsNullOrWhiteSpace(modality) && string.Equals(modality, prior.Modality, StringComparison.OrdinalIgnoreCase))
+        {
+            score += 0.22;
+        }
+
+        score += 0.18 * ComputeBodyPartSimilarity(bodyPart, prior.BodyPartExamined);
+        score += 0.34 * ComputeContextTokenOverlap(context, $"{prior.StudyDescription} {prior.SeriesDescription} {prior.BodyPartExamined}");
+        score += Math.Min(0.08, Math.Max(0, (prior.UseCount - 1) * 0.01));
+        return score;
+    }
+
+    private static bool IsProbeCenterWithinPrior(VolumeRoiPriorProbe probe, VolumeRoiAnatomyPriorRecord prior)
+    {
+        double toleranceX = Math.Max(0.035, prior.NormalizedSizeX * 0.5 + probe.NormalizedSizeX * 0.5);
+        double toleranceY = Math.Max(0.035, prior.NormalizedSizeY * 0.5 + probe.NormalizedSizeY * 0.5);
+        double toleranceZ = Math.Max(0.035, prior.NormalizedSizeZ * 0.5 + probe.NormalizedSizeZ * 0.5);
+
+        return Math.Abs(probe.NormalizedCenterX - prior.NormalizedCenterX) <= toleranceX &&
+               Math.Abs(probe.NormalizedCenterY - prior.NormalizedCenterY) <= toleranceY &&
+               Math.Abs(probe.NormalizedCenterZ - prior.NormalizedCenterZ) <= toleranceZ;
     }
 
     private static double ComputeContextTokenOverlap(string left, string right)
@@ -2086,6 +2321,10 @@ public partial class StudyViewerWindow
         string Hint,
         bool IsSelected,
         string AccentHex,
+        bool IsRegionLearned,
+        double RegionConfidence,
+        bool IsAnatomyLearned,
+        double AnatomyConfidence,
         bool IsRegionEditable,
         bool IsAnatomyManual,
         bool IsAnatomyEditable,
@@ -2104,14 +2343,26 @@ public partial class StudyViewerWindow
         double NormalizedSizeX,
         double NormalizedSizeY,
         double NormalizedSizeZ,
-        double EstimatedVolumeCubicMillimeters)
+        double EstimatedVolumeCubicMillimeters,
+        AnatomyStructureSignature? StructureSignature)
     {
         public string ContextText => $"{StudyDescription} {SeriesDescription} {BodyPartExamined}".Trim();
     }
 
-    private sealed record RegionGuess(string Label, string AutoLabel, string Hint, bool IsManual = false);
+    private sealed record RegionGuess(
+        string Label,
+        string AutoLabel,
+        string Hint,
+        bool IsManual = false,
+        bool IsLearned = false,
+        double Confidence = 0);
 
-    private sealed record AnatomyGuess(string Label, string Hint, bool IsManual = false)
+    private sealed record AnatomyGuess(
+        string Label,
+        string Hint,
+        bool IsManual = false,
+        bool IsLearned = false,
+        double Confidence = 0)
     {
         public string DisplayLabel => IsManual || string.Equals(Label, "Unassigned", StringComparison.OrdinalIgnoreCase)
             ? Label

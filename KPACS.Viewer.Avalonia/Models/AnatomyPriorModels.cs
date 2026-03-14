@@ -1,5 +1,20 @@
 namespace KPACS.Viewer.Models;
 
+public sealed record AnatomyStructureSignature(
+    int SampleCount,
+    double IntensityMedian,
+    double IntensitySpread,
+    double IntensityEntropy,
+    double IntensityUniformity,
+    double GradientMean,
+    double GradientSpread,
+    double ShellContrast,
+    double OccupancyRatio,
+    double AxisRatioMediumToMajor,
+    double AxisRatioMinorToMajor,
+    double[] IntensityHistogram,
+    double[] GradientHistogram);
+
 public sealed record VolumeRoiAnatomyPriorRecord(
     long PriorKey,
     string Signature,
@@ -16,6 +31,7 @@ public sealed record VolumeRoiAnatomyPriorRecord(
     double NormalizedSizeY,
     double NormalizedSizeZ,
     double EstimatedVolumeCubicMillimeters,
+    AnatomyStructureSignature? StructureSignature,
     string SourceStudyInstanceUid,
     string SourceSeriesInstanceUid,
     DateTime UpdatedAtUtc,
