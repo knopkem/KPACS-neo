@@ -144,6 +144,7 @@ public partial class DicomViewPanel : UserControl
     private byte[] _lutR = new byte[256];
     private byte[] _lutG = new byte[256];
     private byte[] _lutB = new byte[256];
+    private byte[]? _renderBuffer;
 
     // Transforms (created in code — Avalonia doesn't support x:Name on transforms)
     private readonly ScaleTransform _zoomTransform = new ScaleTransform(1, 1);
@@ -869,7 +870,8 @@ public partial class DicomViewPanel : UserControl
         if (_volumeSlicePixels is not null && _displayBitmap is not null)
         {
             int pixelCount = _imageWidth * _imageHeight;
-            byte[] outputBgra = new byte[pixelCount * 4];
+            int requiredBytes = pixelCount * 4;
+            byte[] outputBgra = EnsureRenderBuffer(requiredBytes);
 
             DicomPixelRenderer.RenderRescaled16Bit(
                 _volumeSlicePixels,
@@ -879,7 +881,7 @@ public partial class DicomViewPanel : UserControl
                 _isMonochrome1,
                 outputBgra);
 
-            CopyToDisplayBitmap(outputBgra);
+            CopyToDisplayBitmap(outputBgra, requiredBytes);
             return;
         }
 
@@ -888,7 +890,8 @@ public partial class DicomViewPanel : UserControl
 
         {
             int pixelCount = _imageWidth * _imageHeight;
-            byte[] outputBgra = new byte[pixelCount * 4];
+            int requiredBytes = pixelCount * 4;
+            byte[] outputBgra = EnsureRenderBuffer(requiredBytes);
 
             DicomPixelRenderer.Render(
                 _rawPixelData,
@@ -905,11 +908,21 @@ public partial class DicomViewPanel : UserControl
 
             ApplyBitmapOverlays(outputBgra);
 
-            CopyToDisplayBitmap(outputBgra);
+            CopyToDisplayBitmap(outputBgra, requiredBytes);
         }
     }
 
-    private void CopyToDisplayBitmap(byte[] outputBgra)
+    private byte[] EnsureRenderBuffer(int requiredBytes)
+    {
+        if (_renderBuffer is null || _renderBuffer.Length < requiredBytes)
+        {
+            _renderBuffer = new byte[requiredBytes];
+        }
+
+        return _renderBuffer;
+    }
+
+    private void CopyToDisplayBitmap(byte[] outputBgra, int usedLength)
     {
         if (_displayBitmap is null) return;
 
@@ -921,7 +934,7 @@ public partial class DicomViewPanel : UserControl
 
             if (stride == rowSize)
             {
-                Marshal.Copy(outputBgra, 0, addr, outputBgra.Length);
+                Marshal.Copy(outputBgra, 0, addr, usedLength);
             }
             else
             {

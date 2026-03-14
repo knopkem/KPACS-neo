@@ -13,6 +13,8 @@ public partial class DicomViewPanel
     private Point? _roiBallHoverImagePoint;
     private BallRoiDragSession? _roiBallDragSession;
     private int _roiBallRadiusPixels = RoiBallDefaultRadiusPixels;
+    private VolumeMeasurementProjectionCache? _volumeMeasurementProjectionCache;
+    private VolumeDraftProjectionCache? _volumeDraftProjectionCache;
 
     public int BallRoiRadiusPixels => _roiBallRadiusPixels;
 
@@ -34,6 +36,21 @@ public partial class DicomViewPanel
         public Point LastAppliedPoint { get; set; } = lastAppliedPoint;
     }
 
+    private sealed record VolumeMeasurementProjectionCache(
+        Guid MeasurementId,
+        int MeasurementVersion,
+        string SliceKey,
+        VolumeRoiContour[] CurrentSliceContours,
+        Point[][] ProjectedContours,
+        bool UsesInterpolatedContours);
+
+    private sealed record VolumeDraftProjectionCache(
+        VolumeRoiDraft Draft,
+        int DraftVersion,
+        string SliceKey,
+        VolumeRoiDraftContour[] CurrentContours,
+        Point[][] ProjectedContours);
+
     public bool TryAdjustBallRoiRadius(int deltaPixels, out int resultingRadius)
     {
         resultingRadius = _roiBallRadiusPixels;
@@ -52,6 +69,12 @@ public partial class DicomViewPanel
         _roiBallRadiusPixels = nextRadius;
         UpdateMeasurementPresentation();
         return true;
+    }
+
+    private void InvalidateRoiBallProjectionCaches()
+    {
+        _volumeMeasurementProjectionCache = null;
+        _volumeDraftProjectionCache = null;
     }
 
     private void ClearBallRoiInteraction(bool clearHover = true)
@@ -181,6 +204,7 @@ public partial class DicomViewPanel
         }
 
         StudyMeasurement updated = measurement.WithAnchors(SpatialMetadata, updatedPoints);
+        InvalidateRoiBallProjectionCaches();
         MeasurementUpdated?.Invoke(updated);
         UpdateMeasurementPresentation();
         return true;
@@ -188,38 +212,19 @@ public partial class DicomViewPanel
 
     private bool TryApplyBallCorrectionToVolumeMeasurement(StudyMeasurement measurement, Point imagePoint, bool? forcedAddRegion, int radiusPixels, bool requireEdgeCollision)
     {
-        if (SpatialMetadata is null || measurement.VolumeContours is null || measurement.VolumeContours.Length == 0)
+        if (!TryGetVolumeMeasurementProjectedContours(measurement, out VolumeRoiContour[] currentSliceContours, out Point[][] projectedContours, out bool usesInterpolatedContours))
         {
             return false;
         }
 
-        VolumeRoiContour[] currentSliceContours = measurement.VolumeContours
-            .Where(IsContourOnCurrentSlice)
-            .OrderBy(contour => contour.ComponentId)
-            .ToArray();
-
-        if (currentSliceContours.Length > 0)
+        if (!usesInterpolatedContours)
         {
-            List<(VolumeRoiContour Contour, Point[] Points)> candidates = [];
-            foreach (VolumeRoiContour contour in currentSliceContours)
-            {
-                if (contour.IsClosed && contour.TryProjectTo(SpatialMetadata, out Point[] points) && points.Length >= 3)
-                {
-                    candidates.Add((contour, points));
-                }
-            }
-
-            if (candidates.Count == 0)
+            if (!TrySelectSculptedContour(projectedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out int contourIndex, out Point[] updatedPoints, out _, out _))
             {
                 return false;
             }
 
-            if (!TrySelectSculptedContour(candidates.Select(candidate => candidate.Points).ToArray(), imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out int contourIndex, out Point[] updatedPoints, out _, out _))
-            {
-                return false;
-            }
-
-            VolumeRoiContour target = candidates[contourIndex].Contour;
+            VolumeRoiContour target = currentSliceContours[contourIndex];
             VolumeRoiContour updatedTarget = CreateUpdatedVolumeContour(target, updatedPoints);
             VolumeRoiContour[] updatedContours = measurement.VolumeContours
                 .Select(contour => ReferenceEquals(contour, target) ? updatedTarget : contour)
@@ -228,17 +233,13 @@ public partial class DicomViewPanel
                 .ToArray();
 
             StudyMeasurement updatedMeasurement = measurement.WithVolumeContours(updatedContours);
+            InvalidateRoiBallProjectionCaches();
             MeasurementUpdated?.Invoke(updatedMeasurement);
             UpdateMeasurementPresentation();
             return true;
         }
 
-        if (!measurement.TryProjectVolumeContoursTo(SpatialMetadata, out Point[][] interpolatedContours) || interpolatedContours.Length == 0)
-        {
-            return false;
-        }
-
-        if (!TrySelectSculptedContour(interpolatedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out _, out Point[] interpolatedUpdatedPoints, out _, out _))
+        if (!TrySelectSculptedContour(projectedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out _, out Point[] interpolatedUpdatedPoints, out _, out _))
         {
             return false;
         }
@@ -251,6 +252,7 @@ public partial class DicomViewPanel
             .ToArray();
 
         StudyMeasurement updated = measurement.WithVolumeContours(insertedContours);
+        InvalidateRoiBallProjectionCaches();
         MeasurementUpdated?.Invoke(updated);
         UpdateMeasurementPresentation();
         return true;
@@ -258,40 +260,17 @@ public partial class DicomViewPanel
 
     private bool TryApplyBallCorrectionToVolumeDraft(Point imagePoint, bool? forcedAddRegion, int radiusPixels, bool requireEdgeCollision)
     {
-        if (_volumeRoiDraft is null || SpatialMetadata is null)
+        if (!TryGetVolumeDraftProjectedContours(out VolumeRoiDraftContour[] currentContours, out Point[][] projectedContours))
         {
             return false;
         }
 
-        VolumeRoiDraftContour[] currentContours = _volumeRoiDraft.Contours.Values
-            .Where(contour => contour.IsClosed && string.Equals(contour.SliceKey, GetCurrentVolumeRoiSliceKey(SpatialMetadata), StringComparison.Ordinal))
-            .OrderBy(contour => contour.ComponentId)
-            .ToArray();
-        if (currentContours.Length == 0)
+        if (!TrySelectSculptedContour(projectedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out int contourIndex, out Point[] updatedPoints, out _, out _))
         {
             return false;
         }
 
-        List<(VolumeRoiDraftContour Contour, Point[] Points)> candidates = [];
-        foreach (VolumeRoiDraftContour contour in currentContours)
-        {
-            if (contour.TryProjectTo(SpatialMetadata, out Point[] points) && points.Length >= 3)
-            {
-                candidates.Add((contour, points));
-            }
-        }
-
-        if (candidates.Count == 0)
-        {
-            return false;
-        }
-
-        if (!TrySelectSculptedContour(candidates.Select(candidate => candidate.Points).ToArray(), imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out int contourIndex, out Point[] updatedPoints, out _, out _))
-        {
-            return false;
-        }
-
-        VolumeRoiDraftContour target = candidates[contourIndex].Contour;
+        VolumeRoiDraftContour target = currentContours[contourIndex];
         target.Anchors.Clear();
         target.Anchors.AddRange(updatedPoints.Select(point => new MeasurementAnchor(point, SpatialMetadata.PatientPointFromPixel(point))));
         NotifyVolumeRoiDraftChanged();
@@ -302,58 +281,43 @@ public partial class DicomViewPanel
     private bool TryBuildVolumeDraftSliceMask(VolumeRoiDraftContour[] contours, out RoiMask mask)
     {
         mask = default;
+        if (contours.Length == 0)
+        {
+            return false;
+        }
+
+        if (_volumeRoiDraft is not null && TryGetVolumeDraftProjectedContours(out VolumeRoiDraftContour[] cachedContours, out Point[][] projected) && AreSameDraftContours(cachedContours, contours))
+        {
+            return TryBuildMultiPolygonMask(projected, _roiBallRadiusPixels + 2, out mask);
+        }
+
         if (SpatialMetadata is null)
         {
             return false;
         }
 
-        Point[][] projected = contours
+        Point[][] uncachedProjected = contours
             .Select(contour => contour.TryProjectTo(SpatialMetadata, out Point[] points) ? points : [])
             .Where(points => points.Length >= 3)
             .ToArray();
-        if (projected.Length == 0)
+        if (uncachedProjected.Length == 0)
         {
             return false;
         }
 
-        return TryBuildMultiPolygonMask(projected, _roiBallRadiusPixels + 2, out mask);
+        return TryBuildMultiPolygonMask(uncachedProjected, _roiBallRadiusPixels + 2, out mask);
     }
 
     private bool TryBuildVolumeSliceMask(StudyMeasurement measurement, out RoiMask mask, out VolumeRoiContour[] existingContours)
     {
         mask = default;
         existingContours = [];
-        if (SpatialMetadata is null || measurement.VolumeContours is null)
+        if (!TryGetVolumeMeasurementProjectedContours(measurement, out existingContours, out Point[][] projectedContours, out _))
         {
             return false;
         }
 
-        existingContours = measurement.VolumeContours
-            .Where(IsContourOnCurrentSlice)
-            .OrderBy(contour => contour.ComponentId)
-            .ToArray();
-
-        List<Point[]> projected = [];
-        foreach (VolumeRoiContour contour in existingContours)
-        {
-            if (contour.IsClosed && contour.TryProjectTo(SpatialMetadata, out Point[] points) && points.Length >= 3)
-            {
-                projected.Add(points);
-            }
-        }
-
-        if (projected.Count == 0 && measurement.TryProjectVolumeContoursTo(SpatialMetadata, out Point[][] interpolatedContours) && interpolatedContours.Length > 0)
-        {
-            projected.AddRange(interpolatedContours.Where(points => points.Length >= 3));
-            existingContours = [];
-        }
-
-        if (projected.Count == 0)
-        {
-            return false;
-        }
-
-        return TryBuildMultiPolygonMask(projected, _roiBallRadiusPixels + 2, out mask);
+        return TryBuildMultiPolygonMask(projectedContours, _roiBallRadiusPixels + 2, out mask);
     }
 
     private bool TryGetBallRoiBrushPreview(Point imagePoint, bool? forcedAddRegion, out BallRoiBrushPreview preview)
@@ -363,13 +327,8 @@ public partial class DicomViewPanel
 
         if (_volumeRoiDraft is not null && CanRetainVolumeRoiDraftForCurrentSlice())
         {
-            Point[][] currentContours = _volumeRoiDraft.Contours.Values
-                .Where(contour => contour.IsClosed && string.Equals(contour.SliceKey, GetCurrentVolumeRoiSliceKey(SpatialMetadata!), StringComparison.Ordinal))
-                .OrderBy(contour => contour.ComponentId)
-                .Select(contour => contour.TryProjectTo(SpatialMetadata!, out Point[] points) ? points : [])
-                .Where(points => points.Length >= 3)
-                .ToArray();
-            return TryCreateBallRoiBrushPreview(clamped, currentContours, forcedAddRegion, out preview);
+            return TryGetVolumeDraftProjectedContours(out _, out Point[][] currentContours)
+                && TryCreateBallRoiBrushPreview(clamped, currentContours, forcedAddRegion, out preview);
         }
 
         if (_selectedMeasurementId is not Guid measurementId || SpatialMetadata is null)
@@ -392,21 +351,7 @@ public partial class DicomViewPanel
                 }
                 return TryCreateBallRoiBrushPreview(clamped, [polygonPoints], forcedAddRegion, out preview);
             case MeasurementKind.VolumeRoi:
-                Point[][] projectedContours;
-                if (measurement.VolumeContours is not null)
-                {
-                    projectedContours = measurement.VolumeContours
-                        .Where(IsContourOnCurrentSlice)
-                        .Select(contour => contour.TryProjectTo(SpatialMetadata, out Point[] points) ? points : [])
-                        .Where(points => points.Length >= 3)
-                        .ToArray();
-                }
-                else
-                {
-                    projectedContours = [];
-                }
-
-                if (projectedContours.Length == 0 && (!measurement.TryProjectVolumeContoursTo(SpatialMetadata, out projectedContours) || projectedContours.Length == 0))
+                if (!TryGetVolumeMeasurementProjectedContours(measurement, out _, out Point[][] projectedContours, out _))
                 {
                     return false;
                 }
@@ -415,6 +360,129 @@ public partial class DicomViewPanel
             default:
                 return false;
         }
+    }
+
+    private bool TryGetVolumeMeasurementProjectedContours(
+        StudyMeasurement measurement,
+        out VolumeRoiContour[] currentSliceContours,
+        out Point[][] projectedContours,
+        out bool usesInterpolatedContours)
+    {
+        currentSliceContours = [];
+        projectedContours = [];
+        usesInterpolatedContours = false;
+
+        if (SpatialMetadata is null || measurement.VolumeContours is null || measurement.VolumeContours.Length == 0)
+        {
+            return false;
+        }
+
+        string sliceKey = GetCurrentVolumeRoiSliceKey(SpatialMetadata);
+        if (_volumeMeasurementProjectionCache is { } cache &&
+            cache.MeasurementId == measurement.Id &&
+            cache.MeasurementVersion == _measurementGeometryVersion &&
+            string.Equals(cache.SliceKey, sliceKey, StringComparison.Ordinal))
+        {
+            currentSliceContours = cache.CurrentSliceContours;
+            projectedContours = cache.ProjectedContours;
+            usesInterpolatedContours = cache.UsesInterpolatedContours;
+            return projectedContours.Length > 0;
+        }
+
+        currentSliceContours = measurement.VolumeContours
+            .Where(IsContourOnCurrentSlice)
+            .OrderBy(contour => contour.ComponentId)
+            .ToArray();
+
+        List<Point[]> projected = [];
+        foreach (VolumeRoiContour contour in currentSliceContours)
+        {
+            if (contour.IsClosed && contour.TryProjectTo(SpatialMetadata, out Point[] points) && points.Length >= 3)
+            {
+                projected.Add(points);
+            }
+        }
+
+        if (projected.Count == 0 && measurement.TryProjectVolumeContoursTo(SpatialMetadata, out Point[][] interpolatedContours) && interpolatedContours.Length > 0)
+        {
+            projected.AddRange(interpolatedContours.Where(points => points.Length >= 3));
+            currentSliceContours = [];
+            usesInterpolatedContours = true;
+        }
+
+        projectedContours = projected.ToArray();
+        _volumeMeasurementProjectionCache = new VolumeMeasurementProjectionCache(
+            measurement.Id,
+            _measurementGeometryVersion,
+            sliceKey,
+            currentSliceContours,
+            projectedContours,
+            usesInterpolatedContours);
+        return projectedContours.Length > 0;
+    }
+
+    private bool TryGetVolumeDraftProjectedContours(
+        out VolumeRoiDraftContour[] currentContours,
+        out Point[][] projectedContours)
+    {
+        currentContours = [];
+        projectedContours = [];
+
+        if (_volumeRoiDraft is null || SpatialMetadata is null)
+        {
+            return false;
+        }
+
+        string sliceKey = GetCurrentVolumeRoiSliceKey(SpatialMetadata);
+        if (_volumeDraftProjectionCache is { } cache &&
+            ReferenceEquals(cache.Draft, _volumeRoiDraft) &&
+            cache.DraftVersion == _volumeRoiDraftPreviewVersion &&
+            string.Equals(cache.SliceKey, sliceKey, StringComparison.Ordinal))
+        {
+            currentContours = cache.CurrentContours;
+            projectedContours = cache.ProjectedContours;
+            return projectedContours.Length > 0;
+        }
+
+        currentContours = _volumeRoiDraft.Contours.Values
+            .Where(contour => contour.IsClosed && string.Equals(contour.SliceKey, sliceKey, StringComparison.Ordinal))
+            .OrderBy(contour => contour.ComponentId)
+            .ToArray();
+        if (currentContours.Length == 0)
+        {
+            _volumeDraftProjectionCache = new VolumeDraftProjectionCache(_volumeRoiDraft, _volumeRoiDraftPreviewVersion, sliceKey, currentContours, projectedContours);
+            return false;
+        }
+
+        projectedContours = currentContours
+            .Select(contour => contour.TryProjectTo(SpatialMetadata, out Point[] points) ? points : [])
+            .Where(points => points.Length >= 3)
+            .ToArray();
+        _volumeDraftProjectionCache = new VolumeDraftProjectionCache(
+            _volumeRoiDraft,
+            _volumeRoiDraftPreviewVersion,
+            sliceKey,
+            currentContours,
+            projectedContours);
+        return projectedContours.Length > 0;
+    }
+
+    private static bool AreSameDraftContours(VolumeRoiDraftContour[] first, VolumeRoiDraftContour[] second)
+    {
+        if (first.Length != second.Length)
+        {
+            return false;
+        }
+
+        for (int index = 0; index < first.Length; index++)
+        {
+            if (!ReferenceEquals(first[index], second[index]))
+            {
+                return false;
+            }
+        }
+
+        return true;
     }
 
     private bool TryCreateBallRoiBrushPreview(Point imagePoint, Point[][] contours, bool? forcedAddRegion, out BallRoiBrushPreview preview)

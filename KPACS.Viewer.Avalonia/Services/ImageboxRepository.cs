@@ -51,6 +51,7 @@ public sealed class ImageboxRepository
                 study_key INTEGER NOT NULL,
                 series_instance_uid TEXT NOT NULL UNIQUE,
                 modality TEXT NOT NULL,
+                body_part_examined TEXT NOT NULL DEFAULT '',
                 series_description TEXT NOT NULL,
                 series_number INTEGER NOT NULL,
                 instance_count INTEGER NOT NULL DEFAULT 0,
@@ -69,11 +70,36 @@ public sealed class ImageboxRepository
                 FOREIGN KEY (series_key) REFERENCES series(series_key) ON DELETE CASCADE
             );
 
+            CREATE TABLE IF NOT EXISTS volume_roi_anatomy_priors (
+                prior_key INTEGER PRIMARY KEY AUTOINCREMENT,
+                signature TEXT NOT NULL UNIQUE,
+                anatomy_label TEXT NOT NULL,
+                region_label TEXT NOT NULL,
+                modality TEXT NOT NULL,
+                body_part_examined TEXT NOT NULL DEFAULT '',
+                study_description TEXT NOT NULL DEFAULT '',
+                series_description TEXT NOT NULL DEFAULT '',
+                normalized_center_x REAL NOT NULL,
+                normalized_center_y REAL NOT NULL,
+                normalized_center_z REAL NOT NULL,
+                normalized_size_x REAL NOT NULL,
+                normalized_size_y REAL NOT NULL,
+                normalized_size_z REAL NOT NULL,
+                estimated_volume_mm3 REAL NOT NULL DEFAULT 0,
+                source_study_instance_uid TEXT NOT NULL DEFAULT '',
+                source_series_instance_uid TEXT NOT NULL DEFAULT '',
+                use_count INTEGER NOT NULL DEFAULT 1,
+                created_at_utc TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL
+            );
+
             CREATE INDEX IF NOT EXISTS ix_studies_patient_name ON studies(patient_name);
             CREATE INDEX IF NOT EXISTS ix_studies_patient_id ON studies(patient_id);
             CREATE INDEX IF NOT EXISTS ix_studies_study_date ON studies(study_date);
             CREATE INDEX IF NOT EXISTS ix_series_study_key ON series(study_key);
             CREATE INDEX IF NOT EXISTS ix_instances_series_key ON instances(series_key);
+            CREATE INDEX IF NOT EXISTS ix_volume_roi_priors_modality ON volume_roi_anatomy_priors(modality);
+            CREATE INDEX IF NOT EXISTS ix_volume_roi_priors_body_part ON volume_roi_anatomy_priors(body_part_examined);
             """;
 
         await using var command = connection.CreateCommand();
@@ -83,6 +109,7 @@ public sealed class ImageboxRepository
         await EnsureColumnExistsAsync(connection, "studies", "patient_birth_date", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync(connection, "studies", "source_path", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync(connection, "studies", "availability_status", "TEXT NOT NULL DEFAULT 'Imported'", cancellationToken);
+        await EnsureColumnExistsAsync(connection, "series", "body_part_examined", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync(connection, "instances", "sop_class_uid", "TEXT NOT NULL DEFAULT ''", cancellationToken);
         await EnsureColumnExistsAsync(connection, "instances", "source_file_path", "TEXT NOT NULL DEFAULT ''", cancellationToken);
     }
@@ -144,8 +171,8 @@ public sealed class ImageboxRepository
         {
             command.CommandText = """
                 SELECT sr.series_key, sr.study_key, sr.series_instance_uid, sr.modality,
-                       sr.series_description, sr.series_number, sr.instance_count,
-                       i.instance_key, i.series_key, i.sop_instance_uid, i.sop_class_uid, i.file_path, i.source_file_path, i.instance_number, i.frame_count
+                      sr.body_part_examined, sr.series_description, sr.series_number, sr.instance_count,
+                      i.instance_key, i.series_key, i.sop_instance_uid, i.sop_class_uid, i.file_path, i.source_file_path, i.instance_number, i.frame_count
                 FROM series sr
                 LEFT JOIN instances i ON i.series_key = sr.series_key
                 WHERE sr.study_key = $studyKey
@@ -165,29 +192,30 @@ public sealed class ImageboxRepository
                         StudyKey = reader.GetInt64(1),
                         SeriesInstanceUid = reader.GetString(2),
                         Modality = reader.GetString(3),
-                        SeriesDescription = reader.GetString(4),
-                        SeriesNumber = reader.GetInt32(5),
-                        InstanceCount = reader.GetInt32(6),
+                        BodyPart = reader.GetString(4),
+                        SeriesDescription = reader.GetString(5),
+                        SeriesNumber = reader.GetInt32(6),
+                        InstanceCount = reader.GetInt32(7),
                     };
                     seriesLookup.Add(seriesKey, series);
                     details.Series.Add(series);
                 }
 
-                if (reader.IsDBNull(7))
+                if (reader.IsDBNull(8))
                 {
                     continue;
                 }
 
                 series.Instances.Add(new InstanceRecord
                 {
-                    InstanceKey = reader.GetInt64(7),
-                    SeriesKey = reader.GetInt64(8),
-                    SopInstanceUid = reader.GetString(9),
-                    SopClassUid = reader.GetString(10),
-                    FilePath = reader.GetString(11),
-                    SourceFilePath = reader.GetString(12),
-                    InstanceNumber = reader.GetInt32(13),
-                    FrameCount = reader.GetInt32(14),
+                    InstanceKey = reader.GetInt64(8),
+                    SeriesKey = reader.GetInt64(9),
+                    SopInstanceUid = reader.GetString(10),
+                    SopClassUid = reader.GetString(11),
+                    FilePath = reader.GetString(12),
+                    SourceFilePath = reader.GetString(13),
+                    InstanceNumber = reader.GetInt32(14),
+                    FrameCount = reader.GetInt32(15),
                 });
             }
         }
@@ -315,11 +343,12 @@ public sealed class ImageboxRepository
         await connection.OpenAsync(cancellationToken);
         await using var command = connection.CreateCommand();
         command.CommandText = """
-            INSERT INTO series(study_key, series_instance_uid, modality, series_description, series_number, instance_count)
-            VALUES ($studyKey, $uid, $modality, $seriesDescription, $seriesNumber, $instanceCount)
+            INSERT INTO series(study_key, series_instance_uid, modality, body_part_examined, series_description, series_number, instance_count)
+            VALUES ($studyKey, $uid, $modality, $bodyPartExamined, $seriesDescription, $seriesNumber, $instanceCount)
             ON CONFLICT(series_instance_uid) DO UPDATE SET
                 study_key = excluded.study_key,
                 modality = excluded.modality,
+                body_part_examined = excluded.body_part_examined,
                 series_description = excluded.series_description,
                 series_number = excluded.series_number,
                 instance_count = excluded.instance_count
@@ -328,6 +357,7 @@ public sealed class ImageboxRepository
         command.Parameters.AddWithValue("$studyKey", studyKey);
         command.Parameters.AddWithValue("$uid", series.SeriesInstanceUid);
         command.Parameters.AddWithValue("$modality", series.Modality);
+        command.Parameters.AddWithValue("$bodyPartExamined", series.BodyPart);
         command.Parameters.AddWithValue("$seriesDescription", series.SeriesDescription);
         command.Parameters.AddWithValue("$seriesNumber", series.SeriesNumber);
         command.Parameters.AddWithValue("$instanceCount", series.InstanceCount);
@@ -358,6 +388,109 @@ public sealed class ImageboxRepository
         command.Parameters.AddWithValue("$instanceNumber", instance.InstanceNumber);
         command.Parameters.AddWithValue("$frameCount", instance.FrameCount);
         await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task UpsertVolumeRoiAnatomyPriorAsync(VolumeRoiAnatomyPriorRecord prior, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            INSERT INTO volume_roi_anatomy_priors(
+                signature, anatomy_label, region_label, modality, body_part_examined, study_description, series_description,
+                normalized_center_x, normalized_center_y, normalized_center_z,
+                normalized_size_x, normalized_size_y, normalized_size_z,
+                estimated_volume_mm3, source_study_instance_uid, source_series_instance_uid,
+                use_count, created_at_utc, updated_at_utc)
+            VALUES (
+                $signature, $anatomyLabel, $regionLabel, $modality, $bodyPartExamined, $studyDescription, $seriesDescription,
+                $centerX, $centerY, $centerZ,
+                $sizeX, $sizeY, $sizeZ,
+                $estimatedVolumeMm3, $sourceStudyInstanceUid, $sourceSeriesInstanceUid,
+                $useCount, $createdAtUtc, $updatedAtUtc)
+            ON CONFLICT(signature) DO UPDATE SET
+                anatomy_label = excluded.anatomy_label,
+                region_label = excluded.region_label,
+                modality = excluded.modality,
+                body_part_examined = excluded.body_part_examined,
+                study_description = excluded.study_description,
+                series_description = excluded.series_description,
+                normalized_center_x = excluded.normalized_center_x,
+                normalized_center_y = excluded.normalized_center_y,
+                normalized_center_z = excluded.normalized_center_z,
+                normalized_size_x = excluded.normalized_size_x,
+                normalized_size_y = excluded.normalized_size_y,
+                normalized_size_z = excluded.normalized_size_z,
+                estimated_volume_mm3 = excluded.estimated_volume_mm3,
+                source_study_instance_uid = excluded.source_study_instance_uid,
+                source_series_instance_uid = excluded.source_series_instance_uid,
+                use_count = volume_roi_anatomy_priors.use_count + 1,
+                updated_at_utc = excluded.updated_at_utc;
+            """;
+        FillVolumeRoiPriorParameters(command, prior);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task<List<VolumeRoiAnatomyPriorRecord>> GetVolumeRoiAnatomyPriorsAsync(string? modality, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = string.IsNullOrWhiteSpace(modality)
+            ? """
+                SELECT prior_key, signature, anatomy_label, region_label, modality, body_part_examined, study_description, series_description,
+                       normalized_center_x, normalized_center_y, normalized_center_z,
+                       normalized_size_x, normalized_size_y, normalized_size_z,
+                       estimated_volume_mm3, source_study_instance_uid, source_series_instance_uid,
+                       updated_at_utc, use_count
+                FROM volume_roi_anatomy_priors
+                ORDER BY updated_at_utc DESC
+                LIMIT 500;
+                """
+            : """
+                SELECT prior_key, signature, anatomy_label, region_label, modality, body_part_examined, study_description, series_description,
+                       normalized_center_x, normalized_center_y, normalized_center_z,
+                       normalized_size_x, normalized_size_y, normalized_size_z,
+                       estimated_volume_mm3, source_study_instance_uid, source_series_instance_uid,
+                       updated_at_utc, use_count
+                FROM volume_roi_anatomy_priors
+                WHERE modality = $modality OR modality = ''
+                ORDER BY updated_at_utc DESC
+                LIMIT 500;
+                """;
+
+        if (!string.IsNullOrWhiteSpace(modality))
+        {
+            command.Parameters.AddWithValue("$modality", modality.Trim());
+        }
+
+        var results = new List<VolumeRoiAnatomyPriorRecord>();
+        await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+        while (await reader.ReadAsync(cancellationToken))
+        {
+            results.Add(new VolumeRoiAnatomyPriorRecord(
+                reader.GetInt64(0),
+                reader.GetString(1),
+                reader.GetString(2),
+                reader.GetString(3),
+                reader.GetString(4),
+                reader.GetString(5),
+                reader.GetString(6),
+                reader.GetString(7),
+                reader.GetDouble(8),
+                reader.GetDouble(9),
+                reader.GetDouble(10),
+                reader.GetDouble(11),
+                reader.GetDouble(12),
+                reader.GetDouble(13),
+                reader.GetDouble(14),
+                reader.GetString(15),
+                reader.GetString(16),
+                DateTime.TryParse(reader.GetString(17), CultureInfo.InvariantCulture, DateTimeStyles.RoundtripKind, out DateTime updatedAtUtc) ? updatedAtUtc : DateTime.UtcNow,
+                reader.GetInt32(18)));
+        }
+
+        return results;
     }
 
     public async Task UpdateStudyImportStateAsync(long studyKey, StudyAvailability availability, string storagePath, CancellationToken cancellationToken = default)
@@ -557,6 +690,31 @@ public sealed class ImageboxRepository
         command.Parameters.AddWithValue("$availabilityStatus", study.Availability.ToString());
         command.Parameters.AddWithValue("$importedAtUtc", study.ImportedAtUtc.ToString("O", CultureInfo.InvariantCulture));
         command.Parameters.AddWithValue("$updatedAtUtc", DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+    }
+
+    private static void FillVolumeRoiPriorParameters(SqliteCommand command, VolumeRoiAnatomyPriorRecord prior)
+    {
+        string timestamp = (prior.UpdatedAtUtc == default ? DateTime.UtcNow : prior.UpdatedAtUtc)
+            .ToString("O", CultureInfo.InvariantCulture);
+        command.Parameters.AddWithValue("$signature", prior.Signature);
+        command.Parameters.AddWithValue("$anatomyLabel", prior.AnatomyLabel);
+        command.Parameters.AddWithValue("$regionLabel", prior.RegionLabel);
+        command.Parameters.AddWithValue("$modality", prior.Modality);
+        command.Parameters.AddWithValue("$bodyPartExamined", prior.BodyPartExamined);
+        command.Parameters.AddWithValue("$studyDescription", prior.StudyDescription);
+        command.Parameters.AddWithValue("$seriesDescription", prior.SeriesDescription);
+        command.Parameters.AddWithValue("$centerX", prior.NormalizedCenterX);
+        command.Parameters.AddWithValue("$centerY", prior.NormalizedCenterY);
+        command.Parameters.AddWithValue("$centerZ", prior.NormalizedCenterZ);
+        command.Parameters.AddWithValue("$sizeX", prior.NormalizedSizeX);
+        command.Parameters.AddWithValue("$sizeY", prior.NormalizedSizeY);
+        command.Parameters.AddWithValue("$sizeZ", prior.NormalizedSizeZ);
+        command.Parameters.AddWithValue("$estimatedVolumeMm3", prior.EstimatedVolumeCubicMillimeters);
+        command.Parameters.AddWithValue("$sourceStudyInstanceUid", prior.SourceStudyInstanceUid);
+        command.Parameters.AddWithValue("$sourceSeriesInstanceUid", prior.SourceSeriesInstanceUid);
+        command.Parameters.AddWithValue("$useCount", Math.Max(1, prior.UseCount));
+        command.Parameters.AddWithValue("$createdAtUtc", timestamp);
+        command.Parameters.AddWithValue("$updatedAtUtc", timestamp);
     }
 
     private static StudyListItem MapStudyListItem(SqliteDataReader reader)

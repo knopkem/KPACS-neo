@@ -188,6 +188,7 @@ public sealed class DicomRemoteStudyBrowserService
             {
                 SeriesInstanceUid = seriesInfo.SerInstUid,
                 Modality = seriesInfo.SerModality,
+                BodyPart = seriesInfo.BodyPart,
                 SeriesDescription = seriesInfo.SerDesc,
                 SeriesNumber = TryParseInt(seriesInfo.SeriesNumber),
                 InstanceCount = Math.Max(images.Count, localStudy?.Series.FirstOrDefault(series => string.Equals(series.SeriesInstanceUid, seriesInfo.SerInstUid, StringComparison.Ordinal))?.Instances.Count ?? 0),
@@ -227,6 +228,7 @@ public sealed class DicomRemoteStudyBrowserService
             details.LegacyStudy.Series.Add(new SeriesInfo
             {
                 SerDesc = series.SeriesDescription,
+                BodyPart = series.BodyPart,
                 SeriesNumber = series.SeriesNumber > 0 ? series.SeriesNumber.ToString() : string.Empty,
                 SerModality = series.Modality,
                 SerInstUid = series.SeriesInstanceUid,
@@ -640,6 +642,7 @@ public sealed class DicomRemoteStudyBrowserService
                 StudyKey = series.StudyKey,
                 SeriesInstanceUid = series.SeriesInstanceUid,
                 Modality = series.Modality,
+                BodyPart = series.BodyPart,
                 SeriesDescription = series.SeriesDescription,
                 SeriesNumber = series.SeriesNumber,
                 InstanceCount = series.InstanceCount,

@@ -144,6 +144,33 @@
         <Style Selector="TextBox:focus">
             <Setter Property="BorderBrush" Value="#FF7FD9FF" />
         </Style>
+        <Style Selector="ComboBox">
+            <Setter Property="Background" Value="#FF20262D" />
+            <Setter Property="Foreground" Value="#FFF2F6FA" />
+            <Setter Property="BorderBrush" Value="#FF5D768E" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="Padding" Value="8,4" />
+            <Setter Property="FontSize" Value="11" />
+        </Style>
+        <Style Selector="ComboBox:pointerover">
+            <Setter Property="BorderBrush" Value="#FF7FD9FF" />
+        </Style>
+        <Style Selector="ComboBox:focus">
+            <Setter Property="BorderBrush" Value="#FF7FD9FF" />
+        </Style>
+        <Style Selector="ComboBoxItem">
+            <Setter Property="Background" Value="#FF20262D" />
+            <Setter Property="Foreground" Value="#FFF2F6FA" />
+            <Setter Property="Padding" Value="8,4" />
+        </Style>
+        <Style Selector="ComboBoxItem:pointerover">
+            <Setter Property="Background" Value="#FF2B3946" />
+            <Setter Property="Foreground" Value="#FFF6FBFF" />
+        </Style>
+        <Style Selector="ComboBoxItem:selected">
+            <Setter Property="Background" Value="#FF355369" />
+            <Setter Property="Foreground" Value="#FFF6FBFF" />
+        </Style>
         <Style Selector="ScrollBar">
             <Setter Property="Background" Value="#FF2A2A2A" />
             <Setter Property="Foreground" Value="#FFB8B8B8" />
@@ -242,8 +269,14 @@
                                FontSize="10"
                                FontWeight="SemiBold"
                                Margin="2,0,2,0" />
-                    <WrapPanel Grid.Column="1" Orientation="Horizontal" ItemWidth="92">
+                    <WrapPanel Grid.Column="1" Orientation="Horizontal" ItemWidth="104">
                         <Button x:Name="WorkspaceLayoutButton" Classes="workspaceAction" Click="OnWorkspaceLayoutClick" ToolTip.Tip="Viewer layout presets and custom layouts." />
+                        <Button x:Name="WorkspaceReportButton" Classes="workspaceAction" Click="OnWorkspaceReportClick" ToolTip.Tip="Open the floating report panel with created findings, source provenance, and anatomy hints.">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <TextBlock Text="RP" FontWeight="SemiBold" FontSize="11" />
+                                <TextBlock Text="Report" FontSize="11" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="WorkspaceHangingProtocolsButton" Classes="workspaceAction" IsEnabled="False" ToolTip.Tip="Reserved for hanging protocols.">
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <TextBlock Text="HP" FontWeight="SemiBold" FontSize="11" />
@@ -546,6 +579,65 @@
                                FontSize="10"
                                TextWrapping="Wrap"
                                Text="Click to place points, double-click without a line to auto-outline, or double-click with a line to close a slice contour. Scroll to another slice, use arrow keys to rotate the mesh preview, then press Enter to finish or Esc to cancel." />
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="ReportPanel"
+                    IsVisible="False"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,72,18,0"
+                    Padding="12"
+                    MaxWidth="420"
+                    MinWidth="320"
+                    Background="#E6141820"
+                    BorderBrush="#807FC891"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    ZIndex="4">
+                <Border.RenderTransform>
+                    <TranslateTransform />
+                </Border.RenderTransform>
+                <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <StackPanel x:Name="ReportPanelDragHandle"
+                                    Spacing="2"
+                                    Cursor="SizeAll"
+                                    PointerPressed="OnReportPanelHeaderPointerPressed"
+                                    PointerMoved="OnReportPanelHeaderPointerMoved"
+                                    PointerReleased="OnReportPanelHeaderPointerReleased">
+                            <TextBlock Text="Report"
+                                       Foreground="#FFF6FBFF"
+                                       FontWeight="SemiBold"
+                                       FontSize="13" />
+                            <TextBlock x:Name="ReportPanelSummaryText"
+                                       Foreground="#FF9DB3C7"
+                                       FontSize="11"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleButton x:Name="ReportPanelPinButton"
+                                      Grid.Column="1"
+                                      Classes="iconToggle"
+                                      Width="30"
+                                      Height="30"
+                                      MinWidth="30"
+                                      Click="OnReportPanelPinClick"
+                                      ToolTip.Tip="Pin the report panel and keep it open for the current workspace." />
+                    </Grid>
+
+                    <Border Height="1" Background="#334D5F74" />
+
+                    <TextBlock x:Name="ReportPanelHintText"
+                               Foreground="#FFD3E5F5"
+                               FontSize="10"
+                               TextWrapping="Wrap" />
+
+                    <ScrollViewer MaxHeight="480"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="ReportItemsPanel"
+                                    Spacing="8" />
+                    </ScrollViewer>
                 </StackPanel>
             </Border>
 

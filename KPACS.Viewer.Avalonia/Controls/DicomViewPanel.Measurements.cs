@@ -33,6 +33,7 @@ public partial class DicomViewPanel
         double HistogramMaxValue);
 
     private readonly List<StudyMeasurement> _measurements = [];
+    private int _measurementGeometryVersion;
     private MeasurementTool _measurementTool;
     private bool _measurementNudgeMode;
     private Guid? _selectedMeasurementId;
@@ -93,6 +94,7 @@ public partial class DicomViewPanel
     {
         _measurements.Clear();
         _measurements.AddRange(measurements);
+        _measurementGeometryVersion++;
         _selectedMeasurementId = _measurements.Any(measurement => measurement.Id == selectedMeasurementId)
             ? selectedMeasurementId
             : null;

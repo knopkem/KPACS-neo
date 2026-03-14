@@ -34,6 +34,8 @@ public partial class StudyViewerWindow : Window
     private readonly ObservableCollection<ToastNotificationItem> _toastNotifications = [];
     private readonly CancellationTokenSource _priorLookupCancellation = new();
     private readonly DispatcherTimer _actionToolbarHideTimer = new();
+    private readonly DispatcherTimer _linkedViewSyncDebounceTimer = new();
+    private readonly DispatcherTimer _volumeRoiDraftPanelRefreshTimer = new();
     private readonly DispatcherTimer _viewportLayoutResetTimer = new();
     private readonly DispatcherTimer _workspaceDockHideTimer = new();
     private CancellationTokenSource? _adjacentPriorityDebounceCancellation;
@@ -60,6 +62,7 @@ public partial class StudyViewerWindow : Window
     private bool _is3DCursorToolArmed;
     private bool _assignedPriorStudyLoadAttempted;
     private int _linkedSyncSuspendCount;
+    private ViewportSlot? _pendingLinkedSyncSourceSlot;
     private ViewportSlot? _linkedReferenceSourceSlot;
     private ViewportSlot? _openToolboxSlot;
     private SeriesVolume? _linkedReferenceSourceVolume;
@@ -67,6 +70,8 @@ public partial class StudyViewerWindow : Window
     private PendingLinkedSyncContext? _pendingLinkedSyncContext;
     private string _thumbnailStripMessage = string.Empty;
     private const int AdjacentPriorityDebounceMs = 180;
+    private const int LinkedViewSyncDebounceMs = 33;
+    private const int VolumeRoiDraftPanelRefreshDebounceMs = 50;
     private const int WorkspaceDockAutoHideMs = 1000;
     private const int ViewportLayoutResetDebounceMs = 140;
     private const int NoticeableStudyInstanceThreshold = 240;
@@ -89,6 +94,10 @@ public partial class StudyViewerWindow : Window
         _isShowingCurrentStudy = !context.StartBlank;
         _viewportLayoutResetTimer.Interval = TimeSpan.FromMilliseconds(ViewportLayoutResetDebounceMs);
         _viewportLayoutResetTimer.Tick += OnViewportLayoutResetTimerTick;
+        _linkedViewSyncDebounceTimer.Interval = TimeSpan.FromMilliseconds(LinkedViewSyncDebounceMs);
+        _linkedViewSyncDebounceTimer.Tick += OnLinkedViewSyncDebounceTimerTick;
+        _volumeRoiDraftPanelRefreshTimer.Interval = TimeSpan.FromMilliseconds(VolumeRoiDraftPanelRefreshDebounceMs);
+        _volumeRoiDraftPanelRefreshTimer.Tick += OnVolumeRoiDraftPanelRefreshTimerTick;
         Title = $"K-PACS Viewer {viewerNumber}";
         if (Application.Current is App app)
         {
@@ -725,6 +734,7 @@ public partial class StudyViewerWindow : Window
 
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
+        RefreshReportPanel();
         UpdateStatus();
     }
 
@@ -773,7 +783,48 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
-        SynchronizeLinkedViews(slot);
+        ScheduleLinkedViewSync(slot);
+    }
+
+    private void ScheduleLinkedViewSync(ViewportSlot? sourceSlot)
+    {
+        if (!_linkedViewSyncEnabled || sourceSlot?.Series is null)
+        {
+            return;
+        }
+
+        _pendingLinkedSyncSourceSlot = sourceSlot;
+        if (_isSynchronizingLinkedViews)
+        {
+            return;
+        }
+
+        _linkedViewSyncDebounceTimer.Stop();
+        _linkedViewSyncDebounceTimer.Start();
+    }
+
+    private void OnLinkedViewSyncDebounceTimerTick(object? sender, EventArgs e)
+    {
+        _linkedViewSyncDebounceTimer.Stop();
+
+        if (_isSynchronizingLinkedViews || IsLinkedSyncSuspended())
+        {
+            if (_pendingLinkedSyncSourceSlot is not null)
+            {
+                _linkedViewSyncDebounceTimer.Start();
+            }
+
+            return;
+        }
+
+        ViewportSlot? sourceSlot = _pendingLinkedSyncSourceSlot;
+        _pendingLinkedSyncSourceSlot = null;
+        if (sourceSlot is null)
+        {
+            return;
+        }
+
+        SynchronizeLinkedViews(sourceSlot);
     }
 
     private void UpdateSlotVisualStates()
@@ -897,6 +948,7 @@ public partial class StudyViewerWindow : Window
         try
         {
             await LoadPriorStudiesAsync();
+            await LoadVolumeRoiAnatomyPriorsAsync();
         }
         finally
         {
@@ -983,6 +1035,11 @@ public partial class StudyViewerWindow : Window
 
             ReplayPendingLinkedSyncContext();
             RefreshLinkedReferenceLines();
+        }
+
+        if (_reportPanelVisible || _reportPanelPinned)
+        {
+            RefreshReportPanel(forceVisible: _reportPanelPinned);
         }
 
         UpdateStatus();
@@ -2875,6 +2932,9 @@ public partial class StudyViewerWindow : Window
     private void OnViewerClosed(object? sender, EventArgs e)
     {
         UnregisterForLinkedViewSync();
+        _linkedViewSyncDebounceTimer.Stop();
+        _volumeRoiDraftPanelRefreshTimer.Stop();
+        _pendingLinkedSyncSourceSlot = null;
         CancelPriorPreviewLoad();
         _priorLookupCancellation.Cancel();
         _priorLookupCancellation.Dispose();
@@ -3397,6 +3457,24 @@ public partial class StudyViewerWindow : Window
         }
     }
 
+    private void OnWorkspaceReportClick(object? sender, RoutedEventArgs e)
+    {
+        CloseViewportToolbox();
+        ShowWorkspaceDock(restartHideTimer: false);
+        _workspaceDockHideTimer.Stop();
+        _reportPanelVisible = !_reportPanelVisible;
+        if (_reportPanelVisible)
+        {
+            RefreshReportPanel(forceVisible: true);
+        }
+        else
+        {
+            HideReportPanel();
+        }
+
+        SaveViewerSettings();
+    }
+
     private void LoadViewerSettings(IReadOnlyList<int> defaultLayout)
     {
         _savedCustomLayouts = [];
@@ -3418,6 +3496,42 @@ public partial class StudyViewerWindow : Window
                 _measurementInsightOffset = new Point(settings.MeasurementInsightOffsetX, settings.MeasurementInsightOffsetY);
                 _volumeRoiPreviewPinned = settings.VolumeRoiPreviewPinned;
                 _volumeRoiPreviewOffset = new Point(settings.VolumeRoiPreviewOffsetX, settings.VolumeRoiPreviewOffsetY);
+                _reportPanelPinned = settings.ReportPanelPinned;
+                _reportPanelVisible = settings.ReportPanelVisible;
+                _reportPanelOffset = new Point(settings.ReportPanelOffsetX, settings.ReportPanelOffsetY);
+                _reportRegionOverrides.Clear();
+                if (settings.ReportRegionOverrides is not null)
+                {
+                    foreach ((string measurementId, string label) in settings.ReportRegionOverrides)
+                    {
+                        if (Guid.TryParse(measurementId, out Guid parsedId) && !string.IsNullOrWhiteSpace(label))
+                        {
+                            _reportRegionOverrides[parsedId] = label.Trim();
+                        }
+                    }
+                }
+                _reportAnatomyOverrides.Clear();
+                if (settings.ReportAnatomyOverrides is not null)
+                {
+                    foreach ((string measurementId, string label) in settings.ReportAnatomyOverrides)
+                    {
+                        if (Guid.TryParse(measurementId, out Guid parsedId) && !string.IsNullOrWhiteSpace(label))
+                        {
+                            _reportAnatomyOverrides[parsedId] = label.Trim();
+                        }
+                    }
+                }
+                _reportReviewStates.Clear();
+                if (settings.ReportReviewStates is not null)
+                {
+                    foreach ((string measurementId, string state) in settings.ReportReviewStates)
+                    {
+                        if (Guid.TryParse(measurementId, out Guid parsedId) && !string.IsNullOrWhiteSpace(state))
+                        {
+                            _reportReviewStates[parsedId] = state.Trim();
+                        }
+                    }
+                }
                 _savedCustomLayouts = settings.SavedCustomLayouts?
                     .Where(layout => TryParseLayoutSpec(layout, out _))
                     .Distinct(StringComparer.OrdinalIgnoreCase)
@@ -3458,6 +3572,22 @@ public partial class StudyViewerWindow : Window
                 VolumeRoiPreviewPinned = _volumeRoiPreviewPinned,
                 VolumeRoiPreviewOffsetX = _volumeRoiPreviewOffset.X,
                 VolumeRoiPreviewOffsetY = _volumeRoiPreviewOffset.Y,
+                ReportPanelPinned = _reportPanelPinned,
+                ReportPanelVisible = _reportPanelVisible,
+                ReportPanelOffsetX = _reportPanelOffset.X,
+                ReportPanelOffsetY = _reportPanelOffset.Y,
+                ReportRegionOverrides = _reportRegionOverrides.ToDictionary(
+                    pair => pair.Key.ToString("D"),
+                    pair => pair.Value,
+                    StringComparer.OrdinalIgnoreCase),
+                ReportAnatomyOverrides = _reportAnatomyOverrides.ToDictionary(
+                    pair => pair.Key.ToString("D"),
+                    pair => pair.Value,
+                    StringComparer.OrdinalIgnoreCase),
+                ReportReviewStates = _reportReviewStates.ToDictionary(
+                    pair => pair.Key.ToString("D"),
+                    pair => pair.Value,
+                    StringComparer.OrdinalIgnoreCase),
                 SavedCustomLayouts = [.. _savedCustomLayouts],
                 LastLayoutSpec = LayoutSpecToString(_currentLayoutSpec),
             };
@@ -3665,6 +3795,13 @@ public partial class StudyViewerWindow : Window
         public bool VolumeRoiPreviewPinned { get; init; }
         public double VolumeRoiPreviewOffsetX { get; init; }
         public double VolumeRoiPreviewOffsetY { get; init; }
+        public bool ReportPanelPinned { get; init; }
+        public bool ReportPanelVisible { get; init; }
+        public double ReportPanelOffsetX { get; init; }
+        public double ReportPanelOffsetY { get; init; }
+        public Dictionary<string, string>? ReportRegionOverrides { get; init; }
+        public Dictionary<string, string>? ReportAnatomyOverrides { get; init; }
+        public Dictionary<string, string>? ReportReviewStates { get; init; }
         public List<string>? SavedCustomLayouts { get; init; }
         public string? LastLayoutSpec { get; init; }
     }

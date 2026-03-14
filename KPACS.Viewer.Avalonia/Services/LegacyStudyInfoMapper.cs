@@ -36,6 +36,7 @@ internal static class LegacyStudyInfoMapper
             var legacySeries = new SeriesInfo
             {
                 SerDesc = series.SeriesDescription,
+                BodyPart = series.BodyPart,
                 SeriesNumber = series.SeriesNumber.ToString(CultureInfo.InvariantCulture),
                 SerModality = ResolveModality(series.Modality, series.Instances.FirstOrDefault()?.SopClassUid),
                 SerInstUid = series.SeriesInstanceUid,

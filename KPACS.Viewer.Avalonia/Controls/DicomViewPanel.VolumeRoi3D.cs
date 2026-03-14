@@ -32,6 +32,8 @@ public partial class DicomViewPanel
         bool IsInterpolated);
 
     private VolumeRoiDraft? _volumeRoiDraft;
+    private int _volumeRoiDraftPreviewVersion;
+    private VolumeRoiDraftPreviewCache? _volumeRoiDraftPreviewCache;
 
     public event Action<VolumeRoiDraftPreview?>? VolumeRoiDraftChanged;
 
@@ -134,6 +136,19 @@ public partial class DicomViewPanel
         }
 
         string currentSliceKey = GetCurrentVolumeRoiSliceKey(SpatialMetadata);
+        double currentPlanePosition = GetPlanePosition(SpatialMetadata);
+        string orientationLabel = OrientationLabel;
+        if (_volumeRoiDraftPreviewCache is { } cache &&
+            ReferenceEquals(cache.Draft, _volumeRoiDraft) &&
+            cache.Version == _volumeRoiDraftPreviewVersion &&
+            string.Equals(cache.CurrentSliceKey, currentSliceKey, StringComparison.Ordinal) &&
+            string.Equals(cache.OrientationLabel, orientationLabel, StringComparison.Ordinal) &&
+            Math.Abs(cache.CurrentPlanePosition - currentPlanePosition) <= 1e-6)
+        {
+            preview = cache.Preview;
+            return true;
+        }
+
         List<VolumeRoiDraftPreviewContour> contours = BuildVolumeRoiDraftPreviewContours(_volumeRoiDraft.Contours.Values, currentSliceKey);
 
         if (contours.Count == 0)
@@ -142,17 +157,25 @@ public partial class DicomViewPanel
         }
 
         preview = new VolumeRoiDraftPreview(
-            OrientationLabel,
+            orientationLabel,
             _volumeRoiDraft.Contours.Values.Count(contour => contour.Anchors.Any(anchor => anchor.PatientPoint is not null)),
             contours.Count(contour => contour.IsClosed),
             EstimateVolumeCubicMillimeters(_volumeRoiDraft.Contours.Values),
             _volumeRoiDraft.FirstPlanePosition,
-            GetPlanePosition(SpatialMetadata),
+            currentPlanePosition,
             contours,
             _volumeRoiDraft.AutoOutlineState is not null,
             _volumeRoiDraft.AutoOutlineState?.SensitivityLevel ?? 0,
             true,
             _volumeRoiDraft.AdditiveModeEnabled);
+
+        _volumeRoiDraftPreviewCache = new VolumeRoiDraftPreviewCache(
+            _volumeRoiDraft,
+            _volumeRoiDraftPreviewVersion,
+            currentSliceKey,
+            orientationLabel,
+            currentPlanePosition,
+            preview);
         return true;
     }
 
@@ -516,6 +539,8 @@ public partial class DicomViewPanel
 
     private void NotifyVolumeRoiDraftChanged()
     {
+        _volumeRoiDraftPreviewVersion++;
+        _volumeRoiDraftPreviewCache = null;
         VolumeRoiDraftChanged?.Invoke(TryGetVolumeRoiDraftPreview(out VolumeRoiDraftPreview preview) ? preview : null);
     }
 
@@ -809,6 +834,14 @@ public partial class DicomViewPanel
 
         return Math.Abs(area) * 0.5;
     }
+
+    private sealed record VolumeRoiDraftPreviewCache(
+        VolumeRoiDraft Draft,
+        int Version,
+        string CurrentSliceKey,
+        string OrientationLabel,
+        double CurrentPlanePosition,
+        VolumeRoiDraftPreview Preview);
 
     private sealed class VolumeRoiDraft(
         string seriesInstanceUid,

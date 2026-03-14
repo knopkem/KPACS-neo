@@ -274,6 +274,7 @@ public sealed class DicomImportService
                         StudyKey = studyKey,
                         SeriesInstanceUid = seriesUid,
                         Modality = modality,
+                        BodyPart = dataset.GetSingleValueOrDefault(DicomTag.BodyPartExamined, string.Empty),
                         SeriesDescription = dataset.GetSingleValueOrDefault(DicomTag.SeriesDescription, string.Empty),
                         SeriesNumber = dataset.GetSingleValueOrDefault(DicomTag.SeriesNumber, 0),
                         InstanceCount = 0,

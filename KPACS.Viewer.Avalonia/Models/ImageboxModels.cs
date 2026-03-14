@@ -75,6 +75,7 @@ public sealed class SeriesRecord
     public long StudyKey { get; set; }
     public string SeriesInstanceUid { get; init; } = string.Empty;
     public string Modality { get; set; } = string.Empty;
+    public string BodyPart { get; set; } = string.Empty;
     public string SeriesDescription { get; set; } = string.Empty;
     public int SeriesNumber { get; set; }
     public int InstanceCount { get; set; }

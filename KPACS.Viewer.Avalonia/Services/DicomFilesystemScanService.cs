@@ -169,6 +169,7 @@ public sealed class DicomFilesystemScanService
                             StudyKey = details.Study.StudyKey,
                             SeriesInstanceUid = seriesUid,
                             Modality = modality,
+                            BodyPart = dataset.GetSingleValueOrDefault(DicomTag.BodyPartExamined, string.Empty),
                             SeriesDescription = dataset.GetSingleValueOrDefault(DicomTag.SeriesDescription, string.Empty),
                             SeriesNumber = dataset.GetSingleValueOrDefault(DicomTag.SeriesNumber, 0),
                         };

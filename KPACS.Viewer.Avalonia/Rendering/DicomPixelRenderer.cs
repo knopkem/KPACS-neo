@@ -8,6 +8,7 @@
 // Platform-independent — no UI framework dependencies.
 // ------------------------------------------------------------------------------------------------
 
+using System.Collections.Concurrent;
 using System.Runtime.InteropServices;
 
 namespace KPACS.Viewer.Rendering;
@@ -18,6 +19,9 @@ namespace KPACS.Viewer.Rendering;
 /// </summary>
 public static class DicomPixelRenderer
 {
+    private static readonly ConcurrentDictionary<WindowLutKey, byte[]> s_windowLutCache = new();
+    private static readonly ConcurrentDictionary<ContrastLutKey, byte[]> s_contrastLutCache = new();
+
     public static void Render(
         byte[] rawPixels,
         int width, int height,
@@ -110,24 +114,7 @@ public static class DicomPixelRenderer
         byte[] outputBgra)
     {
         int pixelCount = width * height;
-        byte[] windowLut = new byte[65536];
-        double wMin = windowCenter - windowWidth / 2.0;
-        double wMax = windowCenter + windowWidth / 2.0;
-
-        for (int i = 0; i < 65536; i++)
-        {
-            double rawValue = isSigned ? (double)(short)unchecked((ushort)i) : i;
-            double rescaled = slope * rawValue + intercept;
-
-            byte gray;
-            if (windowWidth <= 0) gray = 128;
-            else if (rescaled <= wMin) gray = 0;
-            else if (rescaled >= wMax) gray = 255;
-            else gray = (byte)((rescaled - wMin) / windowWidth * 255.0);
-
-            if (isMonochrome1) gray = (byte)(255 - gray);
-            windowLut[i] = gray;
-        }
+        byte[] windowLut = GetOrCreate16BitWindowLut(isSigned, slope, intercept, windowCenter, windowWidth, isMonochrome1);
 
         var srcSpan = MemoryMarshal.Cast<byte, ushort>(rawPixels.AsSpan());
         int count = Math.Min(srcSpan.Length, pixelCount);
@@ -153,22 +140,7 @@ public static class DicomPixelRenderer
         byte[] outputBgra)
     {
         int pixelCount = width * height;
-        byte[] windowLut = new byte[256];
-        double wMin = windowCenter - windowWidth / 2.0;
-        double wMax = windowCenter + windowWidth / 2.0;
-
-        for (int i = 0; i < 256; i++)
-        {
-            double rescaled = slope * i + intercept;
-            byte gray;
-            if (windowWidth <= 0) gray = 128;
-            else if (rescaled <= wMin) gray = 0;
-            else if (rescaled >= wMax) gray = 255;
-            else gray = (byte)((rescaled - wMin) / windowWidth * 255.0);
-
-            if (isMonochrome1) gray = (byte)(255 - gray);
-            windowLut[i] = gray;
-        }
+        byte[] windowLut = GetOrCreate8BitWindowLut(slope, intercept, windowCenter, windowWidth, isMonochrome1);
 
         int count = Math.Min(rawPixels.Length, pixelCount);
         int dstIdx = 0;
@@ -198,24 +170,7 @@ public static class DicomPixelRenderer
         byte[] outputBgra)
     {
         int pixelCount = width * height;
-        double wMin = windowCenter - windowWidth / 2.0;
-        double wMax = windowCenter + windowWidth / 2.0;
-
-        // Build a 65536-entry LUT mapping ushort → gray byte.
-        // We reinterpret short → ushort for indexing.
-        byte[] windowLut = new byte[65536];
-        for (int i = 0; i < 65536; i++)
-        {
-            double value = (short)unchecked((ushort)i); // interpret as signed
-            byte gray;
-            if (windowWidth <= 0) gray = 128;
-            else if (value <= wMin) gray = 0;
-            else if (value >= wMax) gray = 255;
-            else gray = (byte)((value - wMin) / windowWidth * 255.0);
-
-            if (isMonochrome1) gray = (byte)(255 - gray);
-            windowLut[i] = gray;
-        }
+        byte[] windowLut = GetOrCreateRescaled16BitWindowLut(windowCenter, windowWidth, isMonochrome1);
 
         int count = Math.Min(rescaledPixels.Length, pixelCount);
         int dstIdx = 0;
@@ -270,13 +225,7 @@ public static class DicomPixelRenderer
 
         if (needsContrast)
         {
-            contrastLut = new byte[256];
-            double scale = 256.0 / windowWidth;
-            for (int i = 0; i < 256; i++)
-            {
-                int temp = (int)(128 + (i - windowCenter) * scale);
-                contrastLut[i] = (byte)Math.Clamp(temp, 0, 255);
-            }
+            contrastLut = GetOrCreateContrastLut(windowCenter, windowWidth);
         }
 
         for (int pixelIndex = 0, dstIdx = 0; pixelIndex < pixelCount; pixelIndex++, dstIdx += 4)
@@ -296,6 +245,154 @@ public static class DicomPixelRenderer
             outputBgra[dstIdx + 3] = 255;
         }
     }
+
+    private static byte[] GetOrCreate8BitWindowLut(
+        double slope,
+        double intercept,
+        double windowCenter,
+        double windowWidth,
+        bool isMonochrome1)
+    {
+        var key = new WindowLutKey(8, false, slope, intercept, windowCenter, windowWidth, isMonochrome1);
+        return s_windowLutCache.GetOrAdd(key, static cacheKey => Build8BitWindowLut(cacheKey));
+    }
+
+    private static byte[] GetOrCreate16BitWindowLut(
+        bool isSigned,
+        double slope,
+        double intercept,
+        double windowCenter,
+        double windowWidth,
+        bool isMonochrome1)
+    {
+        var key = new WindowLutKey(16, isSigned, slope, intercept, windowCenter, windowWidth, isMonochrome1);
+        return s_windowLutCache.GetOrAdd(key, static cacheKey => Build16BitWindowLut(cacheKey));
+    }
+
+    private static byte[] GetOrCreateRescaled16BitWindowLut(
+        double windowCenter,
+        double windowWidth,
+        bool isMonochrome1)
+    {
+        var key = new WindowLutKey(17, true, 1.0, 0.0, windowCenter, windowWidth, isMonochrome1);
+        return s_windowLutCache.GetOrAdd(key, static cacheKey => BuildRescaled16BitWindowLut(cacheKey));
+    }
+
+    private static byte[] GetOrCreateContrastLut(double windowCenter, double windowWidth)
+    {
+        var key = new ContrastLutKey(windowCenter, windowWidth);
+        return s_contrastLutCache.GetOrAdd(key, static cacheKey => BuildContrastLut(cacheKey));
+    }
+
+    private static byte[] Build8BitWindowLut(WindowLutKey key)
+    {
+        byte[] windowLut = new byte[256];
+        double wMin = key.WindowCenter - key.WindowWidth / 2.0;
+        double wMax = key.WindowCenter + key.WindowWidth / 2.0;
+
+        for (int i = 0; i < windowLut.Length; i++)
+        {
+            double rescaled = key.Slope * i + key.Intercept;
+            byte gray = WindowToGray(rescaled, wMin, wMax, key.WindowWidth);
+            if (key.IsMonochrome1)
+            {
+                gray = (byte)(255 - gray);
+            }
+
+            windowLut[i] = gray;
+        }
+
+        return windowLut;
+    }
+
+    private static byte[] Build16BitWindowLut(WindowLutKey key)
+    {
+        byte[] windowLut = new byte[ushort.MaxValue + 1];
+        double wMin = key.WindowCenter - key.WindowWidth / 2.0;
+        double wMax = key.WindowCenter + key.WindowWidth / 2.0;
+
+        for (int i = 0; i < windowLut.Length; i++)
+        {
+            double rawValue = key.IsSigned ? (double)(short)unchecked((ushort)i) : i;
+            double rescaled = key.Slope * rawValue + key.Intercept;
+            byte gray = WindowToGray(rescaled, wMin, wMax, key.WindowWidth);
+            if (key.IsMonochrome1)
+            {
+                gray = (byte)(255 - gray);
+            }
+
+            windowLut[i] = gray;
+        }
+
+        return windowLut;
+    }
+
+    private static byte[] BuildRescaled16BitWindowLut(WindowLutKey key)
+    {
+        byte[] windowLut = new byte[ushort.MaxValue + 1];
+        double wMin = key.WindowCenter - key.WindowWidth / 2.0;
+        double wMax = key.WindowCenter + key.WindowWidth / 2.0;
+
+        for (int i = 0; i < windowLut.Length; i++)
+        {
+            double value = (short)unchecked((ushort)i);
+            byte gray = WindowToGray(value, wMin, wMax, key.WindowWidth);
+            if (key.IsMonochrome1)
+            {
+                gray = (byte)(255 - gray);
+            }
+
+            windowLut[i] = gray;
+        }
+
+        return windowLut;
+    }
+
+    private static byte[] BuildContrastLut(ContrastLutKey key)
+    {
+        byte[] contrastLut = new byte[256];
+        double scale = 256.0 / key.WindowWidth;
+        for (int i = 0; i < contrastLut.Length; i++)
+        {
+            int temp = (int)(128 + (i - key.WindowCenter) * scale);
+            contrastLut[i] = (byte)Math.Clamp(temp, 0, 255);
+        }
+
+        return contrastLut;
+    }
+
+    private static byte WindowToGray(double value, double windowMin, double windowMax, double windowWidth)
+    {
+        if (windowWidth <= 0)
+        {
+            return 128;
+        }
+
+        if (value <= windowMin)
+        {
+            return 0;
+        }
+
+        if (value >= windowMax)
+        {
+            return 255;
+        }
+
+        return (byte)((value - windowMin) / windowWidth * 255.0);
+    }
+
+    private readonly record struct WindowLutKey(
+        int Kind,
+        bool IsSigned,
+        double Slope,
+        double Intercept,
+        double WindowCenter,
+        double WindowWidth,
+        bool IsMonochrome1);
+
+    private readonly record struct ContrastLutKey(
+        double WindowCenter,
+        double WindowWidth);
 
     private static void ReadColorPixel(
         byte[] rawPixels,

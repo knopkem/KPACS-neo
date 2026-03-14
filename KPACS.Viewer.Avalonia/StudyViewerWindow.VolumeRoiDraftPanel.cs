@@ -25,20 +25,37 @@ public partial class StudyViewerWindow
     private Point _volumeRoiPreviewDragStart;
     private Point _volumeRoiPreviewDragStartOffset;
 
+    private void ScheduleVolumeRoiDraftPanelRefresh()
+    {
+        _volumeRoiDraftPanelRefreshTimer.Stop();
+        _volumeRoiDraftPanelRefreshTimer.Start();
+    }
+
+    private void OnVolumeRoiDraftPanelRefreshTimerTick(object? sender, EventArgs e)
+    {
+        _volumeRoiDraftPanelRefreshTimer.Stop();
+        RefreshVolumeRoiDraftPanel();
+    }
+
     private void RefreshVolumeRoiDraftPanel()
     {
+        _volumeRoiDraftPanelRefreshTimer.Stop();
+
         ViewportSlot? slot = _activeSlot;
-        if (slot?.Panel is not null && slot.Panel.TryGetVolumeRoiDraftPreview(out DicomViewPanel.VolumeRoiDraftPreview preview))
+        if (TryApplyVolumeRoiDraftPreview(slot))
         {
-            ApplyVolumeRoiDraftPreview(preview);
             return;
         }
 
-        foreach (ViewportSlot candidate in _slots.Where(candidate => candidate.Panel.TryGetVolumeRoiDraftPreview(out _)))
+        foreach (ViewportSlot candidate in _slots)
         {
-            if (candidate.Panel.TryGetVolumeRoiDraftPreview(out preview))
+            if (ReferenceEquals(candidate, slot))
             {
-                ApplyVolumeRoiDraftPreview(preview);
+                continue;
+            }
+
+            if (TryApplyVolumeRoiDraftPreview(candidate))
+            {
                 return;
             }
         }
@@ -58,6 +75,17 @@ public partial class StudyViewerWindow
         }
 
         HideVolumeRoiDraftPanel();
+    }
+
+    private bool TryApplyVolumeRoiDraftPreview(ViewportSlot? slot)
+    {
+        if (slot?.Panel is null || !slot.Panel.TryGetVolumeRoiDraftPreview(out DicomViewPanel.VolumeRoiDraftPreview preview))
+        {
+            return false;
+        }
+
+        ApplyVolumeRoiDraftPreview(preview);
+        return true;
     }
 
     private void ApplyVolumeRoiDraftPreview(DicomViewPanel.VolumeRoiDraftPreview preview)

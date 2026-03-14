@@ -34,7 +34,7 @@ public partial class StudyViewerWindow
         panel.MeasurementDeleted += OnPanelMeasurementDeleted;
         panel.SelectedMeasurementChanged += OnPanelMeasurementSelectedChanged;
         panel.AutoOutlinedMeasurementCreated += OnPanelAutoOutlinedMeasurementCreated;
-        panel.VolumeRoiDraftChanged += _ => RefreshVolumeRoiDraftPanel();
+        panel.VolumeRoiDraftChanged += _ => ScheduleVolumeRoiDraftPanelRefresh();
     }
 
     private void ApplyMeasurementContext(ViewportSlot slot)
@@ -44,6 +44,7 @@ public partial class StudyViewerWindow
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
+        RefreshReportPanel();
     }
 
     private void RefreshMeasurementPanels()
@@ -58,6 +59,7 @@ public partial class StudyViewerWindow
 
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
+        RefreshReportPanel();
         UpdateStatus();
     }
 
@@ -199,6 +201,9 @@ public partial class StudyViewerWindow
     {
         _studyMeasurements.RemoveAll(existing => existing.Id == measurementId);
         _polygonAutoOutlineStates.Remove(measurementId);
+        _reportRegionOverrides.Remove(measurementId);
+        _reportAnatomyOverrides.Remove(measurementId);
+        _reportReviewStates.Remove(measurementId);
         RemoveMeasurementInsight(measurementId);
         if (_selectedMeasurementId == measurementId)
         {

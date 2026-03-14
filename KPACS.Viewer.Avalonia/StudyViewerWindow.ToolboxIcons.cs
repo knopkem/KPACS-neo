@@ -17,6 +17,7 @@ public partial class StudyViewerWindow
         ConfigureIconButton(TopBarStudyBrowserButton, CreateStudyBrowserIcon(), "Bring the Study Browser to the front.");
         ConfigureIconButton(StudyBrowserButton, CreateStudyBrowserIcon(), "Bring the Study Browser to the front.");
         ConfigureLabeledIconButton(WorkspaceLayoutButton, CreateLayoutIcon(2, 2), "Layout", "Viewer layout presets and custom layouts.");
+        ToolTip.SetTip(WorkspaceReportButton, "Open the floating report panel with created findings, provenance, and anatomy hints.");
         ConfigureIconButton(ToolboxNavigateButton, CreateNavigateIcon(), "Navigate: left drag zoom/pan, wheel scroll, middle drag fast stack, right drag window/level.");
         ConfigureIconButton(ToolboxPixelLensButton, CreatePixelLensIcon(), "Pixel lens.");
         ConfigureIconButton(ToolboxLineButton, CreateLineMeasureIcon(), "Line measurement.");
@@ -35,6 +36,7 @@ public partial class StudyViewerWindow
         ConfigureIconButton(MeasurementInsightPinButton, CreatePinPanelIcon(), "Pin the ROI panel and retain the last measurement details.");
         ConfigureIconButton(MeasurementInsightCollapseButton, CreateChevronDownIcon(), "Collapse or expand the ROI histogram section.");
         ConfigureIconButton(VolumeRoiDraftPinButton, CreatePinPanelIcon(), "Pin the 3D ROI model panel and retain the last preview.");
+        ConfigureIconButton(ReportPanelPinButton, CreatePinPanelIcon(), "Pin the report panel and keep it open for the current workspace.");
     }
 
     private static void ConfigureIconButton(ContentControl button, Control icon, string toolTip)
