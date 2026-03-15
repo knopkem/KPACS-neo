@@ -955,6 +955,7 @@ public partial class StudyViewerWindow
     private AnatomyGuess ResolveMeasurementAnatomy(StudyMeasurement measurement, ViewportSlot? slot, RegionGuess? resolvedRegion = null)
     {
         RegionGuess region = resolvedRegion ?? ResolveMeasurementRegion(measurement, slot);
+        string? requiredRegionLabel = string.Equals(region.Label, "Unassigned", StringComparison.OrdinalIgnoreCase) ? null : region.Label;
 
         if (_reportAnatomyOverrides.TryGetValue(measurement.Id, out string? manualLabel) &&
             !string.IsNullOrWhiteSpace(manualLabel))
@@ -963,10 +964,18 @@ public partial class StudyViewerWindow
             return new AnatomyGuess(manualLabel.Trim(), $"Manually confirmed in report panel. Auto suggestion: {estimatedOverride.DisplayLabel}.", true);
         }
 
+        if (TryFindKnowledgePackStructureMatch(measurement, slot, requiredRegionLabel, out PackStructureMatch packMatch))
+        {
+            return new AnatomyGuess(
+                packMatch.Structure.DisplayName,
+                packMatch.Hint,
+                Confidence: NormalizeDisplayedConfidence(packMatch.Score));
+        }
+
         if (TryFindLearnedMeasurementPriorMatch(
             measurement,
             slot,
-            string.Equals(region.Label, "Unassigned", StringComparison.OrdinalIgnoreCase) ? null : region.Label,
+            requiredRegionLabel,
             out VolumeRoiAnatomyPriorMatch learnedMatch))
         {
             return new AnatomyGuess(learnedMatch.Prior.AnatomyLabel, learnedMatch.Hint, IsLearned: true, Confidence: NormalizeDisplayedConfidence(learnedMatch.Score));
@@ -1049,7 +1058,7 @@ public partial class StudyViewerWindow
         double normalizedX = Normalize(center.X, bounds.Value.MinX, bounds.Value.MaxX);
         double normalizedY = Normalize(center.Y, bounds.Value.MinY, bounds.Value.MaxY);
         double normalizedZ = Normalize(center.Z, bounds.Value.MinZ, bounds.Value.MaxZ);
-        string laterality = normalizedX >= 0.56 ? "left" : normalizedX <= 0.44 ? "right" : string.Empty;
+        string laterality = normalizedX <= 0.44 ? "left" : normalizedX >= 0.56 ? "right" : string.Empty;
         string vertical = normalizedZ >= 0.62 ? "upper" : normalizedZ <= 0.38 ? "lower" : "mid";
         bool central = normalizedX > 0.38 && normalizedX < 0.62;
         bool anterior = normalizedY < 0.44;
@@ -1360,7 +1369,7 @@ public partial class StudyViewerWindow
         double normalizedX = Normalize(center.X, bounds.Value.MinX, bounds.Value.MaxX);
         double normalizedY = Normalize(center.Y, bounds.Value.MinY, bounds.Value.MaxY);
         double normalizedZ = Normalize(center.Z, bounds.Value.MinZ, bounds.Value.MaxZ);
-        string laterality = normalizedX >= 0.56 ? "left" : normalizedX <= 0.44 ? "right" : string.Empty;
+        string laterality = normalizedX <= 0.44 ? "left" : normalizedX >= 0.56 ? "right" : string.Empty;
         string vertical = normalizedZ >= 0.62 ? "upper" : normalizedZ <= 0.38 ? "lower" : "mid";
         bool central = normalizedX > 0.38 && normalizedX < 0.62;
         bool anterior = normalizedY < 0.44;
@@ -1828,10 +1837,7 @@ public partial class StudyViewerWindow
         if (bestAcceptedCandidate is not null)
         {
             string debugHint = BuildMatchDebugExplanation(bestAcceptedCandidate, runnerUpCandidate, bestRejectedCandidate, probe);
-            if (!string.IsNullOrWhiteSpace(debugHint))
-            {
-                hint = string.Concat(hint, Environment.NewLine, debugHint);
-            }
+            hint = AppendReportDebugHint(hint, debugHint);
         }
 
         match = bestMatch with { Hint = hint };
@@ -2066,6 +2072,124 @@ public partial class StudyViewerWindow
         return new KnowledgePackPriorAssessment(false, scoreAdjustment, hint, summary, null, positionFit, materialFit, relationFit);
     }
 
+    private bool TryFindKnowledgePackStructureMatch(StudyMeasurement measurement, ViewportSlot? slot, string? requiredRegionLabel, out PackStructureMatch match)
+    {
+        match = null!;
+
+        AnatomyKnowledgePack? pack = _activeCraniumKnowledgePack;
+        if (pack is null)
+        {
+            return false;
+        }
+
+        if (!string.IsNullOrWhiteSpace(requiredRegionLabel) && !string.Equals(requiredRegionLabel, "Neuro", StringComparison.OrdinalIgnoreCase))
+        {
+            return false;
+        }
+
+        if (!TryBuildMeasurementPriorProbe(measurement, slot, out VolumeRoiPriorProbe probe))
+        {
+            return false;
+        }
+
+        PackStructureMatch? bestMatch = null;
+        PackStructureMatch? runnerUp = null;
+        PackStructureMatch? bestRejected = null;
+        foreach (AnatomyStructureDefinition structure in pack.Structures)
+        {
+            KnowledgePackPriorAssessment assessment = AssessKnowledgePackStructureMatch(probe, structure);
+            if (assessment.Rejected)
+            {
+                PackStructureMatch rejected = new(structure, assessment.ScoreAdjustment, assessment.Hint, assessment);
+                if (bestRejected is null || rejected.Score > bestRejected.Score)
+                {
+                    bestRejected = rejected;
+                }
+
+                continue;
+            }
+
+            double score = assessment.ScoreAdjustment;
+            bool hasMeaningfulPosition = assessment.PositionFit >= 0.26;
+            bool hasMeaningfulRelations = assessment.RelationFit >= 0.45;
+            bool hasMeaningfulMaterial = assessment.MaterialFit >= 0.35;
+            if (score < 0.20 || (!hasMeaningfulPosition && !hasMeaningfulRelations && !hasMeaningfulMaterial))
+            {
+                continue;
+            }
+
+            PackStructureMatch candidate = new(structure, score, string.Empty, assessment);
+            if (bestMatch is null || candidate.Score > bestMatch.Score)
+            {
+                runnerUp = bestMatch;
+                bestMatch = candidate;
+            }
+            else if (runnerUp is null || candidate.Score > runnerUp.Score)
+            {
+                runnerUp = candidate;
+            }
+        }
+
+        if (bestMatch is null)
+        {
+            return false;
+        }
+
+        string hint = $"Direct knowledge-pack match from the current anatomy pack. {BuildPackConfidenceHint(bestMatch.Score)}";
+        string debug = BuildDirectPackMatchDebugExplanation(bestMatch, runnerUp, bestRejected, probe);
+        hint = AppendReportDebugHint(hint, debug);
+
+        match = bestMatch with { Hint = hint };
+        return true;
+    }
+
+    private string AppendReportDebugHint(string hint, string? debugHint)
+    {
+        if (!_reportDebugEnabled || string.IsNullOrWhiteSpace(debugHint))
+        {
+            return hint;
+        }
+
+        return string.Concat(hint, Environment.NewLine, debugHint);
+    }
+
+    private KnowledgePackPriorAssessment AssessKnowledgePackStructureMatch(VolumeRoiPriorProbe probe, AnatomyStructureDefinition structure)
+    {
+        ProbeKnowledgeFeatures features = BuildProbeKnowledgeFeatures(probe);
+        string? rejectedReason = EvaluateKnowledgePackHardRules(structure, features);
+        double modalityFit = ComputeStructureModalityFit(probe, structure);
+        if (!string.IsNullOrWhiteSpace(rejectedReason))
+        {
+            string debugSummary = BuildKnowledgeDebugSummary(structure, features, 0, 0, 0, rejectedReason);
+            return new KnowledgePackPriorAssessment(true, 0, $"Knowledge pack rejected candidate: {rejectedReason}.", debugSummary, rejectedReason, 0, 0, 0);
+        }
+
+        double positionFit = ComputeStructurePositionFit(structure, features);
+        double materialFit = ComputeStructureMaterialFit(probe, structure, features);
+        double relationFit = ComputeStructureRelationFit(structure, features);
+        double materialTerm = materialFit < 0
+            ? Math.Max(-0.12, materialFit * 0.08)
+            : materialFit * 0.14;
+        double score = (positionFit * 0.56) + (relationFit * 0.24) + materialTerm + (modalityFit * 0.06);
+        score = Math.Clamp(score, 0, 0.99);
+
+        string hint = $"Direct knowledge-pack match. {BuildPackConfidenceHint(score)}";
+        string summary = BuildKnowledgeDebugSummary(structure, features, positionFit, materialFit, relationFit, null);
+        return new KnowledgePackPriorAssessment(false, score, hint, summary, null, positionFit, materialFit, relationFit);
+    }
+
+    private static double ComputeStructureModalityFit(VolumeRoiPriorProbe probe, AnatomyStructureDefinition structure)
+    {
+        if (structure.SupportedModalities.Count == 0 || string.IsNullOrWhiteSpace(probe.Modality))
+        {
+            return 1;
+        }
+
+        return structure.SupportedModalities.Any(value => string.Equals(value, probe.Modality, StringComparison.OrdinalIgnoreCase))
+            ? 1
+            : 0;
+    }
+
     private string BuildMatchDebugExplanation(MatchCandidateDebugInfo winner, MatchCandidateDebugInfo? runnerUp, MatchCandidateDebugInfo? rejectedCandidate, VolumeRoiPriorProbe probe)
     {
         List<string> parts = [];
@@ -2080,6 +2204,26 @@ public partial class StudyViewerWindow
         if (rejectedCandidate is not null)
         {
             parts.Add($"Rejected candidate {rejectedCandidate.Prior.AnatomyLabel}. {rejectedCandidate.Assessment.DebugSummary}");
+        }
+
+        parts.Add($"Probe: {BuildProbeDebugSummary(probe)}");
+        return string.Join(Environment.NewLine, parts);
+    }
+
+    private string BuildDirectPackMatchDebugExplanation(PackStructureMatch winner, PackStructureMatch? runnerUp, PackStructureMatch? rejectedCandidate, VolumeRoiPriorProbe probe)
+    {
+        List<string> parts = [];
+
+        parts.Add($"Debug: direct pack winner {winner.Structure.DisplayName} (score {winner.Score:0.00}). {winner.Assessment.DebugSummary}");
+
+        if (runnerUp is not null)
+        {
+            parts.Add($"Next direct pack candidate {runnerUp.Structure.DisplayName} (score {runnerUp.Score:0.00}). {runnerUp.Assessment.DebugSummary}");
+        }
+
+        if (rejectedCandidate is not null)
+        {
+            parts.Add($"Rejected direct pack candidate {rejectedCandidate.Structure.DisplayName}. {rejectedCandidate.Assessment.DebugSummary}");
         }
 
         parts.Add($"Probe: {BuildProbeDebugSummary(probe)}");
@@ -2234,7 +2378,7 @@ public partial class StudyViewerWindow
 
     private static ProbeKnowledgeFeatures BuildProbeKnowledgeFeatures(VolumeRoiPriorProbe probe)
     {
-        double signedLeftRight = probe.AxisCorrection?.SignedLeftRight ?? (1.0 - (probe.NormalizedCenterX * 2.0));
+        double signedLeftRight = probe.AxisCorrection?.SignedLeftRight ?? ((probe.NormalizedCenterX * 2.0) - 1.0);
         double signedAnteriorPosterior = probe.AxisCorrection?.SignedAnteriorPosterior ?? (1.0 - (probe.NormalizedCenterY * 2.0));
         double cranialCaudal = probe.NormalizedCenterZ;
         double distanceToMidline = probe.AxisCorrection?.DistanceToMidline ?? Math.Abs(signedLeftRight);
@@ -2300,20 +2444,14 @@ public partial class StudyViewerWindow
         double fit = 0;
         int count = 0;
 
-        fit += ComputeRangeFit(expected.LeftRight, features.SignedLeftRight);
-        count++;
-        fit += ComputeRangeFit(expected.AnteriorPosterior, features.SignedAnteriorPosterior);
-        count++;
-        fit += ComputeRangeFit(expected.CranialCaudal, features.CranialCaudal);
-        count++;
-        fit += ComputeRangeFit(expected.DistanceToMidline, features.DistanceToMidline);
-        count++;
-        fit += ComputeRangeFit(expected.DistanceToSkullBase, features.DistanceToSkullBase);
-        count++;
-        fit += ComputeRangeFit(expected.DistanceToVertex, features.DistanceToVertex);
-        count++;
+        AccumulateRangeFit(expected.LeftRight, features.SignedLeftRight, ref fit, ref count);
+        AccumulateRangeFit(expected.AnteriorPosterior, features.SignedAnteriorPosterior, ref fit, ref count);
+        AccumulateRangeFit(expected.CranialCaudal, features.CranialCaudal, ref fit, ref count);
+        AccumulateRangeFit(expected.DistanceToMidline, features.DistanceToMidline, ref fit, ref count);
+        AccumulateRangeFit(expected.DistanceToSkullBase, features.DistanceToSkullBase, ref fit, ref count);
+        AccumulateRangeFit(expected.DistanceToVertex, features.DistanceToVertex, ref fit, ref count);
 
-        return count == 0 ? 0 : fit / count;
+        return count == 0 ? 0.5 : fit / count;
     }
 
     private static double ComputeStructureMaterialFit(VolumeRoiPriorProbe probe, AnatomyStructureDefinition structure, ProbeKnowledgeFeatures features)
@@ -2360,7 +2498,7 @@ public partial class StudyViewerWindow
             count++;
         }
 
-        return count == 0 ? 0 : fit / count;
+        return count == 0 ? 0.5 : fit / count;
     }
 
     private static bool IsRequiredRelationSatisfied(AnatomyRelationRule relation, ProbeKnowledgeFeatures features)
@@ -2483,6 +2621,12 @@ public partial class StudyViewerWindow
             AddRelation(relations, "inside", "posterior_fossa", "hard");
         }
 
+        string? lateralityRelation = GetImplicitLateralityRelation(identity);
+        if (!string.IsNullOrWhiteSpace(lateralityRelation))
+        {
+            AddRelation(relations, lateralityRelation, "midline", "hard");
+        }
+
         return relations;
     }
 
@@ -2561,6 +2705,36 @@ public partial class StudyViewerWindow
     private static string GetStructureIdentityText(AnatomyStructureDefinition structure)
     {
         return $"{structure.Id} {structure.DisplayName}".Trim().ToLowerInvariant();
+    }
+
+    private static string? GetImplicitLateralityRelation(string identity)
+    {
+        bool hasLeft = IdentityContainsWord(identity, "left");
+        bool hasRight = IdentityContainsWord(identity, "right");
+        bool hasBilateral = IdentityContainsWord(identity, "bilateral") || IdentityContainsWord(identity, "both");
+        if (hasBilateral || hasLeft == hasRight)
+        {
+            return null;
+        }
+
+        return hasLeft ? "left_of" : "right_of";
+    }
+
+    private static bool IdentityContainsWord(string identity, string word)
+    {
+        string[] tokens = identity.Split([' ', '\t', '\r', '\n', '-', '_', '/', '\\', '(', ')', '[', ']', '{', '}', ',', ';', '.', ':'], StringSplitOptions.RemoveEmptyEntries);
+        return tokens.Contains(word, StringComparer.OrdinalIgnoreCase);
+    }
+
+    private static void AccumulateRangeFit(AnatomyNumericRange range, double value, ref double fit, ref int count)
+    {
+        if (range.Min is null && range.Max is null)
+        {
+            return;
+        }
+
+        fit += ComputeRangeFit(range, value);
+        count++;
     }
 
     private static double ComputeRangeFit(AnatomyNumericRange range, double value)
@@ -3230,6 +3404,12 @@ public partial class StudyViewerWindow
         VolumeRoiAnatomyPriorRecord Prior,
         double BaseScore,
         double FinalScore,
+        KnowledgePackPriorAssessment Assessment);
+
+    private sealed record PackStructureMatch(
+        AnatomyStructureDefinition Structure,
+        double Score,
+        string Hint,
         KnowledgePackPriorAssessment Assessment);
 
     private readonly record struct ProbeKnowledgeFeatures(

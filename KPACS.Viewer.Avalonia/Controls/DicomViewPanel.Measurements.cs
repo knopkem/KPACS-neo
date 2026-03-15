@@ -1,4 +1,5 @@
 using System.Buffers.Binary;
+using System.Globalization;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
@@ -8,6 +9,7 @@ using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
+using Avalonia.Threading;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
 using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
@@ -18,6 +20,8 @@ public partial class DicomViewPanel
 {
     private static readonly Size s_unboundedMeasureSize = new(double.PositiveInfinity, double.PositiveInfinity);
     private static readonly Point s_defaultMeasurementLabelOffset = new(10, 10);
+    private const int DeveloperOverlayTransitionDurationMs = 340;
+    private const int DeveloperOverlayTransitionFrameMs = 34;
 
     public sealed record RoiDistributionDetails(
         string QuantityLabel,
@@ -44,6 +48,9 @@ public partial class DicomViewPanel
     private MeasurementEditSession? _measurementEditSession;
     private Func<StudyMeasurement, Point[], string?>? _measurementTextSupplementProvider;
     private readonly List<AnatomyDeveloperOverlayModel> _developerAnatomyOverlays = new();
+    private readonly DispatcherTimer _developerOverlayTransitionTimer = new();
+    private string _developerOverlayTransitionSignature = string.Empty;
+    private double _developerOverlayTransitionProgress = 1;
 
     public event Action<StudyMeasurement>? MeasurementCreated;
     public event Action<StudyMeasurement>? MeasurementUpdated;
@@ -107,10 +114,56 @@ public partial class DicomViewPanel
 
     public void SetDeveloperAnatomyOverlays(IEnumerable<AnatomyDeveloperOverlayModel>? overlays)
     {
+        EnsureDeveloperOverlayTransitionTimer();
+
+        AnatomyDeveloperOverlayModel[] nextOverlays = overlays?.ToArray() ?? [];
+        string nextSignature = BuildDeveloperOverlaySignature(nextOverlays);
+        bool changed = !string.Equals(_developerOverlayTransitionSignature, nextSignature, StringComparison.Ordinal);
+
         _developerAnatomyOverlays.Clear();
-        if (overlays is not null)
+        if (nextOverlays.Length > 0)
         {
-            _developerAnatomyOverlays.AddRange(overlays);
+            _developerAnatomyOverlays.AddRange(nextOverlays);
+        }
+
+        _developerOverlayTransitionSignature = nextSignature;
+        if (changed && nextOverlays.Length > 0)
+        {
+            _developerOverlayTransitionProgress = 0;
+            _developerOverlayTransitionTimer.Stop();
+            _developerOverlayTransitionTimer.Start();
+        }
+        else if (nextOverlays.Length == 0)
+        {
+            _developerOverlayTransitionProgress = 1;
+            _developerOverlayTransitionTimer.Stop();
+        }
+
+        UpdateMeasurementPresentation();
+    }
+
+    private void EnsureDeveloperOverlayTransitionTimer()
+    {
+        if (_developerOverlayTransitionTimer.Interval > TimeSpan.Zero)
+        {
+            return;
+        }
+
+        _developerOverlayTransitionTimer.Interval = TimeSpan.FromMilliseconds(DeveloperOverlayTransitionFrameMs);
+        _developerOverlayTransitionTimer.Tick += OnDeveloperOverlayTransitionTimerTick;
+    }
+
+    private void OnDeveloperOverlayTransitionTimerTick(object? sender, EventArgs e)
+    {
+        _developerOverlayTransitionProgress = Math.Clamp(
+            _developerOverlayTransitionProgress + (DeveloperOverlayTransitionFrameMs / (double)DeveloperOverlayTransitionDurationMs),
+            0,
+            1);
+
+        if (_developerOverlayTransitionProgress >= 0.999)
+        {
+            _developerOverlayTransitionProgress = 1;
+            _developerOverlayTransitionTimer.Stop();
         }
 
         UpdateMeasurementPresentation();
@@ -733,6 +786,9 @@ public partial class DicomViewPanel
             return;
         }
 
+        double transition = GetDeveloperOverlayTransitionEase();
+        double highlightPulse = 1.0 - transition;
+
         IReadOnlyList<AnatomyDeveloperOverlayModel> overlays = _developerAnatomyOverlays
             .OrderByDescending(candidate => candidate.UseCount)
             .ThenByDescending(candidate => candidate.UpdatedAtUtc)
@@ -748,14 +804,33 @@ public partial class DicomViewPanel
             }
 
             Color strokeColor = GetDeveloperAnatomyOverlayColor(overlay.AnatomyLabel);
+            Point[] controlPoints = imagePoints.Select(ImageToControlPoint).ToArray();
+            byte haloAlpha = (byte)Math.Clamp(Math.Round(54 + (72 * highlightPulse)), 0, 255);
+            byte fillAlpha = (byte)Math.Clamp(Math.Round(20 + (22 * transition) + (26 * highlightPulse)), 0, 255);
+            double baseThickness = 1.6 + (0.35 * transition);
+            double highlightThickness = baseThickness + (1.8 * highlightPulse);
+
+            var glowPolygon = new Polygon
+            {
+                Points = new Points(controlPoints),
+                Stroke = new SolidColorBrush(Color.FromArgb(haloAlpha, strokeColor.R, strokeColor.G, strokeColor.B)),
+                Fill = null,
+                StrokeThickness = highlightThickness,
+                StrokeDashArray = new AvaloniaList<double> { 14, 8 },
+                IsHitTestVisible = false,
+                Opacity = 0.95,
+            };
+            MeasurementOverlay.Children.Add(glowPolygon);
+
             var polygon = new Polygon
             {
-                Points = new Points(imagePoints.Select(ImageToControlPoint)),
+                Points = new Points(controlPoints),
                 Stroke = new SolidColorBrush(strokeColor),
-                Fill = new SolidColorBrush(Color.FromArgb(28, strokeColor.R, strokeColor.G, strokeColor.B)),
-                StrokeThickness = 1.4,
-                StrokeDashArray = new AvaloniaList<double> { 6, 4 },
+                Fill = new SolidColorBrush(Color.FromArgb(fillAlpha, strokeColor.R, strokeColor.G, strokeColor.B)),
+                StrokeThickness = baseThickness,
+                StrokeDashArray = new AvaloniaList<double> { 8, 5 },
                 IsHitTestVisible = false,
+                Opacity = 0.96,
             };
             MeasurementOverlay.Children.Add(polygon);
 
@@ -764,18 +839,39 @@ public partial class DicomViewPanel
                 continue;
             }
 
-            Point labelAnchor = GetPolygonCenter(imagePoints.Select(ImageToControlPoint).ToArray());
+            Point labelAnchor = GetPolygonCenter(controlPoints);
             string labelText = overlay.UseCount > 1
                 ? $"{overlay.AnatomyLabel} · model ×{overlay.UseCount}"
                 : $"{overlay.AnatomyLabel} · model";
-            Border label = CreateMeasurementLabelBorder(isSelected: false, labelText);
-            label.BorderBrush = new SolidColorBrush(strokeColor);
-            label.Opacity = 0.92;
+            Border label = CreateDeveloperAnatomyOverlayLabel(strokeColor, labelText, overlay.SourceModality, highlightPulse);
             label.Measure(s_unboundedMeasureSize);
-            Canvas.SetLeft(label, labelAnchor.X + 8);
-            Canvas.SetTop(label, labelAnchor.Y + 8);
+
+            Point labelPoint = new(labelAnchor.X + 14, labelAnchor.Y - (label.DesiredSize.Height + 10));
+            AddLine(
+                new Point(labelAnchor.X + 6, labelAnchor.Y - 2),
+                new Point(labelPoint.X + 8, labelPoint.Y + label.DesiredSize.Height - 6),
+                new SolidColorBrush(Color.FromArgb((byte)Math.Clamp(Math.Round(170 + (45 * highlightPulse)), 0, 255), strokeColor.R, strokeColor.G, strokeColor.B)),
+                1.1 + (0.55 * highlightPulse));
+            Canvas.SetLeft(label, labelPoint.X);
+            Canvas.SetTop(label, labelPoint.Y);
             MeasurementOverlay.Children.Add(label);
         }
+    }
+
+    private static string BuildDeveloperOverlaySignature(IEnumerable<AnatomyDeveloperOverlayModel> overlays) => string.Join(
+        "|",
+        overlays
+            .OrderBy(candidate => candidate.AnatomyLabel, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(candidate => candidate.RegionLabel, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(candidate => candidate.SourceSeriesDescription, StringComparer.OrdinalIgnoreCase)
+            .Select(candidate => string.Create(
+                CultureInfo.InvariantCulture,
+                $"{candidate.AnatomyLabel}:{candidate.RegionLabel}:{candidate.SourceModality}:{candidate.NormalizedCenterX:F4}:{candidate.NormalizedCenterY:F4}:{candidate.NormalizedCenterZ:F4}:{candidate.NormalizedSizeX:F4}:{candidate.NormalizedSizeY:F4}:{candidate.NormalizedSizeZ:F4}:{candidate.UseCount}")));
+
+    private double GetDeveloperOverlayTransitionEase()
+    {
+        double t = Math.Clamp(_developerOverlayTransitionProgress, 0, 1);
+        return 1 - Math.Pow(1 - t, 3);
     }
 
     private bool TryProjectDeveloperAnatomyOverlay(
@@ -1874,6 +1970,57 @@ public partial class DicomViewPanel
             FontSize = 11,
         },
     };
+
+    private Border CreateDeveloperAnatomyOverlayLabel(Color accentColor, string title, string modality, double highlightPulse)
+    {
+        byte borderAlpha = (byte)Math.Clamp(Math.Round(188 + (52 * highlightPulse)), 0, 255);
+        byte panelAlpha = (byte)Math.Clamp(Math.Round(164 + (28 * highlightPulse)), 0, 255);
+        byte accentAlpha = (byte)Math.Clamp(Math.Round(92 + (48 * highlightPulse)), 0, 255);
+
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.FromArgb(panelAlpha, 9, 14, 20)),
+            BorderBrush = new SolidColorBrush(Color.FromArgb(borderAlpha, accentColor.R, accentColor.G, accentColor.B)),
+            BorderThickness = new Thickness(1.2),
+            CornerRadius = new CornerRadius(8),
+            Padding = new Thickness(8, 5, 8, 6),
+            Opacity = 0.97,
+            Child = new StackPanel
+            {
+                Spacing = 2,
+                Children =
+                {
+                    new Border
+                    {
+                        Background = new SolidColorBrush(Color.FromArgb(accentAlpha, accentColor.R, accentColor.G, accentColor.B)),
+                        CornerRadius = new CornerRadius(4),
+                        Padding = new Thickness(5, 1, 5, 1),
+                        HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left,
+                        Child = new TextBlock
+                        {
+                            Text = "PROJECTED MODEL",
+                            Foreground = new SolidColorBrush(Color.FromArgb(245, 245, 250, 255)),
+                            FontSize = 9,
+                            FontWeight = FontWeight.Bold,
+                        }
+                    },
+                    new TextBlock
+                    {
+                        Text = title,
+                        Foreground = new SolidColorBrush(Color.FromArgb(255, 246, 251, 255)),
+                        FontSize = 12,
+                        FontWeight = FontWeight.SemiBold,
+                    },
+                    new TextBlock
+                    {
+                        Text = string.IsNullOrWhiteSpace(modality) ? "semantic pack projection" : $"semantic pack projection · {modality.ToUpperInvariant()}",
+                        Foreground = new SolidColorBrush(Color.FromArgb(220, 186, 214, 237)),
+                        FontSize = 9,
+                    }
+                }
+            }
+        };
+    }
 
     private Point GetMeasurementLabelOffset(StudyMeasurement measurement) => measurement.LabelOffset ?? s_defaultMeasurementLabelOffset;
 

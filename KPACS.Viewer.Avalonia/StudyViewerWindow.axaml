@@ -77,6 +77,36 @@
             <Setter Property="Width" Value="38" />
             <Setter Property="Height" Value="38" />
         </Style>
+        <Style Selector="Button.previewOrbitButton">
+            <Setter Property="Background" Value="#FF1B2732" />
+            <Setter Property="Foreground" Value="#FFF6FBFF" />
+            <Setter Property="BorderBrush" Value="#667FC1F4" />
+            <Setter Property="BorderThickness" Value="1" />
+            <Setter Property="CornerRadius" Value="13" />
+            <Setter Property="Padding" Value="0" />
+            <Setter Property="Width" Value="26" />
+            <Setter Property="Height" Value="26" />
+            <Setter Property="FontSize" Value="12" />
+            <Setter Property="FontWeight" Value="SemiBold" />
+        </Style>
+        <Style Selector="Button.previewOrbitButton:pointerover">
+            <Setter Property="Background" Value="#FF244055" />
+            <Setter Property="BorderBrush" Value="#FF92E6FF" />
+        </Style>
+        <Style Selector="Button.previewOrbitButton:pressed">
+            <Setter Property="Background" Value="#FF2D7FA0" />
+            <Setter Property="Foreground" Value="#FF081117" />
+            <Setter Property="BorderBrush" Value="#FFB8F0FF" />
+        </Style>
+        <Style Selector="CheckBox.previewInlineToggle">
+            <Setter Property="Foreground" Value="#FFD3E5F5" />
+            <Setter Property="FontSize" Value="10" />
+            <Setter Property="Padding" Value="4,0,0,0" />
+            <Setter Property="VerticalAlignment" Value="Center" />
+        </Style>
+        <Style Selector="CheckBox.previewInlineToggle:pointerover">
+            <Setter Property="Foreground" Value="#FFF4FAFF" />
+        </Style>
         <Style Selector="Button.workspaceAction">
             <Setter Property="Background" Value="#FF20262D" />
             <Setter Property="Foreground" Value="#FFF0F5FA" />
@@ -547,6 +577,26 @@
                                Foreground="#FF9DB3C7"
                                FontSize="11"
                                TextWrapping="Wrap" />
+                          <Grid ColumnDefinitions="Auto,Auto,Auto,*"
+                              ColumnSpacing="6">
+                        <Button x:Name="VolumeRoiRotateHorizontalButton"
+                                Classes="previewOrbitButton"
+                                Content="↔"
+                            Click="OnVolumeRoiRotateHorizontalClick"
+                            ToolTip.Tip="Rotate the 3D ROI preview horizontally." />
+                        <Button x:Name="VolumeRoiRotateVerticalButton"
+                            Grid.Column="1"
+                                Classes="previewOrbitButton"
+                            Content="↕"
+                            Click="OnVolumeRoiRotateVerticalClick"
+                            ToolTip.Tip="Rotate the 3D ROI preview vertically." />
+                        <CheckBox x:Name="VolumeRoiAutoRotateCheckBox"
+                                    Grid.Column="2"
+                                    Classes="previewInlineToggle"
+                                    Content="auto"
+                                    Click="OnVolumeRoiAutoRotateClick"
+                                    ToolTip.Tip="Rotate the 3D ROI preview automatically." />
+                        </Grid>
                         <Grid x:Name="VolumeRoiDraftCorrectionRow"
                           IsVisible="False"
                           ColumnDefinitions="Auto,Auto,*"
@@ -584,7 +634,7 @@
                                Foreground="#FFD3E5F5"
                                FontSize="10"
                                TextWrapping="Wrap"
-                               Text="Click to place points, double-click without a line to auto-outline, or double-click with a line to close a slice contour. Scroll to another slice, use arrow keys to rotate the mesh preview, then press Enter to finish or Esc to cancel." />
+                               Text="Click to place points, double-click without a line to auto-outline, or double-click with a line to close a slice contour. Scroll to another slice, use the ↔/↕ buttons or arrow keys to rotate the mesh preview, enable auto if desired, then press Enter to finish or Esc to cancel." />
                 </StackPanel>
             </Border>
 

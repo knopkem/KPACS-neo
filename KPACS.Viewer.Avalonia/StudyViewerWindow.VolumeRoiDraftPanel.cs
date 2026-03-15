@@ -3,6 +3,7 @@ using Avalonia.Controls;
 using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Media;
+using Avalonia.Threading;
 using KPACS.Viewer.Controls;
 using KPACS.Viewer.Models;
 using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
@@ -13,11 +14,22 @@ public partial class StudyViewerWindow
 {
     private const double DefaultVolumeRoiPreviewYaw = -0.55;
     private const double DefaultVolumeRoiPreviewPitch = 0.38;
-    private const int SavedVolumeRoiPreviewSampleCount = 40;
+    private const double VolumeRoiPreviewStep = 0.12;
+    private const double VolumeRoiPreviewAcceleratedStep = 0.18;
+    private const double VolumeRoiPreviewAutoRotateYawStep = 0.055;
+    private const double VolumeRoiPreviewAutoRotatePitchAmplitude = 0.22;
+    private const double VolumeRoiPreviewAutoRotatePitchBase = 0.16;
+    private const int SavedVolumeRoiPreviewHighSampleCount = 32;
+    private const int SavedVolumeRoiPreviewMediumSampleCount = 24;
+    private const int SavedVolumeRoiPreviewLowSampleCount = 18;
+    private const int SavedVolumeRoiPreviewVeryLowSampleCount = 14;
+    private readonly DispatcherTimer _volumeRoiPreviewAutoRotateTimer = new();
     private Point _volumeRoiPreviewOffset;
     private bool _volumeRoiPreviewPinned;
+    private bool _volumeRoiPreviewAutoRotateEnabled;
     private double _volumeRoiPreviewYaw = DefaultVolumeRoiPreviewYaw;
     private double _volumeRoiPreviewPitch = DefaultVolumeRoiPreviewPitch;
+    private double _volumeRoiPreviewAutoRotatePhase;
     private DicomViewPanel.VolumeRoiDraftPreview? _currentVolumeRoiDraftPreview;
     private DicomViewPanel.VolumeRoiDraftPreview? _lastVolumeRoiPreviewSnapshot;
     private bool _lastVolumeRoiPreviewWasDraft;
@@ -29,6 +41,14 @@ public partial class StudyViewerWindow
     {
         _volumeRoiDraftPanelRefreshTimer.Stop();
         _volumeRoiDraftPanelRefreshTimer.Start();
+    }
+
+    private void InitializeVolumeRoiDraftPreviewControls()
+    {
+        _volumeRoiPreviewAutoRotateTimer.Interval = TimeSpan.FromMilliseconds(90);
+        _volumeRoiPreviewAutoRotateTimer.Tick += OnVolumeRoiPreviewAutoRotateTimerTick;
+        VolumeRoiAutoRotateCheckBox.IsChecked = _volumeRoiPreviewAutoRotateEnabled;
+        UpdateVolumeRoiAutoRotateState();
     }
 
     private void OnVolumeRoiDraftPanelRefreshTimerTick(object? sender, EventArgs e)
@@ -108,12 +128,14 @@ public partial class StudyViewerWindow
         UpdateVolumeRoiCorrectionControls(preview, isDraft);
         VolumeRoiDraftHintText.Text = isDraft
             ? preview.IsAdditiveModeEnabled
-                ? "Add mode is on: click to draft another region on the current slice or double-click to auto-outline and merge it into the 3D ROI. Shrink/Grow still refine the latest auto-outline, arrows rotate the mesh, Enter finishes, Esc cancels."
-                : "Click to place points, double-click without a drawn line to auto-outline, or double-click with a line to close a slice contour. Turn on Add to merge another region into the model, use Shrink/Grow to refine the auto-outline, scroll to another slice, rotate the mesh with arrow keys, then press Enter to finish or Esc to cancel."
-            : "Selected 3D ROI model preview. Scroll through the series to highlight the current slice contour; choose another measurement to hide this panel.";
+                ? "Add mode is on: click to draft another region on the current slice or double-click to auto-outline and merge it into the 3D ROI. Shrink/Grow still refine the latest auto-outline, and you can rotate the mesh with ↔/↕, arrow keys, or auto mode. Enter finishes, Esc cancels."
+                : "Click to place points, double-click without a drawn line to auto-outline, or double-click with a line to close a slice contour. Turn on Add to merge another region into the model, use Shrink/Grow to refine the auto-outline, scroll to another slice, and rotate the mesh with ↔/↕, arrow keys, or auto mode before pressing Enter or Esc."
+            : "Selected 3D ROI model preview. Scroll through the series to highlight the current slice contour and rotate the model with ↔/↕, arrow keys, or auto mode.";
         RenderVolumeRoiDraftPreview(preview);
         VolumeRoiDraftPanel.IsVisible = true;
         ApplyVolumeRoiDraftPanelOffset();
+        VolumeRoiAutoRotateCheckBox.IsChecked = _volumeRoiPreviewAutoRotateEnabled;
+        UpdateVolumeRoiAutoRotateState();
     }
 
     private void HideVolumeRoiDraftPanel()
@@ -129,8 +151,9 @@ public partial class StudyViewerWindow
         VolumeRoiShrinkButton.IsEnabled = false;
         VolumeRoiGrowButton.IsEnabled = false;
         VolumeRoiCorrectionText.Text = "Sensitivity: default";
-        VolumeRoiDraftHintText.Text = "Click to place points, double-click without a line to auto-outline, or double-click with a line to close a slice contour. Scroll to another slice, use arrow keys to rotate the mesh preview, then press Enter to finish or Esc to cancel.";
+        VolumeRoiDraftHintText.Text = "Click to place points, double-click without a line to auto-outline, or double-click with a line to close a slice contour. Scroll to another slice, use ↔/↕ or arrow keys to rotate the mesh preview, enable auto if desired, then press Enter to finish or Esc to cancel.";
         VolumeRoiDraftPanel.IsVisible = false;
+        UpdateVolumeRoiAutoRotateState();
     }
 
     private void OnVolumeRoiAddClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -211,6 +234,43 @@ public partial class StudyViewerWindow
 
         SaveViewerSettings();
         e.Handled = true;
+    }
+
+    private void OnVolumeRoiRotateHorizontalClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        RotateVolumeRoiDraftPreview(VolumeRoiPreviewStep, 0);
+        e.Handled = true;
+    }
+
+    private void OnVolumeRoiRotateVerticalClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        RotateVolumeRoiDraftPreview(0, -VolumeRoiPreviewStep);
+        e.Handled = true;
+    }
+
+    private void OnVolumeRoiAutoRotateClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        _volumeRoiPreviewAutoRotateEnabled = VolumeRoiAutoRotateCheckBox.IsChecked == true;
+        UpdateVolumeRoiAutoRotateState(resetPhase: _volumeRoiPreviewAutoRotateEnabled);
+        SaveViewerSettings();
+        e.Handled = true;
+    }
+
+    private void OnVolumeRoiPreviewAutoRotateTimerTick(object? sender, EventArgs e)
+    {
+        if (!_volumeRoiPreviewAutoRotateEnabled || _currentVolumeRoiDraftPreview is null || !VolumeRoiDraftPanel.IsVisible)
+        {
+            _volumeRoiPreviewAutoRotateTimer.Stop();
+            return;
+        }
+
+        _volumeRoiPreviewAutoRotatePhase += 0.18;
+        _volumeRoiPreviewYaw += VolumeRoiPreviewAutoRotateYawStep;
+        _volumeRoiPreviewPitch = Math.Clamp(
+            VolumeRoiPreviewAutoRotatePitchBase + (Math.Sin(_volumeRoiPreviewAutoRotatePhase) * VolumeRoiPreviewAutoRotatePitchAmplitude),
+            -1.25,
+            1.25);
+        RenderVolumeRoiDraftPreview(_currentVolumeRoiDraftPreview);
     }
 
     private void OnVolumeRoiDraftHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
@@ -352,6 +412,7 @@ public partial class StudyViewerWindow
             return [];
         }
 
+        int previewSampleCount = GetAdaptiveSavedVolumeRoiPreviewSampleCount(contours.Length);
         List<DicomViewPanel.VolumeRoiDraftPreviewContour> previewContours = [];
         foreach (IGrouping<int, VolumeRoiContour> componentGroup in contours.GroupBy(contour => contour.ComponentId).OrderBy(group => group.Key))
         {
@@ -360,7 +421,7 @@ public partial class StudyViewerWindow
                 .Where(contour => contour.IsClosed && contour.Anchors.Length >= 3)
                 .OrderBy(contour => contour.PlanePosition))
             {
-                SpatialVector3D[] resampled = ResampleMeasurementContour(contour, SavedVolumeRoiPreviewSampleCount);
+                SpatialVector3D[] resampled = ResampleMeasurementContour(contour, previewSampleCount);
                 if (resampled.Length < 3)
                 {
                     continue;
@@ -409,6 +470,17 @@ public partial class StudyViewerWindow
             .OrderBy(contour => contour.PlanePosition)
             .ThenBy(contour => contour.IsInterpolated)
             .ToList();
+    }
+
+    private static int GetAdaptiveSavedVolumeRoiPreviewSampleCount(int contourCount)
+    {
+        return contourCount switch
+        {
+            >= 72 => SavedVolumeRoiPreviewVeryLowSampleCount,
+            >= 40 => SavedVolumeRoiPreviewLowSampleCount,
+            >= 18 => SavedVolumeRoiPreviewMediumSampleCount,
+            _ => SavedVolumeRoiPreviewHighSampleCount,
+        };
     }
 
     private static bool IsCurrentMeasurementPlane(double planePosition, double currentPlanePosition) => Math.Abs(planePosition - currentPlanePosition) <= 0.25;
@@ -588,6 +660,35 @@ public partial class StudyViewerWindow
 
     private static SpatialVector3D Lerp(SpatialVector3D first, SpatialVector3D second, double t) => first + ((second - first) * t);
 
+    private void UpdateVolumeRoiAutoRotateState(bool resetPhase = false)
+    {
+        if (resetPhase)
+        {
+            _volumeRoiPreviewAutoRotatePhase = 0;
+        }
+
+        if (_volumeRoiPreviewAutoRotateEnabled && _currentVolumeRoiDraftPreview is not null && VolumeRoiDraftPanel.IsVisible)
+        {
+            _volumeRoiPreviewAutoRotateTimer.Start();
+        }
+        else
+        {
+            _volumeRoiPreviewAutoRotateTimer.Stop();
+        }
+    }
+
+    private void RotateVolumeRoiDraftPreview(double yawDelta, double pitchDelta)
+    {
+        if (_currentVolumeRoiDraftPreview is null || !VolumeRoiDraftPanel.IsVisible)
+        {
+            return;
+        }
+
+        _volumeRoiPreviewYaw += yawDelta;
+        _volumeRoiPreviewPitch = Math.Clamp(_volumeRoiPreviewPitch + pitchDelta, -1.25, 1.25);
+        RenderVolumeRoiDraftPreview(_currentVolumeRoiDraftPreview);
+    }
+
     private bool TryRotateVolumeRoiDraftPreview(Key key, bool accelerate)
     {
         if (_currentVolumeRoiDraftPreview is null || !VolumeRoiDraftPanel.IsVisible)
@@ -595,26 +696,25 @@ public partial class StudyViewerWindow
             return false;
         }
 
-        double delta = accelerate ? 0.18 : 0.09;
+        double delta = accelerate ? VolumeRoiPreviewAcceleratedStep : VolumeRoiPreviewStep;
         switch (key)
         {
             case Key.Left:
-                _volumeRoiPreviewYaw -= delta;
+                RotateVolumeRoiDraftPreview(-delta, 0);
                 break;
             case Key.Right:
-                _volumeRoiPreviewYaw += delta;
+                RotateVolumeRoiDraftPreview(delta, 0);
                 break;
             case Key.Up:
-                _volumeRoiPreviewPitch = Math.Clamp(_volumeRoiPreviewPitch - delta, -1.25, 1.25);
+                RotateVolumeRoiDraftPreview(0, -delta);
                 break;
             case Key.Down:
-                _volumeRoiPreviewPitch = Math.Clamp(_volumeRoiPreviewPitch + delta, -1.25, 1.25);
+                RotateVolumeRoiDraftPreview(0, delta);
                 break;
             default:
                 return false;
         }
 
-        RenderVolumeRoiDraftPreview(_currentVolumeRoiDraftPreview);
         return true;
     }
 

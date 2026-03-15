@@ -27,6 +27,12 @@ public partial class StudyViewerWindow
     private string _selectedActivePackStructureId = string.Empty;
     private bool _useLegacyAnatomyPriors = true;
     private bool _developerAnatomyModelProjectionEnabled;
+    private bool _reportDebugEnabled;
+    private bool _anatomySelectedRoiSectionExpanded = true;
+    private bool _anatomyCatalogSectionExpanded = true;
+    private bool _anatomyDeveloperSectionExpanded = false;
+    private bool _anatomyPackEditorSectionExpanded = true;
+    private bool _anatomyLegacySectionExpanded = false;
 
     private void RefreshAnatomyPanel(bool forceVisible = false)
     {
@@ -80,7 +86,9 @@ public partial class StudyViewerWindow
             "Selected 3D ROI",
             selectedRoi is null
                 ? "Select a 3D ROI in the viewer to assign it to an anatomy structure."
-                : BuildSelectedMeasurementLabel(selectedRoi));
+                : BuildSelectedMeasurementLabel(selectedRoi),
+            _anatomySelectedRoiSectionExpanded,
+            expanded => _anatomySelectedRoiSectionExpanded = expanded);
 
         if (selectedRoi is null)
         {
@@ -107,7 +115,7 @@ public partial class StudyViewerWindow
             MinWidth = 180,
             MaxWidth = 260,
         };
-        ApplyReportComboBoxStyling(regionCombo);
+        StyleAnatomyComboBox(regionCombo);
 
         string selectedRegion = regionCombo.SelectedItem as string ?? regionOptions.FirstOrDefault() ?? "Neuro";
         List<string> structures = GetAnatomyStructureOptionsForRegion(selectedRegion);
@@ -123,7 +131,7 @@ public partial class StudyViewerWindow
             MinWidth = 180,
             MaxWidth = 260,
         };
-        ApplyReportComboBoxStyling(structureCombo);
+        StyleAnatomyComboBox(structureCombo);
 
         var customNameBox = new TextBox
         {
@@ -134,6 +142,7 @@ public partial class StudyViewerWindow
             MinWidth = 180,
             MaxWidth = 260,
         };
+        StyleAnatomyTextBox(customNameBox);
 
         regionCombo.SelectionChanged += (_, _) =>
         {
@@ -143,12 +152,7 @@ public partial class StudyViewerWindow
             structureCombo.SelectedItem = options.FirstOrDefault();
         };
 
-        var assignButton = new Button
-        {
-            Content = "Assign anatomy",
-            MinWidth = 128,
-            Height = 30,
-        };
+        var assignButton = CreateAnatomyActionButton("Assign anatomy", "#FF215E91", "#FF4FA3FF", minWidth: 136, height: 30);
         assignButton.Click += async (_, _) =>
         {
             string regionLabel = regionCombo.SelectedItem as string ?? "Neuro";
@@ -164,15 +168,13 @@ public partial class StudyViewerWindow
             await AssignMeasurementToAnatomyAsync(selectedRoi.Id, regionLabel, anatomyLabel);
         };
 
-        body.Children.Add(CreateFieldRow("Region", regionCombo));
-        body.Children.Add(CreateFieldRow("Structure", structureCombo));
-        body.Children.Add(CreateFieldRow("Custom", customNameBox));
-        body.Children.Add(new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            Children = { assignButton }
-        });
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Assignment",
+            "Choose the target region and structure, then optionally override the label with a custom anatomy name.",
+            CreateFieldRow("Region", regionCombo),
+            CreateFieldRow("Structure", structureCombo),
+            CreateFieldRow("Custom name", customNameBox),
+            CreateActionRow(assignButton)));
         return section;
     }
 
@@ -193,7 +195,9 @@ public partial class StudyViewerWindow
 
         (Border section, StackPanel body) = CreateAnatomySectionHost(
             "Catalog",
-            "Define extra regions and structures here. Reporting will use this catalog for display, but anatomy assignment happens in this module.");
+            "Define extra regions and structures here. Reporting will use this catalog for display, but anatomy assignment happens in this module.",
+            _anatomyCatalogSectionExpanded,
+            expanded => _anatomyCatalogSectionExpanded = expanded);
 
         var regionCombo = new ComboBox
         {
@@ -202,7 +206,7 @@ public partial class StudyViewerWindow
             MinWidth = 180,
             MaxWidth = 260,
         };
-        ApplyReportComboBoxStyling(regionCombo);
+        StyleAnatomyComboBox(regionCombo);
 
         var regionNameBox = new TextBox
         {
@@ -211,6 +215,7 @@ public partial class StudyViewerWindow
             MinWidth = 180,
             MaxWidth = 260,
         };
+        StyleAnatomyTextBox(regionNameBox);
 
         var structureCombo = new ComboBox
         {
@@ -219,7 +224,7 @@ public partial class StudyViewerWindow
             MinWidth = 180,
             MaxWidth = 260,
         };
-        ApplyReportComboBoxStyling(structureCombo);
+        StyleAnatomyComboBox(structureCombo);
 
         var structureNameBox = new TextBox
         {
@@ -228,6 +233,7 @@ public partial class StudyViewerWindow
             MinWidth = 180,
             MaxWidth = 260,
         };
+        StyleAnatomyTextBox(structureNameBox);
 
         regionCombo.SelectionChanged += (_, _) =>
         {
@@ -245,27 +251,32 @@ public partial class StudyViewerWindow
             structureNameBox.Text = _selectedAnatomyCatalogStructure;
         };
 
-        var addRegionButton = new Button { Content = "Add region", MinWidth = 100, Height = 28 };
+        var addRegionButton = CreateAnatomyActionButton("Add region", "#FF1C5A3F", "#FF4FD08B", minWidth: 108);
         addRegionButton.Click += (_, _) => AddCatalogRegion(regionNameBox.Text);
-        var renameRegionButton = new Button { Content = "Rename region", MinWidth = 112, Height = 28 };
+        var renameRegionButton = CreateAnatomyActionButton("Rename region", minWidth: 120);
         renameRegionButton.Click += async (_, _) => await RenameCatalogRegionAsync(_selectedAnatomyCatalogRegion, regionNameBox.Text);
-        var deleteRegionButton = new Button { Content = "Delete region", MinWidth = 110, Height = 28 };
+        var deleteRegionButton = CreateAnatomyActionButton("Delete region", "#FF5C2431", "#FFEB7D96", minWidth: 118);
         deleteRegionButton.Click += (_, _) => DeleteCatalogRegion(_selectedAnatomyCatalogRegion);
 
-        var addStructureButton = new Button { Content = "Add structure", MinWidth = 110, Height = 28 };
+        var addStructureButton = CreateAnatomyActionButton("Add structure", "#FF1C5A3F", "#FF4FD08B", minWidth: 118);
         addStructureButton.Click += (_, _) => AddCatalogStructure(_selectedAnatomyCatalogRegion, structureNameBox.Text);
-        var renameStructureButton = new Button { Content = "Rename structure", MinWidth = 124, Height = 28 };
+        var renameStructureButton = CreateAnatomyActionButton("Rename structure", minWidth: 132);
         renameStructureButton.Click += async (_, _) => await RenameCatalogStructureAsync(_selectedAnatomyCatalogRegion, _selectedAnatomyCatalogStructure, structureNameBox.Text);
-        var deleteStructureButton = new Button { Content = "Delete structure", MinWidth = 120, Height = 28 };
+        var deleteStructureButton = CreateAnatomyActionButton("Delete structure", "#FF5C2431", "#FFEB7D96", minWidth: 128);
         deleteStructureButton.Click += (_, _) => DeleteCatalogStructure(_selectedAnatomyCatalogRegion, _selectedAnatomyCatalogStructure);
 
-        body.Children.Add(CreateFieldRow("Region", regionCombo));
-        body.Children.Add(CreateFieldRow("Edit", regionNameBox));
-        body.Children.Add(new WrapPanel { ItemSpacing = 8, LineSpacing = 6, Children = { addRegionButton, renameRegionButton, deleteRegionButton } });
-        body.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Color.Parse("#334D5F74")), Margin = new Thickness(0, 4, 0, 4) });
-        body.Children.Add(CreateFieldRow("Structure", structureCombo));
-        body.Children.Add(CreateFieldRow("Edit", structureNameBox));
-        body.Children.Add(new WrapPanel { ItemSpacing = 8, LineSpacing = 6, Children = { addStructureButton, renameStructureButton, deleteStructureButton } });
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Regions",
+            "Keep the top-level body map clean. Region changes affect downstream anatomy selection lists.",
+            CreateFieldRow("Selected", regionCombo),
+            CreateFieldRow("Name", regionNameBox),
+            CreateActionRow(addRegionButton, renameRegionButton, deleteRegionButton)));
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Structures",
+            $"Manage structures inside {_selectedAnatomyCatalogRegion}. These labels become available when assigning anatomy to ROIs.",
+            CreateFieldRow("Selected", structureCombo),
+            CreateFieldRow("Name", structureNameBox),
+            CreateActionRow(addStructureButton, renameStructureButton, deleteStructureButton)));
         return section;
     }
 
@@ -275,7 +286,9 @@ public partial class StudyViewerWindow
             "Legacy learned priors",
             _volumeRoiAnatomyPriors.Count == 0
                 ? "No legacy priors stored yet. Assign a 3D ROI above to create the first legacy learning snapshot."
-                : "These are old-model ROI priors from the database. Keep them as migration material, use them carefully, and prefer the new pack workflow for future knowledge.");
+                : "These are old-model ROI priors from the database. Keep them as migration material, use them carefully, and prefer the new pack workflow for future knowledge.",
+            _anatomyLegacySectionExpanded,
+            expanded => _anatomyLegacySectionExpanded = expanded);
 
         if (_volumeRoiAnatomyPriors.Count == 0)
         {
@@ -304,7 +317,9 @@ public partial class StudyViewerWindow
 
         (Border section, StackPanel body) = CreateAnatomySectionHost(
             "Developer workflow",
-            $"Active pack: {activePackLabel}. Legacy ROI priors are currently {legacyMode}. Use this area to manage packs, export migration snapshots, and feed selected ROIs into the new developer workflow.");
+            $"Active pack: {activePackLabel}. Legacy ROI priors are currently {legacyMode}. Use this area to manage packs, export migration snapshots, and feed selected ROIs into the new developer workflow.",
+            _anatomyDeveloperSectionExpanded,
+            expanded => _anatomyDeveloperSectionExpanded = expanded);
 
         body.Children.Add(new TextBlock
         {
@@ -349,97 +364,60 @@ public partial class StudyViewerWindow
             FontSize = 10,
         });
 
-        var reloadPacksButton = new Button { Content = "Reload packs", MinWidth = 100, Height = 28 };
+        var reloadPacksButton = CreateAnatomyActionButton("Reload packs", minWidth: 108);
         reloadPacksButton.Click += async (_, _) => await ReloadAnatomyKnowledgePacksAsync();
 
-        var savePackButton = new Button { Content = "Save active pack", MinWidth = 120, Height = 28, IsEnabled = _activeCraniumKnowledgePack is not null };
+        var savePackButton = CreateAnatomyActionButton("Save active pack", "#FF215E91", "#FF4FA3FF", minWidth: 128);
+        savePackButton.IsEnabled = _activeCraniumKnowledgePack is not null;
         savePackButton.Click += async (_, _) => await SaveActiveAnatomyPackAsync();
 
-        var feedRoiButton = new Button
-        {
-            Content = "Feed as new structure",
-            MinWidth = 172,
-            Height = 28,
-            IsEnabled = selectedRoi is not null && _activeCraniumKnowledgePack is not null,
-        };
+        var feedRoiButton = CreateAnatomyActionButton("Feed as new structure", "#FF1C5A3F", "#FF4FD08B", minWidth: 178);
+        feedRoiButton.IsEnabled = selectedRoi is not null && _activeCraniumKnowledgePack is not null;
         feedRoiButton.Click += async (_, _) => await FeedSelectedRoiIntoActivePackAsync(selectedRoi);
 
-        var applyToSelectedStructureButton = new Button
-        {
-            Content = "Merge into existing structure",
-            MinWidth = 196,
-            Height = 28,
-            IsEnabled = selectedRoi is not null && _activeCraniumKnowledgePack is not null && existingAssignedStructure is not null,
-        };
+        var applyToSelectedStructureButton = CreateAnatomyActionButton("Merge into existing structure", minWidth: 202);
+        applyToSelectedStructureButton.IsEnabled = selectedRoi is not null && _activeCraniumKnowledgePack is not null && existingAssignedStructure is not null;
         applyToSelectedStructureButton.Click += async (_, _) => await ApplySelectedRoiToSelectedPackStructureAsync(selectedRoi);
 
-        var exportPackButton = new Button { Content = "Export active pack", MinWidth = 126, Height = 28, IsEnabled = _activeCraniumKnowledgePack is not null };
+        var exportPackButton = CreateAnatomyActionButton("Export active pack", minWidth: 132);
+        exportPackButton.IsEnabled = _activeCraniumKnowledgePack is not null;
         exportPackButton.Click += async (_, _) => await ExportActiveAnatomyPackAsync();
 
-        var exportLegacyButton = new Button { Content = "Export legacy priors", MinWidth = 134, Height = 28, IsEnabled = _volumeRoiAnatomyPriors.Count > 0 };
+        var exportLegacyButton = CreateAnatomyActionButton("Export legacy priors", minWidth: 140);
+        exportLegacyButton.IsEnabled = _volumeRoiAnatomyPriors.Count > 0;
         exportLegacyButton.Click += async (_, _) => await ExportLegacyPriorsSnapshotAsync();
 
-        var toggleLegacyButton = new Button
-        {
-            Content = _useLegacyAnatomyPriors ? "Disable legacy priors" : "Enable legacy priors",
-            MinWidth = 150,
-            Height = 28,
-        };
+        var toggleLegacyButton = CreateAnatomyActionButton(_useLegacyAnatomyPriors ? "Disable legacy priors" : "Enable legacy priors", minWidth: 156);
         toggleLegacyButton.Click += (_, _) => ToggleLegacyPriorUsage();
 
-        var exportRoiDraftButton = new Button
-        {
-            Content = "Export selected ROI draft",
-            MinWidth = 166,
-            Height = 28,
-            IsEnabled = selectedRoi is not null,
-        };
+        var exportRoiDraftButton = CreateAnatomyActionButton("Export selected ROI draft", minWidth: 172);
+        exportRoiDraftButton.IsEnabled = selectedRoi is not null;
         exportRoiDraftButton.Click += async (_, _) => await ExportSelectedRoiDraftAsync(selectedRoi);
 
-        var toggleProjectionButton = new Button
-        {
-            Content = _developerAnatomyModelProjectionEnabled ? "Hide projected pack structure" : "Project selected pack structure",
-            MinWidth = 188,
-            Height = 28,
-        };
+        var toggleProjectionButton = CreateAnatomyActionButton(_developerAnatomyModelProjectionEnabled ? "Hide projected pack structure" : "Project selected pack structure", "#FF234C73", "#FF73C2FF", minWidth: 194);
         ToolTip.SetTip(toggleProjectionButton, "Project the currently selected active-pack structure into all loaded volume series using the pack definition itself.");
         toggleProjectionButton.Click += (_, _) => ToggleDeveloperAnatomyModelProjection();
 
-        body.Children.Add(new WrapPanel
-        {
-            ItemSpacing = 8,
-            LineSpacing = 6,
-            Children = { reloadPacksButton, savePackButton, feedRoiButton, applyToSelectedStructureButton, exportPackButton, exportLegacyButton, toggleLegacyButton, exportRoiDraftButton, toggleProjectionButton }
-        });
+        var reportDebugCheckBox = CreateAnatomyInlineCheckBox(
+            "report debug",
+            _reportDebugEnabled,
+            "Show anatomy matching debug details inside report hints.");
+        reportDebugCheckBox.IsCheckedChanged += (_, _) => ToggleReportDebug(reportDebugCheckBox.IsChecked == true);
 
-        body.Children.Add(new TextBlock
-        {
-            Text = _volumeRoiAnatomyPriors.Count == 0
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Pack operations",
+            "Reload, save, export and bridge old ROI knowledge into the active anatomy pack.",
+            CreateActionRow(reloadPacksButton, savePackButton, feedRoiButton, applyToSelectedStructureButton, exportPackButton, exportLegacyButton, toggleLegacyButton, exportRoiDraftButton, toggleProjectionButton),
+            reportDebugCheckBox,
+            CreateAnatomyNoteText(_volumeRoiAnatomyPriors.Count == 0
                 ? "Legacy priors in DB: 0"
-                : $"Legacy priors in DB: {_volumeRoiAnatomyPriors.Count}",
-            Foreground = new SolidColorBrush(Color.Parse("#FF9DB3C7")),
-            FontSize = 10,
-        });
-
-        body.Children.Add(new TextBlock
-        {
-            Text = string.IsNullOrWhiteSpace(selectedRoiAnatomyLabel)
+                : $"Legacy priors in DB: {_volumeRoiAnatomyPriors.Count}"),
+            CreateAnatomyNoteText(string.IsNullOrWhiteSpace(selectedRoiAnatomyLabel)
                 ? "Current ROI target: assign a concrete anatomy structure first."
                 : existingAssignedStructure is null
                     ? $"Current ROI target: {selectedRoiAnatomyLabel} is not yet in the active pack → use Feed."
-                    : $"Current ROI target: {selectedRoiAnatomyLabel} already exists in the active pack → use Merge.",
-            Foreground = new SolidColorBrush(Color.Parse("#FF9DB3C7")),
-            FontSize = 10,
-            TextWrapping = TextWrapping.Wrap,
-        });
-
-        body.Children.Add(new TextBlock
-        {
-            Text = BuildDeveloperAnatomyProjectionStatusText(),
-            Foreground = new SolidColorBrush(Color.Parse(_developerAnatomyModelProjectionEnabled ? "#FFC9F7D9" : "#FF9DB3C7")),
-            FontSize = 10,
-            TextWrapping = TextWrapping.Wrap,
-        });
+                    : $"Current ROI target: {selectedRoiAnatomyLabel} already exists in the active pack → use Merge."),
+            CreateAnatomyStatusText(BuildDeveloperAnatomyProjectionStatusText(), _developerAnatomyModelProjectionEnabled)));
 
         return section;
     }
@@ -450,7 +428,9 @@ public partial class StudyViewerWindow
         {
             (Border emptySection, _) = CreateAnatomySectionHost(
                 "Active pack editor",
-                "No active Cranium pack loaded. Reload or create a pack first.");
+                "No active Cranium pack loaded. Reload or create a pack first.",
+                _anatomyPackEditorSectionExpanded,
+                expanded => _anatomyPackEditorSectionExpanded = expanded);
             return emptySection;
         }
 
@@ -468,7 +448,9 @@ public partial class StudyViewerWindow
 
         (Border section, StackPanel body) = CreateAnatomySectionHost(
             "Active pack editor",
-            "Edit the active Cranium pack directly here. This is the developer-facing source of truth for the new anatomy model.");
+            "Edit the active Cranium pack directly here. This is the developer-facing source of truth for the new anatomy model.",
+            _anatomyPackEditorSectionExpanded,
+            expanded => _anatomyPackEditorSectionExpanded = expanded);
 
         List<string> structureOptions = orderedStructures
             .Select(candidate => $"{candidate.DisplayName} ({candidate.Id})")
@@ -484,9 +466,9 @@ public partial class StudyViewerWindow
             MinWidth = 220,
             MaxWidth = 320,
         };
-        ApplyReportComboBoxStyling(structureSelector);
+        StyleAnatomyComboBox(structureSelector);
 
-        var createButton = new Button { Content = "New empty structure", MinWidth = 132, Height = 28 };
+        var createButton = CreateAnatomyActionButton("New empty structure", "#FF1C5A3F", "#FF4FD08B", minWidth: 140);
         createButton.Click += (_, _) =>
         {
             AnatomyStructureDefinition created = new()
@@ -497,37 +479,24 @@ public partial class StudyViewerWindow
             };
             _activeCraniumKnowledgePack.Structures.Add(created);
             _selectedActivePackStructureId = created.Id;
-            RefreshAnatomyPanel(forceVisible: true);
+            RefreshAnatomyProjectionUi(forceVisible: true);
             ShowToast("Created a new empty structure in the active pack.", ToastSeverity.Success);
         };
 
-        var deleteButton = new Button
-        {
-            Content = "Delete structure",
-            MinWidth = 112,
-            Height = 28,
-            IsEnabled = selectedStructure is not null,
-        };
+        var deleteButton = CreateAnatomyActionButton("Delete structure", "#FF5C2431", "#FFEB7D96", minWidth: 120);
+        deleteButton.IsEnabled = selectedStructure is not null;
         deleteButton.Click += async (_, _) => await DeleteSelectedActivePackStructureAsync(selectedStructure);
 
-        var projectModelsButton = new Button
-        {
-            Content = _developerAnatomyModelProjectionEnabled ? "Hide projected pack structure" : "Project selected pack structure",
-            MinWidth = 188,
-            Height = 28,
-        };
+        var projectModelsButton = CreateAnatomyActionButton(_developerAnatomyModelProjectionEnabled ? "Hide projected pack structure" : "Project selected pack structure", "#FF234C73", "#FF73C2FF", minWidth: 194);
         ToolTip.SetTip(projectModelsButton, "Project the currently selected active-pack structure into all loaded volume series using the pack definition itself.");
         projectModelsButton.Click += (_, _) => ToggleDeveloperAnatomyModelProjection();
 
-        body.Children.Add(CreateFieldRow("Structure", structureSelector));
-        body.Children.Add(new WrapPanel { ItemSpacing = 8, LineSpacing = 6, Children = { createButton, deleteButton, projectModelsButton } });
-        body.Children.Add(new TextBlock
-        {
-            Text = BuildDeveloperAnatomyProjectionStatusText(),
-            Foreground = new SolidColorBrush(Color.Parse(_developerAnatomyModelProjectionEnabled ? "#FFC9F7D9" : "#FF9DB3C7")),
-            FontSize = 10,
-            TextWrapping = TextWrapping.Wrap,
-        });
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Structure selection",
+            "Choose the active structure, create a new one, or project the selected structure into loaded volumes for visual validation.",
+            CreateFieldRow("Structure", structureSelector),
+            CreateActionRow(createButton, deleteButton, projectModelsButton),
+            CreateAnatomyStatusText(BuildDeveloperAnatomyProjectionStatusText(), _developerAnatomyModelProjectionEnabled)));
 
         if (selectedStructure is null)
         {
@@ -547,7 +516,7 @@ public partial class StudyViewerWindow
             AnatomyStructureDefinition? matchedStructure = orderedStructures.FirstOrDefault(candidate =>
                 string.Equals($"{candidate.DisplayName} ({candidate.Id})", selectedOption, StringComparison.Ordinal));
             _selectedActivePackStructureId = matchedStructure?.Id ?? string.Empty;
-            RefreshAnatomyPanel(forceVisible: true);
+            RefreshAnatomyProjectionUi(forceVisible: true);
         };
 
         var idBox = new TextBox { Text = selectedStructure.Id, MinWidth = 220, MaxWidth = 320 };
@@ -583,7 +552,17 @@ public partial class StudyViewerWindow
             MinHeight = 52,
         };
 
-        var saveButton = new Button { Content = "Apply structure edits", MinWidth = 142, Height = 30 };
+        foreach (TextBox box in new[]
+        {
+            idBox, nameBox, compartmentsBox, modalitiesBox, ctClassBox, mrT1Box, mrT2Box, mrFlairBox,
+            leftRightRangeBox, anteriorPosteriorRangeBox, cranialCaudalRangeBox, midlineRangeBox, skullBaseRangeBox, vertexRangeBox,
+            requiredRelationsBox, forbiddenRelationsBox
+        })
+        {
+            StyleAnatomyTextBox(box);
+        }
+
+        var saveButton = CreateAnatomyActionButton("Apply structure edits", "#FF215E91", "#FF4FA3FF", minWidth: 150, height: 30);
         saveButton.Click += async (_, _) =>
         {
             string structureId = idBox.Text?.Trim() ?? string.Empty;
@@ -613,42 +592,40 @@ public partial class StudyViewerWindow
             selectedStructure.Normalize();
             _selectedActivePackStructureId = selectedStructure.Id;
             await SaveActiveAnatomyPackAsync();
-            RefreshAnatomyPanel(forceVisible: true);
+            RefreshAnatomyProjectionUi(forceVisible: true);
             ShowToast($"Saved structure {selectedStructure.DisplayName} in the active pack.", ToastSeverity.Success);
         };
 
-        body.Children.Add(CreateFieldRow("Id", idBox));
-        body.Children.Add(CreateFieldRow("Name", nameBox));
-        body.Children.Add(CreateFieldRow("Compartments", compartmentsBox));
-        body.Children.Add(CreateFieldRow("Modalities", modalitiesBox));
-        body.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Color.Parse("#334D5F74")), Margin = new Thickness(0, 4, 0, 4) });
-        body.Children.Add(CreateFieldRow("CT class", ctClassBox));
-        body.Children.Add(CreateFieldRow("MR T1", mrT1Box));
-        body.Children.Add(CreateFieldRow("MR T2", mrT2Box));
-        body.Children.Add(CreateFieldRow("MR FLAIR", mrFlairBox));
-        body.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Color.Parse("#334D5F74")), Margin = new Thickness(0, 4, 0, 4) });
-        body.Children.Add(CreateFieldRow("LR range", leftRightRangeBox));
-        body.Children.Add(CreateFieldRow("AP range", anteriorPosteriorRangeBox));
-        body.Children.Add(CreateFieldRow("CC range", cranialCaudalRangeBox));
-        body.Children.Add(CreateFieldRow("Midline", midlineRangeBox));
-        body.Children.Add(CreateFieldRow("Skull base", skullBaseRangeBox));
-        body.Children.Add(CreateFieldRow("Vertex", vertexRangeBox));
-        body.Children.Add(new Border { Height = 1, Background = new SolidColorBrush(Color.Parse("#334D5F74")), Margin = new Thickness(0, 4, 0, 4) });
-        body.Children.Add(CreateFieldRow("Required", requiredRelationsBox));
-        body.Children.Add(CreateFieldRow("Forbidden", forbiddenRelationsBox));
-        body.Children.Add(new TextBlock
-        {
-            Text = "Relations format: type:target:strength — one per line or comma separated. Example: cranial_to:brainstem:hard",
-            Foreground = new SolidColorBrush(Color.Parse("#FF9DB3C7")),
-            FontSize = 10,
-            TextWrapping = TextWrapping.Wrap,
-        });
-        body.Children.Add(new StackPanel
-        {
-            Orientation = Orientation.Horizontal,
-            Spacing = 8,
-            Children = { saveButton }
-        });
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Identity & scope",
+            "Core identifiers and the broad anatomical scope of the structure.",
+            CreateFieldRow("Id", idBox),
+            CreateFieldRow("Name", nameBox),
+            CreateFieldRow("Compartments", compartmentsBox),
+            CreateFieldRow("Modalities", modalitiesBox)));
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Material profile",
+            "Define modality-specific appearance hints for CT and MR sequences.",
+            CreateFieldRow("CT class", ctClassBox),
+            CreateFieldRow("MR T1", mrT1Box),
+            CreateFieldRow("MR T2", mrT2Box),
+            CreateFieldRow("MR FLAIR", mrFlairBox)));
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Spatial envelope",
+            "Expected semantic extent of the structure relative to canonical head axes.",
+            CreateFieldRow("LR range", leftRightRangeBox),
+            CreateFieldRow("AP range", anteriorPosteriorRangeBox),
+            CreateFieldRow("CC range", cranialCaudalRangeBox),
+            CreateFieldRow("Midline", midlineRangeBox),
+            CreateFieldRow("Skull base", skullBaseRangeBox),
+            CreateFieldRow("Vertex", vertexRangeBox)));
+        body.Children.Add(CreateAnatomyEditorCard(
+            "Relations",
+            "Hard and soft constraints to neighboring structures.",
+            CreateFieldRow("Required", requiredRelationsBox),
+            CreateFieldRow("Forbidden", forbiddenRelationsBox),
+            CreateAnatomyNoteText("Relations format: type:target:strength — one per line or comma separated. Example: cranial_to:brainstem:hard"),
+            CreateActionRow(saveButton)));
 
         return section;
     }
@@ -668,7 +645,7 @@ public partial class StudyViewerWindow
             MinWidth = 150,
             MaxWidth = 220,
         };
-        ApplyReportComboBoxStyling(regionCombo);
+        StyleAnatomyComboBox(regionCombo);
 
         var anatomyBox = new TextBox
         {
@@ -676,8 +653,9 @@ public partial class StudyViewerWindow
             MinWidth = 150,
             MaxWidth = 220,
         };
+        StyleAnatomyTextBox(anatomyBox);
 
-        var saveButton = new Button { Content = "Save labels", MinWidth = 90, Height = 28 };
+        var saveButton = CreateAnatomyActionButton("Save labels", minWidth: 98);
         saveButton.Click += async (_, _) =>
         {
             string regionLabel = regionCombo.SelectedItem as string ?? prior.RegionLabel;
@@ -691,16 +669,11 @@ public partial class StudyViewerWindow
             await UpdateLearnedModelLabelsAsync(prior, regionLabel, anatomyLabel);
         };
 
-        var deleteButton = new Button { Content = "Delete", MinWidth = 70, Height = 28 };
+        var deleteButton = CreateAnatomyActionButton("Delete", "#FF5C2431", "#FFEB7D96", minWidth: 78);
         deleteButton.Click += async (_, _) => await DeleteLearnedModelAsync(prior);
 
-        var relearnButton = new Button
-        {
-            Content = "Learn selected ROI",
-            MinWidth = 126,
-            Height = 28,
-            IsEnabled = selectedRoi is not null,
-        };
+        var relearnButton = CreateAnatomyActionButton("Learn selected ROI", "#FF1C5A3F", "#FF4FD08B", minWidth: 134);
+        relearnButton.IsEnabled = selectedRoi is not null;
         relearnButton.Click += async (_, _) =>
         {
             if (selectedRoi is null)
@@ -747,12 +720,27 @@ public partial class StudyViewerWindow
         };
     }
 
-    private static (Border Section, StackPanel Body) CreateAnatomySectionHost(string title, string subtitle)
+    private static (Border Section, StackPanel Body) CreateAnatomySectionHost(string title, string subtitle, bool isExpanded, Action<bool> expandedChanged)
     {
-        var body = new StackPanel { Spacing = 6 };
-        var host = new StackPanel
+        var body = new StackPanel
         {
-            Spacing = 6,
+            Spacing = 10,
+            Margin = new Thickness(0, 10, 0, 0),
+        };
+
+        var indicatorText = new TextBlock
+        {
+            Text = isExpanded ? "▾" : "▸",
+            Foreground = new SolidColorBrush(Color.Parse("#FF8BB8E8")),
+            FontSize = 12,
+            Width = 18,
+            VerticalAlignment = VerticalAlignment.Top,
+            Margin = new Thickness(0, 2, 0, 0),
+        };
+
+        var headerText = new StackPanel
+        {
+            Spacing = 3,
             Children =
             {
                 new TextBlock
@@ -769,19 +757,48 @@ public partial class StudyViewerWindow
                     FontSize = 10,
                     TextWrapping = TextWrapping.Wrap,
                 },
-                body,
             }
+        };
+
+        var expander = new Expander
+        {
+            IsExpanded = isExpanded,
+            Background = Brushes.Transparent,
+            BorderThickness = new Thickness(0),
+            Header = new Grid
+            {
+                ColumnDefinitions = new ColumnDefinitions("22,*"),
+                ColumnSpacing = 6,
+                Children =
+                {
+                    indicatorText,
+                }
+            },
+            Content = body,
+        };
+        Grid.SetColumn(headerText, 1);
+        ((Grid)expander.Header!).Children.Add(headerText);
+
+        expander.Expanded += (_, _) =>
+        {
+            indicatorText.Text = "▾";
+            expandedChanged(true);
+        };
+        expander.Collapsed += (_, _) =>
+        {
+            indicatorText.Text = "▸";
+            expandedChanged(false);
         };
 
         return (
             new Border
             {
-                Background = new SolidColorBrush(Color.Parse("#181F2630")),
-                BorderBrush = new SolidColorBrush(Color.Parse("#406E8CA3")),
+                Background = new SolidColorBrush(Color.Parse("#1B16212D")),
+                BorderBrush = new SolidColorBrush(Color.Parse("#4C6B8AA5")),
                 BorderThickness = new Thickness(1),
-                CornerRadius = new CornerRadius(10),
-                Padding = new Thickness(10, 8),
-                Child = host,
+                CornerRadius = new CornerRadius(14),
+                Padding = new Thickness(12, 10),
+                Child = expander,
             },
             body);
     }
@@ -790,20 +807,170 @@ public partial class StudyViewerWindow
     {
         var grid = new Grid
         {
-            ColumnDefinitions = new ColumnDefinitions("78,*"),
-            ColumnSpacing = 8,
+            ColumnDefinitions = new ColumnDefinitions("108,*"),
+            ColumnSpacing = 12,
         };
         grid.Children.Add(new TextBlock
         {
             Text = label,
-            VerticalAlignment = VerticalAlignment.Center,
-            Foreground = new SolidColorBrush(Color.Parse("#FFB8CADA")),
+            VerticalAlignment = editor is TextBox { AcceptsReturn: true } ? VerticalAlignment.Top : VerticalAlignment.Center,
+            Margin = editor is TextBox { AcceptsReturn: true } ? new Thickness(0, 8, 0, 0) : default,
+            Foreground = new SolidColorBrush(Color.Parse("#FFD0DFEC")),
             FontSize = 10,
-            FontWeight = FontWeight.Medium,
+            FontWeight = FontWeight.SemiBold,
         });
         Grid.SetColumn(editor, 1);
         grid.Children.Add(editor);
         return grid;
+    }
+
+    private static Border CreateAnatomyEditorCard(string title, string subtitle, params Control[] content)
+    {
+        var body = new StackPanel { Spacing = 8 };
+        foreach (Control child in content)
+        {
+            body.Children.Add(child);
+        }
+
+        return new Border
+        {
+            Background = new SolidColorBrush(Color.Parse("#162B3B4D")),
+            BorderBrush = new SolidColorBrush(Color.Parse("#305E7C94")),
+            BorderThickness = new Thickness(1),
+            CornerRadius = new CornerRadius(12),
+            Padding = new Thickness(12, 10),
+            Child = new StackPanel
+            {
+                Spacing = 6,
+                Children =
+                {
+                    new TextBlock
+                    {
+                        Text = title,
+                        Foreground = new SolidColorBrush(Color.Parse("#FFF4F9FD")),
+                        FontWeight = FontWeight.SemiBold,
+                        FontSize = 11,
+                    },
+                    new TextBlock
+                    {
+                        Text = subtitle,
+                        Foreground = new SolidColorBrush(Color.Parse("#FF97B1C7")),
+                        FontSize = 10,
+                        TextWrapping = TextWrapping.Wrap,
+                    },
+                    body,
+                }
+            }
+        };
+    }
+
+    private static WrapPanel CreateActionRow(params Control[] controls)
+    {
+        var panel = new WrapPanel
+        {
+            ItemSpacing = 10,
+            LineSpacing = 8,
+            Margin = new Thickness(0, 2, 0, 0),
+        };
+
+        foreach (Control control in controls)
+        {
+            panel.Children.Add(control);
+        }
+
+        return panel;
+    }
+
+    private static TextBlock CreateAnatomyNoteText(string text) =>
+        new()
+        {
+            Text = text,
+            Foreground = new SolidColorBrush(Color.Parse("#FF9DB3C7")),
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap,
+        };
+
+    private static TextBlock CreateAnatomyStatusText(string text, bool accent) =>
+        new()
+        {
+            Text = text,
+            Foreground = new SolidColorBrush(Color.Parse(accent ? "#FFC9F7D9" : "#FF9DB3C7")),
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap,
+        };
+
+    private static CheckBox CreateAnatomyInlineCheckBox(string text, bool isChecked, string? toolTip = null)
+    {
+        var checkBox = new CheckBox
+        {
+            Content = text,
+            IsChecked = isChecked,
+            Foreground = new SolidColorBrush(Color.Parse("#FFD7E7F4")),
+            FontSize = 10,
+            VerticalAlignment = VerticalAlignment.Center,
+            Margin = new Thickness(0, 2, 0, 0),
+        };
+
+        if (!string.IsNullOrWhiteSpace(toolTip))
+        {
+            ToolTip.SetTip(checkBox, toolTip);
+        }
+
+        return checkBox;
+    }
+
+    private void ToggleReportDebug(bool enabled)
+    {
+        if (_reportDebugEnabled == enabled)
+        {
+            return;
+        }
+
+        _reportDebugEnabled = enabled;
+
+        if (_reportPanelVisible || _reportPanelPinned)
+        {
+            RefreshReportPanel(forceVisible: _reportPanelPinned);
+        }
+
+        if (_anatomyPanelVisible || _anatomyPanelPinned)
+        {
+            RefreshAnatomyPanel(forceVisible: _anatomyPanelPinned);
+        }
+    }
+
+    private static Button CreateAnatomyActionButton(string content, string backgroundHex = "#FF203749", string borderHex = "#FF5B89B3", double minWidth = 100, double height = 28)
+    {
+        return new Button
+        {
+            Content = content,
+            MinWidth = minWidth,
+            Height = height,
+            Padding = new Thickness(12, 6),
+            Background = new SolidColorBrush(Color.Parse(backgroundHex)),
+            BorderBrush = new SolidColorBrush(Color.Parse(borderHex)),
+            BorderThickness = new Thickness(1),
+            Foreground = new SolidColorBrush(Color.Parse("#FFF5FAFF")),
+        };
+    }
+
+    private void StyleAnatomyComboBox(ComboBox comboBox)
+    {
+        ApplyReportComboBoxStyling(comboBox);
+        comboBox.MinHeight = 34;
+        comboBox.Padding = new Thickness(10, 6);
+        comboBox.Background = new SolidColorBrush(Color.Parse("#FF202C38"));
+        comboBox.BorderBrush = new SolidColorBrush(Color.Parse("#FF5A7994"));
+        comboBox.Foreground = new SolidColorBrush(Color.Parse("#FFF2F6FA"));
+    }
+
+    private static void StyleAnatomyTextBox(TextBox textBox)
+    {
+        textBox.MinHeight = Math.Max(textBox.MinHeight, textBox.AcceptsReturn ? 52 : 34);
+        textBox.Padding = textBox.AcceptsReturn ? new Thickness(10, 8) : new Thickness(10, 6);
+        textBox.Background = new SolidColorBrush(Color.Parse("#FF202C38"));
+        textBox.BorderBrush = new SolidColorBrush(Color.Parse("#FF5A7994"));
+        textBox.Foreground = new SolidColorBrush(Color.Parse("#FFF2F6FA"));
     }
 
     private List<string> GetAllAnatomyRegionOptions()
@@ -1236,8 +1403,18 @@ public partial class StudyViewerWindow
         _activeCraniumKnowledgePack.Structures.Remove(selectedStructure);
         _selectedActivePackStructureId = _activeCraniumKnowledgePack.Structures.FirstOrDefault()?.Id ?? string.Empty;
         await SaveActiveAnatomyPackAsync();
-        RefreshAnatomyPanel(forceVisible: true);
+        RefreshAnatomyProjectionUi(forceVisible: true);
         ShowToast($"Deleted structure {selectedStructure.DisplayName} from the active pack.", ToastSeverity.Success);
+    }
+
+    private void RefreshAnatomyProjectionUi(bool forceVisible = false)
+    {
+        if (_developerAnatomyModelProjectionEnabled)
+        {
+            RefreshMeasurementPanels();
+        }
+
+        RefreshAnatomyPanel(forceVisible);
     }
 
     private async Task ExportLegacyPriorsSnapshotAsync()
@@ -1374,7 +1551,7 @@ public partial class StudyViewerWindow
         if (existingStructure is not null)
         {
             _selectedActivePackStructureId = existingStructure.Id;
-            RefreshAnatomyPanel(forceVisible: true);
+            RefreshAnatomyProjectionUi(forceVisible: true);
             ShowToast($"Structure {existingStructure.DisplayName} already exists in the active pack. Use Merge instead.", ToastSeverity.Warning, TimeSpan.FromSeconds(6));
             return;
         }
@@ -1392,6 +1569,7 @@ public partial class StudyViewerWindow
         _activeCraniumKnowledgePack.Normalize();
         _selectedActivePackStructureId = structure.Id;
         await SaveActiveAnatomyPackAsync();
+        RefreshAnatomyProjectionUi(forceVisible: true);
         ShowToast($"ROI merged into active pack structure {structure.DisplayName}. Shared spatial model updated; {probe.Modality} profile synchronized.", ToastSeverity.Success, TimeSpan.FromSeconds(6));
     }
 
@@ -1428,6 +1606,7 @@ public partial class StudyViewerWindow
         _activeCraniumKnowledgePack.Normalize();
         _selectedActivePackStructureId = selectedStructure.Id;
         await SaveActiveAnatomyPackAsync();
+        RefreshAnatomyProjectionUi(forceVisible: true);
         ShowToast($"ROI merged into selected structure {selectedStructure.DisplayName}. {probe.Modality} profile updated without duplicating the definition.", ToastSeverity.Success, TimeSpan.FromSeconds(6));
     }
 
@@ -1952,6 +2131,12 @@ public partial class StudyViewerWindow
             relations.Add(new AnatomyRelationRule { Type = "inside", Target = "posterior_fossa", Strength = "hard" });
         }
 
+        string? lateralityRelation = InferLateralityRelationType(lowerLabel);
+        if (!string.IsNullOrWhiteSpace(lateralityRelation))
+        {
+            relations.Add(new AnatomyRelationRule { Type = lateralityRelation, Target = "midline", Strength = "hard" });
+        }
+
         return relations;
     }
 
@@ -1997,6 +2182,20 @@ public partial class StudyViewerWindow
         }
 
         return relations;
+    }
+
+    private static string? InferLateralityRelationType(string label)
+    {
+        string[] tokens = label.Split([' ', '\t', '\r', '\n', '-', '_', '/', '\\', '(', ')', '[', ']', '{', '}', ',', ';', '.', ':'], StringSplitOptions.RemoveEmptyEntries);
+        bool hasLeft = tokens.Contains("left", StringComparer.OrdinalIgnoreCase);
+        bool hasRight = tokens.Contains("right", StringComparer.OrdinalIgnoreCase);
+        bool hasBilateral = tokens.Contains("bilateral", StringComparer.OrdinalIgnoreCase) || tokens.Contains("both", StringComparer.OrdinalIgnoreCase);
+        if (hasBilateral || hasLeft == hasRight)
+        {
+            return null;
+        }
+
+        return hasLeft ? "left_of" : "right_of";
     }
 
     private static void MergeRange(AnatomyNumericRange range, double center, double margin)

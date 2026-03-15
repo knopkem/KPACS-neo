@@ -45,7 +45,7 @@ public partial class StudyViewerWindow
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         RefreshMeasurementInsightPanel();
-        RefreshVolumeRoiDraftPanel();
+        ScheduleVolumeRoiDraftPanelRefresh();
         RefreshReportPanel();
         if (_anatomyPanelVisible || _anatomyPanelPinned)
         {
@@ -65,7 +65,7 @@ public partial class StudyViewerWindow
         }
 
         RefreshMeasurementInsightPanel();
-        RefreshVolumeRoiDraftPanel();
+        ScheduleVolumeRoiDraftPanelRefresh();
         RefreshReportPanel();
         if (_anatomyPanelVisible || _anatomyPanelPinned)
         {

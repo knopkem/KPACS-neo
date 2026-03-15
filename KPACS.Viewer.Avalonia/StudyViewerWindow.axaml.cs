@@ -30,6 +30,7 @@ public partial class StudyViewerWindow : Window
     private readonly int _viewerNumber;
     private readonly List<ViewportSlot> _slots = [];
     private readonly Dictionary<string, DicomSpatialMetadata?> _spatialMetadataCache = new(StringComparer.OrdinalIgnoreCase);
+    private readonly Dictionary<string, LegacyProjectionSeriesCache> _legacyProjectionSeriesCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly Dictionary<string, SeriesVolume?> _volumeCache = new(StringComparer.OrdinalIgnoreCase);
     private readonly ObservableCollection<ToastNotificationItem> _toastNotifications = [];
     private readonly CancellationTokenSource _priorLookupCancellation = new();
@@ -104,6 +105,7 @@ public partial class StudyViewerWindow : Window
         _linkedViewSyncDebounceTimer.Tick += OnLinkedViewSyncDebounceTimerTick;
         _volumeRoiDraftPanelRefreshTimer.Interval = TimeSpan.FromMilliseconds(VolumeRoiDraftPanelRefreshDebounceMs);
         _volumeRoiDraftPanelRefreshTimer.Tick += OnVolumeRoiDraftPanelRefreshTimerTick;
+        InitializeVolumeRoiDraftPreviewControls();
         Title = $"K-PACS Viewer {viewerNumber}";
         if (Application.Current is App app)
         {
@@ -515,7 +517,7 @@ public partial class StudyViewerWindow : Window
         SaveViewerSettings();
     }
 
-    private void LoadSlot(ViewportSlot slot, bool refreshThumbnailStrip = true)
+    private void LoadSlot(ViewportSlot slot, bool refreshThumbnailStrip = true, bool preferExactRemoteFocus = false)
     {
         if (slot.Series is null || slot.Series.Instances.Count == 0)
         {
@@ -572,7 +574,7 @@ public partial class StudyViewerWindow : Window
         {
             slot.CurrentSpatialMetadata = null;
             slot.Panel.ClearImage();
-            RequestSlotPriority(slot);
+            RequestSlotPriority(slot, exactFocusOnly: preferExactRemoteFocus);
             if (refreshThumbnailStrip && ReferenceEquals(slot, _activeSlot))
             {
                 RefreshThumbnailStrip(slot.Series);
@@ -776,7 +778,7 @@ public partial class StudyViewerWindow : Window
 
         if (ReferenceEquals(slot, _activeSlot))
         {
-            RefreshVolumeRoiDraftPanel();
+            ScheduleVolumeRoiDraftPanelRefresh();
         }
 
         RefreshLinkedReferenceLines();
@@ -1092,6 +1094,12 @@ public partial class StudyViewerWindow : Window
 
             ReplayPendingLinkedSyncContext();
             RefreshLinkedReferenceLines();
+        }
+
+        if (_developerAnatomyModelProjectionEnabled)
+        {
+            RefreshAnatomyProjectionUi(forceVisible: _anatomyPanelPinned);
+            return;
         }
 
         if (_reportPanelVisible || _reportPanelPinned)
@@ -1786,6 +1794,25 @@ public partial class StudyViewerWindow : Window
         ApplyLinkedViewSync(sourceSlot, sourceSlot?.Volume, sourceMetadata, patientPoint, navigationState, broadcastToPeerViewers: true);
     }
 
+    private void ApplyProjectionToSlot(ViewportSlot slot, SliceProjection projection, bool preferExactRemoteFocus)
+    {
+        if (slot.Series is null || slot.Series.Instances.Count == 0)
+        {
+            return;
+        }
+
+        int targetIndex = Math.Clamp(projection.InstanceIndex, 0, slot.Series.Instances.Count - 1);
+        bool targetIsRemote = slot.Volume is null && !IsLocalInstance(slot.Series.Instances[targetIndex]);
+        bool needsLoad = slot.InstanceIndex != targetIndex || !slot.Panel.IsImageLoaded || targetIsRemote;
+        if (!needsLoad)
+        {
+            return;
+        }
+
+        slot.InstanceIndex = targetIndex;
+        LoadSlot(slot, refreshThumbnailStrip: false, preferExactRemoteFocus: preferExactRemoteFocus);
+    }
+
     private void ApplyLinkedViewSync(
         ViewportSlot? sourceSlot,
         SeriesVolume? sourceVolume,
@@ -1822,11 +1849,7 @@ public partial class StudyViewerWindow : Window
                     continue;
                 }
 
-                if (targetSlot.InstanceIndex != projection.InstanceIndex)
-                {
-                    targetSlot.InstanceIndex = projection.InstanceIndex;
-                    LoadSlot(targetSlot);
-                }
+                ApplyProjectionToSlot(targetSlot, projection, preferExactRemoteFocus: true);
 
                 targetSlot.Panel.ApplyNavigationState(navigationState with { CenterImagePoint = projection.ImagePoint });
                 if (targetSlot.Panel.IsImageLoaded)
@@ -2285,11 +2308,7 @@ public partial class StudyViewerWindow : Window
                     continue;
                 }
 
-                if (slot.InstanceIndex != projection.InstanceIndex)
-                {
-                    slot.InstanceIndex = projection.InstanceIndex;
-                    LoadSlot(slot);
-                }
+                ApplyProjectionToSlot(slot, projection, preferExactRemoteFocus: true);
 
                 slot.CurrentSpatialMetadata = slot.Volume is not null
                     ? slot.Panel.SpatialMetadata
@@ -2358,11 +2377,7 @@ public partial class StudyViewerWindow : Window
                         continue;
                     }
 
-                    if (slot.InstanceIndex != projection.InstanceIndex)
-                    {
-                        slot.InstanceIndex = projection.InstanceIndex;
-                        LoadSlot(slot);
-                    }
+                    ApplyProjectionToSlot(slot, projection, preferExactRemoteFocus: true);
 
                     slot.CurrentSpatialMetadata = slot.Volume is not null
                         ? slot.Panel.SpatialMetadata
@@ -2424,13 +2439,9 @@ public partial class StudyViewerWindow : Window
             return null;
         }
 
-        DicomSpatialMetadata?[] metadataByIndex = new DicomSpatialMetadata?[slot.Series.Instances.Count];
-        for (int index = 0; index < slot.Series.Instances.Count; index++)
-        {
-            metadataByIndex[index] = GetSpatialMetadata(slot.Series.Instances[index]);
-        }
-
-        bool[] scoutCandidates = IdentifyScoutCandidateImages(metadataByIndex);
+        LegacyProjectionSeriesCache cache = GetOrCreateLegacyProjectionSeriesCache(slot.Series);
+        DicomSpatialMetadata?[] metadataByIndex = cache.MetadataByIndex;
+        bool[] scoutCandidates = cache.ScoutCandidates;
         List<(int Index, DicomSpatialMetadata Metadata)> candidates = [];
 
         for (int index = 0; index < metadataByIndex.Length; index++)
@@ -2729,6 +2740,52 @@ public partial class StudyViewerWindow : Window
         return cached;
     }
 
+    private LegacyProjectionSeriesCache GetOrCreateLegacyProjectionSeriesCache(SeriesRecord series)
+    {
+        string seriesUid = series.SeriesInstanceUid ?? string.Empty;
+        if (!_legacyProjectionSeriesCache.TryGetValue(seriesUid, out LegacyProjectionSeriesCache? cache) ||
+            cache.MetadataByIndex.Length != series.Instances.Count)
+        {
+            cache = new LegacyProjectionSeriesCache(new DicomSpatialMetadata?[series.Instances.Count], new bool[series.Instances.Count]);
+            _legacyProjectionSeriesCache[seriesUid] = cache;
+        }
+
+        bool metadataChanged = false;
+        for (int index = 0; index < series.Instances.Count; index++)
+        {
+            InstanceRecord instance = series.Instances[index];
+            string currentFilePath = instance.FilePath ?? string.Empty;
+            if (!string.Equals(cache.FilePathsByIndex[index], currentFilePath, StringComparison.OrdinalIgnoreCase))
+            {
+                cache.FilePathsByIndex[index] = currentFilePath;
+                cache.MetadataByIndex[index] = null;
+                metadataChanged = true;
+            }
+
+            DicomSpatialMetadata? metadata = GetSpatialMetadata(instance);
+            if (!ReferenceEquals(cache.MetadataByIndex[index], metadata))
+            {
+                cache.MetadataByIndex[index] = metadata;
+                metadataChanged = true;
+            }
+        }
+
+        if (metadataChanged)
+        {
+            bool[] scoutCandidates = IdentifyScoutCandidateImages(cache.MetadataByIndex);
+            if (cache.ScoutCandidates.Length != scoutCandidates.Length)
+            {
+                cache.ScoutCandidates = scoutCandidates;
+            }
+            else
+            {
+                Array.Copy(scoutCandidates, cache.ScoutCandidates, scoutCandidates.Length);
+            }
+        }
+
+        return cache;
+    }
+
     private void Clear3DCursor(bool broadcastToPeerViewers = true)
     {
         foreach (ViewportSlot slot in _slots)
@@ -2974,10 +3031,17 @@ public partial class StudyViewerWindow : Window
                 || string.Equals(patientBirthDate, otherPatientBirthDate, StringComparison.Ordinal));
     }
 
-    private void RequestSlotPriority(ViewportSlot? slot, int direction = 0)
+    private void RequestSlotPriority(ViewportSlot? slot, int direction = 0, bool exactFocusOnly = false)
     {
         if (slot?.Series is null || _remoteRetrievalSession is null)
         {
+            return;
+        }
+
+        if (exactFocusOnly)
+        {
+            _ = _remoteRetrievalSession.RequestFocusedImageAsync(slot.Series.SeriesInstanceUid, slot.InstanceIndex, direction);
+            _ = _remoteRetrievalSession.PrioritizeSeriesAsync(slot.Series.SeriesInstanceUid, slot.InstanceIndex, 0, direction);
             return;
         }
 
@@ -3093,6 +3157,7 @@ public partial class StudyViewerWindow : Window
         UnregisterForLinkedViewSync();
         _linkedViewSyncDebounceTimer.Stop();
         _volumeRoiDraftPanelRefreshTimer.Stop();
+        _volumeRoiPreviewAutoRotateTimer.Stop();
         _pendingLinkedSyncSourceSlot = null;
         CancelPriorPreviewLoad();
         _priorLookupCancellation.Cancel();
@@ -3672,6 +3737,7 @@ public partial class StudyViewerWindow : Window
                 _measurementInsightCollapsed = settings.MeasurementInsightCollapsed;
                 _measurementInsightOffset = new Point(settings.MeasurementInsightOffsetX, settings.MeasurementInsightOffsetY);
                 _volumeRoiPreviewPinned = settings.VolumeRoiPreviewPinned;
+                _volumeRoiPreviewAutoRotateEnabled = settings.VolumeRoiPreviewAutoRotateEnabled;
                 _volumeRoiPreviewOffset = new Point(settings.VolumeRoiPreviewOffsetX, settings.VolumeRoiPreviewOffsetY);
                 _reportPanelPinned = false;
                 _reportPanelVisible = false;
@@ -3679,6 +3745,7 @@ public partial class StudyViewerWindow : Window
                 _anatomyPanelPinned = false;
                 _anatomyPanelVisible = false;
                 _anatomyPanelOffset = new Point(settings.AnatomyPanelOffsetX, settings.AnatomyPanelOffsetY);
+                _reportDebugEnabled = settings.ReportDebugEnabled;
                 _customAnatomyRegions.Clear();
                 if (settings.CustomAnatomyRegions is not null)
                 {
@@ -3782,6 +3849,7 @@ public partial class StudyViewerWindow : Window
                 MeasurementInsightOffsetX = _measurementInsightOffset.X,
                 MeasurementInsightOffsetY = _measurementInsightOffset.Y,
                 VolumeRoiPreviewPinned = _volumeRoiPreviewPinned,
+                VolumeRoiPreviewAutoRotateEnabled = _volumeRoiPreviewAutoRotateEnabled,
                 VolumeRoiPreviewOffsetX = _volumeRoiPreviewOffset.X,
                 VolumeRoiPreviewOffsetY = _volumeRoiPreviewOffset.Y,
                 ReportPanelPinned = _reportPanelPinned,
@@ -3792,6 +3860,7 @@ public partial class StudyViewerWindow : Window
                 AnatomyPanelVisible = _anatomyPanelVisible,
                 AnatomyPanelOffsetX = _anatomyPanelOffset.X,
                 AnatomyPanelOffsetY = _anatomyPanelOffset.Y,
+                ReportDebugEnabled = _reportDebugEnabled,
                 CustomAnatomyRegions = [.. _customAnatomyRegions],
                 CustomAnatomyStructuresByRegion = _customAnatomyStructuresByRegion.ToDictionary(
                     pair => pair.Key,
@@ -3996,6 +4065,13 @@ public partial class StudyViewerWindow : Window
         SpatialVector3D PatientPoint,
         DicomViewPanel.NavigationState NavigationState);
 
+    private sealed class LegacyProjectionSeriesCache(DicomSpatialMetadata?[] metadataByIndex, bool[] scoutCandidates)
+    {
+        public DicomSpatialMetadata?[] MetadataByIndex { get; } = metadataByIndex;
+        public string[] FilePathsByIndex { get; } = new string[metadataByIndex.Length];
+        public bool[] ScoutCandidates { get; set; } = scoutCandidates;
+    }
+
     private sealed record ViewportDropTarget(StudyViewerWindow Window, ViewportSlot Slot);
 
     private sealed class PendingThumbnailDrag(SeriesRecord series, Point startPoint, string thumbnailPath)
@@ -4014,6 +4090,7 @@ public partial class StudyViewerWindow : Window
         public double MeasurementInsightOffsetX { get; init; }
         public double MeasurementInsightOffsetY { get; init; }
         public bool VolumeRoiPreviewPinned { get; init; }
+        public bool VolumeRoiPreviewAutoRotateEnabled { get; init; }
         public double VolumeRoiPreviewOffsetX { get; init; }
         public double VolumeRoiPreviewOffsetY { get; init; }
         public bool ReportPanelPinned { get; init; }
@@ -4024,6 +4101,7 @@ public partial class StudyViewerWindow : Window
         public bool AnatomyPanelVisible { get; init; }
         public double AnatomyPanelOffsetX { get; init; }
         public double AnatomyPanelOffsetY { get; init; }
+        public bool ReportDebugEnabled { get; init; }
         public List<string>? CustomAnatomyRegions { get; init; }
         public Dictionary<string, List<string>>? CustomAnatomyStructuresByRegion { get; init; }
         public Dictionary<string, string>? ReportRegionOverrides { get; init; }

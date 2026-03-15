@@ -9,7 +9,10 @@ namespace KPACS.Viewer.Controls;
 
 public partial class DicomViewPanel
 {
-    private const int VolumeRoiPreviewSampleCount = 40;
+    private const int VolumeRoiPreviewHighSampleCount = 32;
+    private const int VolumeRoiPreviewMediumSampleCount = 24;
+    private const int VolumeRoiPreviewLowSampleCount = 18;
+    private const int VolumeRoiPreviewVeryLowSampleCount = 14;
 
     public sealed record VolumeRoiDraftPreview(
         string OrientationLabel,
@@ -564,6 +567,7 @@ public partial class DicomViewPanel
             return [];
         }
 
+        int previewSampleCount = GetAdaptiveVolumeRoiPreviewSampleCount(contours.Length);
         List<VolumeRoiDraftPreviewContour> previewContours = [];
         foreach (IGrouping<int, VolumeRoiDraftContour> componentGroup in contours.GroupBy(contour => contour.ComponentId).OrderBy(group => group.Key))
         {
@@ -572,7 +576,7 @@ public partial class DicomViewPanel
                 .Where(contour => contour.IsClosed && contour.Anchors.Count >= 3)
                 .OrderBy(contour => contour.PlanePosition))
             {
-                SpatialVector3D[] resampled = ResampleClosedContour(contour, VolumeRoiPreviewSampleCount);
+                SpatialVector3D[] resampled = ResampleClosedContour(contour, previewSampleCount);
                 if (resampled.Length < 3)
                 {
                     continue;
@@ -639,6 +643,17 @@ public partial class DicomViewPanel
             .OrderBy(contour => contour.PlanePosition)
             .ThenBy(contour => contour.IsInterpolated)
             .ToList();
+    }
+
+    private static int GetAdaptiveVolumeRoiPreviewSampleCount(int contourCount)
+    {
+        return contourCount switch
+        {
+            >= 72 => VolumeRoiPreviewVeryLowSampleCount,
+            >= 40 => VolumeRoiPreviewLowSampleCount,
+            >= 18 => VolumeRoiPreviewMediumSampleCount,
+            _ => VolumeRoiPreviewHighSampleCount,
+        };
     }
 
     private static SpatialVector3D[] ResampleClosedContour(VolumeRoiDraftContour contour, int sampleCount)
