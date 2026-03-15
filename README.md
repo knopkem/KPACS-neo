@@ -115,11 +115,11 @@ The Avalonia application has moved beyond a single-file viewer and now includes 
 
 #### Study Browser
 
-![K-PACS.neo Avalonia Study Browser](Images/Study%20Browser.png)
+![K-PACS.neo Avalonia Study Browser](Images/K-PACS%20Study%20Browser.png)
 
 #### Viewer / Workflow Detail
 
-![K-PACS.neo Avalonia viewer workflow detail](Images/Screenshot%202026-03-08%20210211.png)
+![K-PACS.neo Avalonia viewer workflow detail](Images/K-PACS%20Viewer%20with%203D%20ROI.png)
 
 ### 🔲 Still To Do
 
