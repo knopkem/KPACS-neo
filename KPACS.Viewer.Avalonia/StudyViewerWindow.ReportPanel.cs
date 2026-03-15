@@ -16,6 +16,8 @@ namespace KPACS.Viewer;
 
 public partial class StudyViewerWindow
 {
+    private readonly Dictionary<string, HeadAxisCorrectionModel> _headAxisCorrectionCache = new(StringComparer.OrdinalIgnoreCase);
+
     private static readonly string[] s_neuroAnatomyOptions =
     [
         "Auto",
@@ -217,6 +219,20 @@ public partial class StudyViewerWindow
 
     private void RefreshReportPanel(bool forceVisible = false)
     {
+        bool requestedVisible = forceVisible || _reportPanelVisible || _reportPanelPinned;
+        StudyViewerWindow reportOwner = GetSharedReportOwnerWindow();
+        if (!ReferenceEquals(reportOwner, this))
+        {
+            _reportPanelVisible = false;
+            _reportPanelPinned = false;
+            HideReportPanel();
+            if (requestedVisible || reportOwner._reportPanelVisible || reportOwner._reportPanelPinned)
+            {
+                reportOwner.ShowSharedReportPanelFromPeer(forceVisible: requestedVisible || reportOwner._reportPanelPinned);
+            }
+            return;
+        }
+
         if (forceVisible)
         {
             _reportPanelVisible = true;
@@ -233,7 +249,7 @@ public partial class StudyViewerWindow
         ReportPanelSummaryText.Text = BuildReportSummary(entries);
         ReportPanelHintText.Text = entries.Count == 0
             ? "Create measurements, annotations, 3D ROIs, or RECIST suggestions to populate the report. Anatomy starts as a heuristic guess and can be reviewed here."
-            : "Click the region label to adjust the detected scan region, then use the anatomy dropdown to confirm or correct the finding assignment."
+            : "Shared report in Viewer 1. Entries can come from the report study or another open study of the same patient."
                 + (_reportPanelPinned ? " Panel is pinned." : string.Empty);
 
         PopulateReportItems(entries);
@@ -261,21 +277,37 @@ public partial class StudyViewerWindow
         }
     }
 
+    private void ShowSharedReportPanelFromPeer(bool forceVisible)
+    {
+        _reportPanelVisible = true;
+        RefreshReportPanel(forceVisible || _reportPanelPinned);
+        Activate();
+    }
+
     private List<ReportEntry> BuildReportEntries()
     {
-        var entries = new List<ReportEntry>(_studyMeasurements.Count * 2);
+        List<ReportMeasurementContext> measurementContexts = BuildReportMeasurementContexts();
+        var entries = new List<ReportEntry>(measurementContexts.Count * 2);
 
-        foreach (StudyMeasurement measurement in _studyMeasurements)
+        foreach (ReportMeasurementContext context in measurementContexts)
         {
-            ViewportSlot? slot = FindSlotForMeasurement(measurement);
-            entries.Add(BuildMeasurementReportEntry(measurement, slot));
+            StudyViewerWindow sourceWindow = context.SourceWindow;
+            StudyMeasurement measurement = context.Measurement;
+            ViewportSlot? slot = context.Slot;
+            bool hasRadiomicsEntry = TryBuildRadiomicsReportEntry(sourceWindow, measurement, slot, out ReportEntry radiomicsEntry);
+            bool suppressBaseMeasurementEntry = hasRadiomicsEntry && IsInsightRelevantMeasurement(measurement);
 
-            if (TryBuildRecistReportEntry(measurement, slot, out ReportEntry recistEntry))
+            if (!suppressBaseMeasurementEntry)
+            {
+                entries.Add(BuildMeasurementReportEntry(sourceWindow, measurement, slot));
+            }
+
+            if (TryBuildRecistReportEntry(sourceWindow, measurement, slot, out ReportEntry recistEntry))
             {
                 entries.Add(recistEntry);
             }
 
-            if (TryBuildRadiomicsReportEntry(measurement, slot, out ReportEntry radiomicsEntry))
+            if (hasRadiomicsEntry)
             {
                 entries.Add(radiomicsEntry);
             }
@@ -283,15 +315,27 @@ public partial class StudyViewerWindow
 
         return entries
             .OrderByDescending(entry => entry.IsSelected)
+            .ThenBy(entry => entry.IsFromReportStudy ? 0 : 1)
             .ThenBy(entry => entry.SortOrder)
             .ThenBy(entry => entry.Title, StringComparer.OrdinalIgnoreCase)
             .ToList();
     }
 
-    private ReportEntry BuildMeasurementReportEntry(StudyMeasurement measurement, ViewportSlot? slot)
+    private List<ReportMeasurementContext> BuildReportMeasurementContexts()
     {
-        RegionGuess region = ResolveMeasurementRegion(measurement, slot);
-        AnatomyGuess anatomy = ResolveMeasurementAnatomy(measurement, slot, region);
+        IEnumerable<StudyViewerWindow> sourceWindows = ReferenceEquals(GetSharedReportOwnerWindow(), this)
+            ? GetSharedReportWindows()
+            : [this];
+
+        return sourceWindows
+            .SelectMany(window => window._studyMeasurements.Select(measurement => new ReportMeasurementContext(window, measurement, window.FindSlotForMeasurement(measurement))))
+            .ToList();
+    }
+
+    private ReportEntry BuildMeasurementReportEntry(StudyViewerWindow sourceWindow, StudyMeasurement measurement, ViewportSlot? slot)
+    {
+        RegionGuess region = sourceWindow.ResolveMeasurementRegion(measurement, slot);
+        AnatomyGuess anatomy = sourceWindow.ResolveMeasurementAnatomy(measurement, slot, region);
         string typeLabel = GetMeasurementTypeLabel(measurement);
         string title = typeLabel;
         if (measurement.Kind == MeasurementKind.Annotation && !string.IsNullOrWhiteSpace(measurement.AnnotationText))
@@ -303,33 +347,35 @@ public partial class StudyViewerWindow
             title = $"{typeLabel} · {measurement.Tracking.Label.Trim()}";
         }
 
-        string details = BuildMeasurementDetails(measurement);
+        string details = sourceWindow.BuildMeasurementDetails(measurement);
         return new ReportEntry(
+            sourceWindow,
             measurement.Id,
             typeLabel,
             title,
-            BuildMeasurementOriginLabel(measurement, slot),
+            BuildMeasurementOriginLabel(sourceWindow, measurement, slot),
             region.Label,
             region.AutoLabel,
             region.IsManual,
             anatomy.DisplayLabel,
             details,
             CombineReportHints(region.Hint, anatomy.Hint),
-            measurement.Id == _selectedMeasurementId,
+            measurement.Id == sourceWindow._selectedMeasurementId,
             GetAccentColor(typeLabel),
             region.IsLearned,
             region.Confidence,
             anatomy.IsLearned,
             anatomy.Confidence,
-            IsRegionEditable: true,
+            IsFromReportStudy: sourceWindow._viewerNumber == 1,
+            IsRegionEditable: false,
             anatomy.IsManual,
-            IsAnatomyEditable: true,
-            AnatomyOptions: BuildAnatomySelectionOptions(measurement, slot),
-            ReviewState: GetReviewStateSelectionValue(measurement.Id),
+            IsAnatomyEditable: false,
+            AnatomyOptions: sourceWindow.BuildAnatomySelectionOptions(measurement, slot),
+            ReviewState: sourceWindow.GetReviewStateSelectionValue(measurement.Id),
             SortOrder: 0);
     }
 
-    private bool TryBuildRecistReportEntry(StudyMeasurement measurement, ViewportSlot? slot, out ReportEntry entry)
+    private bool TryBuildRecistReportEntry(StudyViewerWindow sourceWindow, StudyMeasurement measurement, ViewportSlot? slot, out ReportEntry entry)
     {
         entry = default!;
         MeasurementTrackingMetadata? tracking = measurement.Tracking;
@@ -338,8 +384,8 @@ public partial class StudyViewerWindow
             return false;
         }
 
-        RegionGuess region = ResolveMeasurementRegion(measurement, slot);
-        AnatomyGuess anatomy = ResolveMeasurementAnatomy(measurement, slot, region);
+        RegionGuess region = sourceWindow.ResolveMeasurementRegion(measurement, slot);
+        AnatomyGuess anatomy = sourceWindow.ResolveMeasurementAnatomy(measurement, slot, region);
         string confidence = tracking.Confidence > 0
             ? $"{tracking.Confidence:P0}"
             : "n/a";
@@ -354,32 +400,34 @@ public partial class StudyViewerWindow
             : $"{tracking.ConfidenceSummary.Trim()} · {confidence}{review}{timepoint}";
 
         entry = new ReportEntry(
+            sourceWindow,
             measurement.Id,
             "RECIST",
             string.IsNullOrWhiteSpace(tracking.Label) ? "RECIST follow-up" : $"RECIST · {tracking.Label.Trim()}",
-            BuildTrackingOriginLabel(measurement, slot),
+            BuildTrackingOriginLabel(sourceWindow, measurement, slot),
             region.Label,
             region.AutoLabel,
             region.IsManual,
             anatomy.DisplayLabel,
             detailText,
             CombineReportHints(region.Hint, anatomy.Hint),
-            measurement.Id == _selectedMeasurementId,
+            measurement.Id == sourceWindow._selectedMeasurementId,
             "#FF89CFF0",
             region.IsLearned,
             region.Confidence,
             anatomy.IsLearned,
             anatomy.Confidence,
+            IsFromReportStudy: sourceWindow._viewerNumber == 1,
             IsRegionEditable: false,
             anatomy.IsManual,
             IsAnatomyEditable: false,
             AnatomyOptions: [],
-            ReviewState: GetReviewStateSelectionValue(measurement.Id),
+            ReviewState: sourceWindow.GetReviewStateSelectionValue(measurement.Id),
             SortOrder: 1);
         return true;
     }
 
-    private bool TryBuildRadiomicsReportEntry(StudyMeasurement measurement, ViewportSlot? slot, out ReportEntry entry)
+    private bool TryBuildRadiomicsReportEntry(StudyViewerWindow sourceWindow, StudyMeasurement measurement, ViewportSlot? slot, out ReportEntry entry)
     {
         entry = default!;
         if (!IsInsightRelevantMeasurement(measurement))
@@ -387,15 +435,15 @@ public partial class StudyViewerWindow
             return false;
         }
 
-        if (!TryResolveMeasurementInsightContext(measurement, out ViewportSlot? resolvedSlot, out DicomViewPanel.RoiDistributionDetails distribution))
+        if (!sourceWindow.TryResolveMeasurementInsightContext(measurement, out ViewportSlot? resolvedSlot, out DicomViewPanel.RoiDistributionDetails distribution))
         {
             return false;
         }
 
         slot ??= resolvedSlot;
-        RegionGuess region = ResolveMeasurementRegion(measurement, slot);
-        AnatomyGuess anatomy = ResolveMeasurementAnatomy(measurement, slot, region);
-        string supplement = GetMeasurementTextSupplement(measurement, []) ?? string.Empty;
+        RegionGuess region = sourceWindow.ResolveMeasurementRegion(measurement, slot);
+        AnatomyGuess anatomy = sourceWindow.ResolveMeasurementAnatomy(measurement, slot, region);
+        string supplement = sourceWindow.GetMeasurementTextSupplement(measurement, []) ?? string.Empty;
         string supplementLine = supplement
             .Split([Environment.NewLine], StringSplitOptions.RemoveEmptyEntries)
             .FirstOrDefault() ?? string.Empty;
@@ -406,27 +454,29 @@ public partial class StudyViewerWindow
         }
 
         entry = new ReportEntry(
+            sourceWindow,
             measurement.Id,
             "Radiomics",
             $"Radiomics · {GetMeasurementTypeLabel(measurement)}",
-            BuildMeasurementOriginLabel(measurement, slot),
+            BuildMeasurementOriginLabel(sourceWindow, measurement, slot),
             region.Label,
             region.AutoLabel,
             region.IsManual,
             anatomy.DisplayLabel,
             detailText,
             CombineReportHints(region.Hint, anatomy.Hint),
-            measurement.Id == _selectedMeasurementId,
+            measurement.Id == sourceWindow._selectedMeasurementId,
             "#FFC9A4FF",
             region.IsLearned,
             region.Confidence,
             anatomy.IsLearned,
             anatomy.Confidence,
+            IsFromReportStudy: sourceWindow._viewerNumber == 1,
             IsRegionEditable: false,
             anatomy.IsManual,
             IsAnatomyEditable: false,
             AnatomyOptions: [],
-            ReviewState: GetReviewStateSelectionValue(measurement.Id),
+            ReviewState: sourceWindow.GetReviewStateSelectionValue(measurement.Id),
             SortOrder: 2);
         return true;
     }
@@ -503,7 +553,7 @@ public partial class StudyViewerWindow
                 CreateRegionControl(entry),
                 new TextBlock
                 {
-                    Text = $"Anatomy · {entry.Anatomy}",
+                    Text = $"Assigned anatomy · {entry.Anatomy}",
                     Foreground = new SolidColorBrush(accent),
                     FontSize = 10,
                     FontWeight = FontWeight.Medium,
@@ -519,10 +569,15 @@ public partial class StudyViewerWindow
                     TextWrapping = TextWrapping.Wrap,
                     IsVisible = !string.IsNullOrWhiteSpace(entry.Details),
                 },
-                new TextBlock
+                new TextBox
                 {
                     Text = entry.Hint,
+                    IsReadOnly = true,
+                    AcceptsReturn = true,
                     Foreground = new SolidColorBrush(Color.Parse("#FF94ABC1")),
+                    Background = Brushes.Transparent,
+                    BorderThickness = new Thickness(0),
+                    Padding = new Thickness(0),
                     FontSize = 10,
                     TextWrapping = TextWrapping.Wrap,
                     IsVisible = !string.IsNullOrWhiteSpace(entry.Hint),
@@ -568,12 +623,12 @@ public partial class StudyViewerWindow
 
         if (entry.IsRegionLearned)
         {
-            row.Children.Add(CreateBadge($"Learned region {entry.RegionConfidence:P0}", "#FF73C7FF", bold: false));
+            row.Children.Add(CreateBadge("Suggested region", "#FF73C7FF", bold: false));
         }
 
         if (entry.IsAnatomyLearned)
         {
-            row.Children.Add(CreateBadge($"Learned anatomy {entry.AnatomyConfidence:P0}", "#FF7FDFA2", bold: false));
+            row.Children.Add(CreateBadge("Suggested anatomy", "#FF7FDFA2", bold: false));
         }
 
         if (!string.Equals(entry.ReviewState, "Auto", StringComparison.OrdinalIgnoreCase))
@@ -586,35 +641,6 @@ public partial class StudyViewerWindow
 
     private Control CreateRegionControl(ReportEntry entry)
     {
-        if (!entry.IsRegionEditable || entry.MeasurementId is not Guid measurementId)
-        {
-            return new TextBlock
-            {
-                Text = $"Region · {entry.Region}",
-                Foreground = new SolidColorBrush(Color.Parse("#FF8FC6E8")),
-                FontSize = 10,
-                FontWeight = FontWeight.Medium,
-                TextWrapping = TextWrapping.Wrap,
-            };
-        }
-
-        var button = new Button
-        {
-            Content = $"Region · {entry.Region}",
-            HorizontalAlignment = HorizontalAlignment.Left,
-            MinWidth = 180,
-            MaxWidth = 260,
-            Padding = new Thickness(8, 4),
-            Background = new SolidColorBrush(Color.Parse("#16283848")),
-            BorderBrush = new SolidColorBrush(Color.Parse("#FF4E7A9A")),
-            BorderThickness = new Thickness(1),
-            Foreground = new SolidColorBrush(Color.Parse("#FFD4ECFF")),
-            HorizontalContentAlignment = HorizontalAlignment.Left,
-        };
-
-        button.ContextMenu = CreateRegionContextMenu(measurementId, entry.AutoRegion);
-        button.Click += (_, _) => button.ContextMenu?.Open(button);
-
         return new StackPanel
         {
             Spacing = 3,
@@ -622,12 +648,26 @@ public partial class StudyViewerWindow
             {
                 new TextBlock
                 {
-                    Text = "Region catalog",
+                    Text = "Assigned region",
                     Foreground = new SolidColorBrush(Color.Parse("#FFB8CADA")),
                     FontSize = 9,
                     FontWeight = FontWeight.Medium,
                 },
-                button,
+                new TextBlock
+                {
+                    Text = entry.Region,
+                    Foreground = new SolidColorBrush(Color.Parse("#FF8FC6E8")),
+                    FontSize = 10,
+                    FontWeight = FontWeight.Medium,
+                    TextWrapping = TextWrapping.Wrap,
+                },
+                new TextBlock
+                {
+                    Text = DescribeReportAssignmentSource(entry.IsRegionManual, entry.IsRegionLearned, entry.RegionConfidence, entry.AutoRegion),
+                    Foreground = new SolidColorBrush(Color.Parse("#FF8FA6BA")),
+                    FontSize = 9,
+                    TextWrapping = TextWrapping.Wrap,
+                },
             }
         };
     }
@@ -667,67 +707,17 @@ public partial class StudyViewerWindow
 
     private Control CreateAnatomyEditor(ReportEntry entry)
     {
-        if (!entry.IsAnatomyEditable || entry.MeasurementId is not Guid measurementId)
+        return new TextBlock
         {
-            return new TextBlock { IsVisible = false };
-        }
-
-        var comboBox = new ComboBox
-        {
-            ItemsSource = entry.AnatomyOptions,
-            SelectedItem = GetAnatomySelectionValue(measurementId),
-            MinWidth = 180,
-            MaxWidth = 260,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        ApplyReportComboBoxStyling(comboBox);
-
-        comboBox.SelectionChanged += (_, _) =>
-        {
-            string selectedValue = comboBox.SelectedItem as string ?? "Auto";
-            ApplyManualAnatomySelection(measurementId, selectedValue);
-        };
-
-        return new StackPanel
-        {
-            Spacing = 3,
-            Children =
-            {
-                new TextBlock
-                {
-                    Text = "Anatomy review",
-                    Foreground = new SolidColorBrush(Color.Parse("#FFB8CADA")),
-                    FontSize = 9,
-                    FontWeight = FontWeight.Medium,
-                },
-                comboBox,
-            }
+            Text = DescribeReportAssignmentSource(entry.IsAnatomyManual, entry.IsAnatomyLearned, entry.AnatomyConfidence, null),
+            Foreground = new SolidColorBrush(Color.Parse("#FF8FA6BA")),
+            FontSize = 9,
+            TextWrapping = TextWrapping.Wrap,
         };
     }
 
     private Control CreateReviewStateEditor(ReportEntry entry)
     {
-        if (!entry.IsAnatomyEditable || entry.MeasurementId is not Guid measurementId)
-        {
-            return new TextBlock { IsVisible = false };
-        }
-
-        var comboBox = new ComboBox
-        {
-            ItemsSource = s_reportReviewStateOptions,
-            SelectedItem = GetReviewStateSelectionValue(measurementId),
-            MinWidth = 130,
-            MaxWidth = 180,
-            HorizontalAlignment = HorizontalAlignment.Left,
-        };
-        ApplyReportComboBoxStyling(comboBox);
-
-        comboBox.SelectionChanged += (_, _) =>
-        {
-            string selectedValue = comboBox.SelectedItem as string ?? "Auto";
-            ApplyReviewStateSelection(measurementId, selectedValue);
-        };
-
         return new StackPanel
         {
             Spacing = 3,
@@ -735,12 +725,19 @@ public partial class StudyViewerWindow
             {
                 new TextBlock
                 {
-                    Text = "Review state",
+                    Text = "Review status",
                     Foreground = new SolidColorBrush(Color.Parse("#FFB8CADA")),
                     FontSize = 9,
                     FontWeight = FontWeight.Medium,
                 },
-                comboBox,
+                new TextBlock
+                {
+                    Text = string.Equals(entry.ReviewState, "Auto", StringComparison.OrdinalIgnoreCase) ? "Not reviewed" : entry.ReviewState,
+                    Foreground = new SolidColorBrush(Color.Parse("#FFD3E5F5")),
+                    FontSize = 10,
+                    FontWeight = FontWeight.Medium,
+                    TextWrapping = TextWrapping.Wrap,
+                },
             }
         };
     }
@@ -781,7 +778,8 @@ public partial class StudyViewerWindow
         {
             if (entry.MeasurementId is Guid measurementId)
             {
-                FocusReportMeasurement(measurementId);
+                entry.SourceWindow.FocusReportMeasurement(measurementId);
+                entry.SourceWindow.Activate();
             }
         };
 
@@ -817,20 +815,21 @@ public partial class StudyViewerWindow
 
     private string BuildReportSummary(IReadOnlyList<ReportEntry> entries)
     {
+        List<ReportMeasurementContext> measurementContexts = BuildReportMeasurementContexts();
         int manualCount = entries.Count(entry => entry.SortOrder == 0);
         int recistCount = entries.Count(entry => entry.Category == "RECIST");
         int radiomicsCount = entries.Count(entry => entry.Category == "Radiomics");
-        int annotationCount = _studyMeasurements.Count(measurement => measurement.Kind == MeasurementKind.Annotation);
-        int roiCount = _studyMeasurements.Count(measurement => measurement.Kind is MeasurementKind.RectangleRoi or MeasurementKind.EllipseRoi or MeasurementKind.PolygonRoi or MeasurementKind.VolumeRoi);
+        int annotationCount = measurementContexts.Count(context => context.Measurement.Kind == MeasurementKind.Annotation);
+        int roiCount = measurementContexts.Count(context => context.Measurement.Kind is MeasurementKind.RectangleRoi or MeasurementKind.EllipseRoi or MeasurementKind.PolygonRoi or MeasurementKind.VolumeRoi);
         int reviewedCount = entries.Count(entry => entry.SortOrder == 0 && entry.IsAnatomyManual);
         int confirmedCount = entries.Count(entry => entry.SortOrder == 0 && string.Equals(entry.ReviewState, "Confirmed", StringComparison.OrdinalIgnoreCase));
         int needsReviewCount = entries.Count(entry => entry.SortOrder == 0 && string.Equals(entry.ReviewState, "Needs review", StringComparison.OrdinalIgnoreCase));
         return $"{manualCount} findings · {reviewedCount} reviewed anatomy · {confirmedCount} confirmed · {needsReviewCount} needs review · {annotationCount} annotations · {roiCount} ROIs · {recistCount} RECIST · {radiomicsCount} radiomics";
     }
 
-    private string BuildMeasurementOriginLabel(StudyMeasurement measurement, ViewportSlot? slot)
+    private string BuildMeasurementOriginLabel(StudyViewerWindow sourceWindow, StudyMeasurement measurement, ViewportSlot? slot)
     {
-        string studyLabel = ResolveStudyLabel(slot?.Series);
+        string studyLabel = ResolveReportStudyLabel(sourceWindow, slot?.Series);
         string seriesLabel = slot?.Series is null
             ? "Series unavailable"
             : BuildSeriesLabel(slot.Series);
@@ -838,19 +837,51 @@ public partial class StudyViewerWindow
         string trackingLabel = measurement.Tracking is null || string.IsNullOrWhiteSpace(measurement.Tracking.TimepointLabel)
             ? string.Empty
             : $" · {measurement.Tracking.TimepointLabel.Trim()}";
-        return $"{studyLabel} · {seriesLabel}{trackingLabel}";
+        return $"{studyLabel} · Viewer {sourceWindow._viewerNumber} · {seriesLabel}{trackingLabel}";
     }
 
-    private string BuildTrackingOriginLabel(StudyMeasurement measurement, ViewportSlot? slot)
+    private string BuildTrackingOriginLabel(StudyViewerWindow sourceWindow, StudyMeasurement measurement, ViewportSlot? slot)
     {
         MeasurementTrackingMetadata tracking = measurement.Tracking!;
-        string origin = BuildMeasurementOriginLabel(measurement, slot);
+        string origin = BuildMeasurementOriginLabel(sourceWindow, measurement, slot);
         if (tracking.SourceMeasurementId is Guid sourceMeasurementId)
         {
             origin = $"{origin} · source {sourceMeasurementId.ToString("N")[..8]}";
         }
 
         return origin;
+    }
+
+    private string ResolveReportStudyLabel(StudyViewerWindow sourceWindow, SeriesRecord? series)
+    {
+        if (sourceWindow._viewerNumber == 1)
+        {
+            return "Report study";
+        }
+
+        return "Other study";
+    }
+
+    private StudyViewerWindow GetSharedReportOwnerWindow()
+    {
+        lock (s_openViewerSyncLock)
+        {
+            return s_openViewerWindows
+                .Where(window => string.Equals(window._context.StudyDetails.Study.StudyInstanceUid, _context.StudyDetails.Study.StudyInstanceUid, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(window => window._viewerNumber)
+                .FirstOrDefault() ?? this;
+        }
+    }
+
+    private List<StudyViewerWindow> GetSharedReportWindows()
+    {
+        lock (s_openViewerSyncLock)
+        {
+            return s_openViewerWindows
+                .Where(window => string.Equals(window._context.StudyDetails.Study.StudyInstanceUid, _context.StudyDetails.Study.StudyInstanceUid, StringComparison.OrdinalIgnoreCase))
+                .OrderBy(window => window._viewerNumber)
+                .ToList();
+        }
     }
 
     private string BuildMeasurementDetails(StudyMeasurement measurement)
@@ -915,7 +946,7 @@ public partial class StudyViewerWindow
                 learnedMeasurementMatch.Prior.RegionLabel,
                 learnedMeasurementMatch.Hint,
                 IsLearned: true,
-                Confidence: learnedMeasurementMatch.Score);
+                Confidence: NormalizeDisplayedConfidence(learnedMeasurementMatch.Score));
         }
 
         return estimated;
@@ -938,7 +969,7 @@ public partial class StudyViewerWindow
             string.Equals(region.Label, "Unassigned", StringComparison.OrdinalIgnoreCase) ? null : region.Label,
             out VolumeRoiAnatomyPriorMatch learnedMatch))
         {
-            return new AnatomyGuess(learnedMatch.Prior.AnatomyLabel, learnedMatch.Hint, IsLearned: true, Confidence: learnedMatch.Score);
+            return new AnatomyGuess(learnedMatch.Prior.AnatomyLabel, learnedMatch.Hint, IsLearned: true, Confidence: NormalizeDisplayedConfidence(learnedMatch.Score));
         }
 
         AnatomyGuess estimated = EstimateMeasurementAnatomy(measurement, slot, region);
@@ -1207,17 +1238,7 @@ public partial class StudyViewerWindow
     private IReadOnlyList<string> BuildAnatomySelectionOptions(StudyMeasurement measurement, ViewportSlot? slot)
     {
         RegionGuess region = ResolveMeasurementRegion(measurement, slot);
-        List<string> options = region.Label switch
-        {
-            "Neuro" => [.. s_neuroAnatomyOptions],
-            "Upper thorax" or "Lower thorax" => [.. s_thoraxAnatomyOptions],
-            "Upper abdomen" or "Lower abdomen" => [.. s_abdomenAnatomyOptions],
-            "Pelvis" => [.. s_pelvisAnatomyOptions],
-            "Shoulder" => MergeAnatomyOptions(s_shoulderAnatomyOptions, s_musculoskeletalGenericAnatomyOptions),
-            "Knee" => MergeAnatomyOptions(s_kneeAnatomyOptions, s_musculoskeletalGenericAnatomyOptions),
-            "Ankle" => MergeAnatomyOptions(s_ankleAnatomyOptions, s_musculoskeletalGenericAnatomyOptions),
-            _ => MergeAnatomyOptions(s_thoraxAnatomyOptions, s_abdomenAnatomyOptions, s_pelvisAnatomyOptions, s_musculoskeletalGenericAnatomyOptions),
-        };
+        List<string> options = GetAnatomyStructureOptionsForRegion(region.Label);
 
         if (_reportAnatomyOverrides.TryGetValue(measurement.Id, out string? manualLabel) &&
             !string.IsNullOrWhiteSpace(manualLabel) &&
@@ -1650,6 +1671,11 @@ public partial class StudyViewerWindow
         {
             RefreshReportPanel(forceVisible: _reportPanelPinned);
         }
+
+        if (_anatomyPanelVisible || _anatomyPanelPinned)
+        {
+            RefreshAnatomyPanel(forceVisible: _anatomyPanelPinned);
+        }
     }
 
     private async Task PersistVolumeRoiAnatomyPriorAsync(Guid measurementId, string anatomyLabel)
@@ -1750,7 +1776,7 @@ public partial class StudyViewerWindow
     private bool TryFindLearnedMeasurementPriorMatch(StudyMeasurement measurement, ViewportSlot? slot, string? requiredRegionLabel, out VolumeRoiAnatomyPriorMatch match)
     {
         match = null!;
-        if (!_volumeRoiAnatomyPriorsLoaded || _volumeRoiAnatomyPriors.Count == 0)
+        if (!_useLegacyAnatomyPriors || !_volumeRoiAnatomyPriorsLoaded || _volumeRoiAnatomyPriors.Count == 0)
         {
             return false;
         }
@@ -1762,6 +1788,9 @@ public partial class StudyViewerWindow
 
         bool compareShape = measurement.Kind == MeasurementKind.VolumeRoi;
         VolumeRoiAnatomyPriorMatch? bestMatch = null;
+        MatchCandidateDebugInfo? bestAcceptedCandidate = null;
+        MatchCandidateDebugInfo? runnerUpCandidate = null;
+        MatchCandidateDebugInfo? bestRejectedCandidate = null;
         foreach (VolumeRoiAnatomyPriorRecord prior in _volumeRoiAnatomyPriors)
         {
             if (!string.IsNullOrWhiteSpace(requiredRegionLabel) &&
@@ -1770,16 +1799,35 @@ public partial class StudyViewerWindow
                 continue;
             }
 
-            double score = ScoreAnatomyPriorMatch(probe, prior, compareShape);
+            double baseScore = ScoreAnatomyPriorMatch(probe, prior, compareShape);
+            KnowledgePackPriorAssessment knowledgeAssessment = AssessKnowledgePackPriorMatch(probe, prior);
+            if (knowledgeAssessment.Rejected)
+            {
+                MatchCandidateDebugInfo rejectedCandidate = new(prior, baseScore, baseScore, knowledgeAssessment);
+                if (bestRejectedCandidate is null || rejectedCandidate.BaseScore > bestRejectedCandidate.BaseScore)
+                {
+                    bestRejectedCandidate = rejectedCandidate;
+                }
+                continue;
+            }
+
+            double score = baseScore + knowledgeAssessment.ScoreAdjustment;
             if (score < (compareShape ? 0.55 : 0.50))
             {
                 continue;
             }
 
-            string hint = $"Learned from stored 3D anatomy definition ({prior.AnatomyLabel}, {prior.RegionLabel}, match {score:P0}).";
+            MatchCandidateDebugInfo candidate = new(prior, baseScore, score, knowledgeAssessment);
+
             if (bestMatch is null || score > bestMatch.Score)
             {
-                bestMatch = new VolumeRoiAnatomyPriorMatch(prior, score, hint);
+                runnerUpCandidate = bestAcceptedCandidate;
+                bestAcceptedCandidate = candidate;
+                bestMatch = new VolumeRoiAnatomyPriorMatch(prior, score, string.Empty);
+            }
+            else if (runnerUpCandidate is null || score > runnerUpCandidate.FinalScore)
+            {
+                runnerUpCandidate = candidate;
             }
         }
 
@@ -1788,7 +1836,17 @@ public partial class StudyViewerWindow
             return false;
         }
 
-        match = bestMatch;
+        string hint = BuildPackConfidenceHint(bestMatch.Score);
+        if (bestAcceptedCandidate is not null)
+        {
+            string debugHint = BuildMatchDebugExplanation(bestAcceptedCandidate, runnerUpCandidate, bestRejectedCandidate, probe);
+            if (!string.IsNullOrWhiteSpace(debugHint))
+            {
+                hint = string.Concat(hint, Environment.NewLine, debugHint);
+            }
+        }
+
+        match = bestMatch with { Hint = hint };
         return true;
     }
 
@@ -1864,7 +1922,8 @@ public partial class StudyViewerWindow
     {
         probe = null!;
 
-        SpatialBounds? bounds = GetSpatialBounds(slot?.Volume);
+        SeriesVolume? volume = slot?.Volume;
+        SpatialBounds? bounds = GetSpatialBounds(volume);
         SpatialVector3D[] points = measurement.Anchors
             .Where(anchor => anchor.PatientPoint is not null)
             .Select(anchor => anchor.PatientPoint!.Value)
@@ -1883,6 +1942,7 @@ public partial class StudyViewerWindow
         double maxY = points.Max(point => point.Y);
         double minZ = points.Min(point => point.Z);
         double maxZ = points.Max(point => point.Z);
+        ProbeAxisCorrection? axisCorrection = TryBuildProbeAxisCorrection(volume, center);
 
         probe = new VolumeRoiPriorProbe(
             slot?.Series?.Modality?.Trim() ?? string.Empty,
@@ -1900,7 +1960,8 @@ public partial class StudyViewerWindow
                 : 0,
             TryBuildMeasurementStructureSignature(measurement, slot?.Volume, out AnatomyStructureSignature? structureSignature)
                 ? structureSignature
-                : null);
+                : null,
+            axisCorrection);
         return true;
     }
 
@@ -1977,6 +2038,578 @@ public partial class StudyViewerWindow
 
         score += Math.Min(0.08, Math.Max(0, (prior.UseCount - 1) * 0.01));
         return score;
+    }
+
+    private KnowledgePackPriorAssessment AssessKnowledgePackPriorMatch(VolumeRoiPriorProbe probe, VolumeRoiAnatomyPriorRecord prior)
+    {
+        AnatomyKnowledgePack? pack = _activeCraniumKnowledgePack;
+        if (pack is null || !string.Equals(prior.RegionLabel, "Neuro", StringComparison.OrdinalIgnoreCase))
+        {
+            return KnowledgePackPriorAssessment.Neutral;
+        }
+
+        AnatomyStructureDefinition? structure = ResolveKnowledgePackStructureForPrior(pack, prior.AnatomyLabel);
+        if (structure is null)
+        {
+            return KnowledgePackPriorAssessment.Neutral;
+        }
+
+        ProbeKnowledgeFeatures features = BuildProbeKnowledgeFeatures(probe);
+        string? rejectedReason = EvaluateKnowledgePackHardRules(structure, features);
+        if (!string.IsNullOrWhiteSpace(rejectedReason))
+        {
+            string debugSummary = BuildKnowledgeDebugSummary(structure, features, 0, 0, 0, rejectedReason);
+            return new KnowledgePackPriorAssessment(true, 0, $"Knowledge pack rejected candidate: {rejectedReason}.", debugSummary, rejectedReason, 0, 0, 0);
+        }
+
+        double positionFit = ComputeStructurePositionFit(structure, features);
+        double materialFit = ComputeStructureMaterialFit(probe, structure, features);
+        double relationFit = ComputeStructureRelationFit(structure, features);
+        double scoreAdjustment = (positionFit * 0.18) + (materialFit * 0.14) + (relationFit * 0.12);
+
+        if (scoreAdjustment <= 0.001)
+        {
+            string debugSummary = BuildKnowledgeDebugSummary(structure, features, positionFit, materialFit, relationFit, null);
+            return new KnowledgePackPriorAssessment(false, 0, string.Empty, debugSummary, null, positionFit, materialFit, relationFit);
+        }
+
+        string hint = $"Pack confidence: {DescribeMatchStrength(scoreAdjustment)} · {pack.DisplayName}.";
+        string summary = BuildKnowledgeDebugSummary(structure, features, positionFit, materialFit, relationFit, null);
+        return new KnowledgePackPriorAssessment(false, scoreAdjustment, hint, summary, null, positionFit, materialFit, relationFit);
+    }
+
+    private string BuildMatchDebugExplanation(MatchCandidateDebugInfo winner, MatchCandidateDebugInfo? runnerUp, MatchCandidateDebugInfo? rejectedCandidate, VolumeRoiPriorProbe probe)
+    {
+        List<string> parts = [];
+
+        parts.Add($"Debug: winner {winner.Prior.AnatomyLabel} (score {winner.FinalScore:0.00}). {winner.Assessment.DebugSummary}");
+
+        if (runnerUp is not null)
+        {
+            parts.Add($"Next candidate {runnerUp.Prior.AnatomyLabel} (score {runnerUp.FinalScore:0.00}). {runnerUp.Assessment.DebugSummary}");
+        }
+
+        if (rejectedCandidate is not null)
+        {
+            parts.Add($"Rejected candidate {rejectedCandidate.Prior.AnatomyLabel}. {rejectedCandidate.Assessment.DebugSummary}");
+        }
+
+        parts.Add($"Probe: {BuildProbeDebugSummary(probe)}");
+        return string.Join(Environment.NewLine, parts);
+    }
+
+    private static string BuildProbeDebugSummary(VolumeRoiPriorProbe probe)
+    {
+        ProbeKnowledgeFeatures features = BuildProbeKnowledgeFeatures(probe);
+        string axisSummary = probe.AxisCorrection is null
+            ? "axis=raw"
+            : $"axis=auto(rot={probe.AxisCorrection.Value.RotationDegrees:0.0}°, shiftX={probe.AxisCorrection.Value.CenterlineShiftX:0.00}, shiftY={probe.AxisCorrection.Value.CenterlineShiftY:0.00})";
+        return $"lr={features.SignedLeftRight:0.00}, ap={features.SignedAnteriorPosterior:0.00}, midline={features.DistanceToMidline:0.00}, skull_base={features.DistanceToSkullBase:0.00}, vertex={features.DistanceToVertex:0.00}, posterior_fossa={(features.LikelyPosteriorFossa ? "yes" : "no")}, {axisSummary}";
+    }
+
+    private static string BuildKnowledgeDebugSummary(AnatomyStructureDefinition structure, ProbeKnowledgeFeatures features, double positionFit, double materialFit, double relationFit, string? rejectedReason)
+    {
+        string structureName = string.IsNullOrWhiteSpace(structure.DisplayName) ? structure.Id : structure.DisplayName;
+        string core = $"{structureName}: posterior_fossa={(features.LikelyPosteriorFossa ? "yes" : "no")}, ap={features.SignedAnteriorPosterior:0.00}, midline={features.DistanceToMidline:0.00}, skull_base={features.DistanceToSkullBase:0.00}, lr={features.SignedLeftRight:0.00}, position={DescribeFitBand(positionFit)}, relations={DescribeFitBand(relationFit)}, material={DescribeFitBand(Math.Max(0, materialFit))}";
+        return string.IsNullOrWhiteSpace(rejectedReason)
+            ? core
+            : $"{core}, rejected={rejectedReason}";
+    }
+
+    private static string DescribeFitBand(double value)
+    {
+        if (value >= 0.85)
+        {
+            return "strong";
+        }
+
+        if (value >= 0.6)
+        {
+            return "moderate";
+        }
+
+        if (value > 0.2)
+        {
+            return "weak";
+        }
+
+        return "low";
+    }
+
+    private string BuildPackConfidenceHint(double score)
+    {
+        string? packName = _activeCraniumKnowledgePack?.DisplayName;
+        if (string.IsNullOrWhiteSpace(packName))
+        {
+            return $"Pack confidence: {DescribeMatchStrength(score)}.";
+        }
+
+        return $"Pack confidence: {DescribeMatchStrength(score)} · {packName}.";
+    }
+
+    private static string DescribeReportAssignmentSource(bool isManual, bool isLearned, double confidence, string? autoLabel)
+    {
+        if (isManual)
+        {
+            return "Assignment source: manual.";
+        }
+
+        if (isLearned)
+        {
+            return $"Assignment source: suggested ({DescribeMatchStrength(confidence)} confidence).";
+        }
+
+        if (!string.IsNullOrWhiteSpace(autoLabel))
+        {
+            return $"Assignment source: automatic estimate ({autoLabel}).";
+        }
+
+        return "Assignment source: automatic estimate.";
+    }
+
+    private static double NormalizeDisplayedConfidence(double score) => Math.Clamp(score, 0.0, 0.99);
+
+    private static string DescribeMatchStrength(double score)
+    {
+        double normalized = NormalizeDisplayedConfidence(score);
+        if (normalized >= 0.9)
+        {
+            return "very strong";
+        }
+
+        if (normalized >= 0.75)
+        {
+            return "strong";
+        }
+
+        if (normalized >= 0.6)
+        {
+            return "moderate";
+        }
+
+        return "tentative";
+    }
+
+    private static AnatomyStructureDefinition? ResolveKnowledgePackStructure(AnatomyKnowledgePack pack, string anatomyLabel)
+    {
+        if (string.IsNullOrWhiteSpace(anatomyLabel))
+        {
+            return null;
+        }
+
+        string normalized = anatomyLabel.Trim();
+        return pack.Structures.FirstOrDefault(structure =>
+            string.Equals(structure.Id, normalized, StringComparison.OrdinalIgnoreCase) ||
+            string.Equals(structure.DisplayName, normalized, StringComparison.OrdinalIgnoreCase));
+    }
+
+    private static AnatomyStructureDefinition? ResolveKnowledgePackStructureForPrior(AnatomyKnowledgePack pack, string anatomyLabel)
+    {
+        AnatomyStructureDefinition? structure = ResolveKnowledgePackStructure(pack, anatomyLabel);
+        if (structure is not null)
+        {
+            return structure;
+        }
+
+        return BuildHeuristicNeuroStructure(anatomyLabel);
+    }
+
+    private static AnatomyStructureDefinition? BuildHeuristicNeuroStructure(string anatomyLabel)
+    {
+        if (string.IsNullOrWhiteSpace(anatomyLabel))
+        {
+            return null;
+        }
+
+        string normalized = anatomyLabel.Trim();
+        string identity = normalized.ToLowerInvariant();
+        if (!identity.Contains("pons")
+            && !identity.Contains("brainstem")
+            && !identity.Contains("vermis")
+            && !identity.Contains("cerebell")
+            && !identity.Contains("ventricle")
+            && !identity.Contains("thalam")
+            && !identity.Contains("caudate")
+            && !identity.Contains("lenticular")
+            && !identity.Contains("putamen")
+            && !identity.Contains("pallidus"))
+        {
+            return null;
+        }
+
+        return new AnatomyStructureDefinition
+        {
+            Id = normalized.Replace(' ', '_'),
+            DisplayName = normalized,
+        };
+    }
+
+    private static ProbeKnowledgeFeatures BuildProbeKnowledgeFeatures(VolumeRoiPriorProbe probe)
+    {
+        double signedLeftRight = probe.AxisCorrection?.SignedLeftRight ?? (1.0 - (probe.NormalizedCenterX * 2.0));
+        double signedAnteriorPosterior = probe.AxisCorrection?.SignedAnteriorPosterior ?? (1.0 - (probe.NormalizedCenterY * 2.0));
+        double cranialCaudal = probe.NormalizedCenterZ;
+        double distanceToMidline = probe.AxisCorrection?.DistanceToMidline ?? Math.Abs(signedLeftRight);
+        double distanceToSkullBase = cranialCaudal;
+        double distanceToVertex = 1.0 - cranialCaudal;
+        bool likelyCsf = IsLikelyCsfLike(probe);
+        bool likelyPosteriorFossa = cranialCaudal <= 0.45 && signedAnteriorPosterior <= -0.08 && !likelyCsf;
+        bool likelyVentricularCsf = cranialCaudal >= 0.40 && likelyCsf;
+
+        return new ProbeKnowledgeFeatures(
+            signedLeftRight,
+            signedAnteriorPosterior,
+            cranialCaudal,
+            distanceToMidline,
+            distanceToSkullBase,
+            distanceToVertex,
+            likelyCsf,
+            likelyPosteriorFossa,
+            likelyVentricularCsf);
+    }
+
+    private static string? EvaluateKnowledgePackHardRules(AnatomyStructureDefinition structure, ProbeKnowledgeFeatures features)
+    {
+        List<string> effectiveCompartments = GetEffectiveAllowedCompartments(structure);
+        if (effectiveCompartments.Count > 0)
+        {
+            bool requiresSpecificCompartment = effectiveCompartments.Any(compartment =>
+                !string.Equals(compartment, "intracranial_space", StringComparison.OrdinalIgnoreCase));
+
+            bool compartmentAllowed = effectiveCompartments.Any(compartment =>
+                string.Equals(compartment, "ventricular_csf", StringComparison.OrdinalIgnoreCase) && features.LikelyVentricularCsf ||
+                string.Equals(compartment, "posterior_fossa", StringComparison.OrdinalIgnoreCase) && features.LikelyPosteriorFossa ||
+                !requiresSpecificCompartment && string.Equals(compartment, "intracranial_space", StringComparison.OrdinalIgnoreCase));
+
+            if (!compartmentAllowed)
+            {
+                return "compartment mismatch";
+            }
+        }
+
+        foreach (AnatomyRelationRule relation in GetEffectiveRequiredRelations(structure))
+        {
+            if (!IsRequiredRelationSatisfied(relation, features))
+            {
+                return $"missing required relation '{relation.Type} {relation.Target}'";
+            }
+        }
+
+        foreach (AnatomyRelationRule relation in GetEffectiveForbiddenRelations(structure))
+        {
+            if (IsForbiddenRelationViolated(relation, features))
+            {
+                return $"violated forbidden relation '{relation.Type} {relation.Target}'";
+            }
+        }
+
+        return null;
+    }
+
+    private static double ComputeStructurePositionFit(AnatomyStructureDefinition structure, ProbeKnowledgeFeatures features)
+    {
+        AnatomyExpectedPosition expected = structure.ExpectedPosition;
+        double fit = 0;
+        int count = 0;
+
+        fit += ComputeRangeFit(expected.LeftRight, features.SignedLeftRight);
+        count++;
+        fit += ComputeRangeFit(expected.AnteriorPosterior, features.SignedAnteriorPosterior);
+        count++;
+        fit += ComputeRangeFit(expected.CranialCaudal, features.CranialCaudal);
+        count++;
+        fit += ComputeRangeFit(expected.DistanceToMidline, features.DistanceToMidline);
+        count++;
+        fit += ComputeRangeFit(expected.DistanceToSkullBase, features.DistanceToSkullBase);
+        count++;
+        fit += ComputeRangeFit(expected.DistanceToVertex, features.DistanceToVertex);
+        count++;
+
+        return count == 0 ? 0 : fit / count;
+    }
+
+    private static double ComputeStructureMaterialFit(VolumeRoiPriorProbe probe, AnatomyStructureDefinition structure, ProbeKnowledgeFeatures features)
+    {
+        if (structure.ExpectedMaterial.CtClass.Count == 0)
+        {
+            return 0;
+        }
+
+        if (!string.Equals(probe.Modality, "CT", StringComparison.OrdinalIgnoreCase))
+        {
+            return 0;
+        }
+
+        bool expectsCsf = structure.ExpectedMaterial.CtClass.Any(value => string.Equals(value, "CSF", StringComparison.OrdinalIgnoreCase));
+        bool expectsParenchyma = structure.ExpectedMaterial.CtClass.Any(value => string.Equals(value, "BrainParenchyma", StringComparison.OrdinalIgnoreCase));
+        if (expectsCsf)
+        {
+            return features.LikelyCsf ? 1 : -0.5;
+        }
+
+        if (expectsParenchyma)
+        {
+            return features.LikelyCsf ? -0.75 : 0.8;
+        }
+
+        return 0;
+    }
+
+    private static double ComputeStructureRelationFit(AnatomyStructureDefinition structure, ProbeKnowledgeFeatures features)
+    {
+        double fit = 0;
+        int count = 0;
+
+        foreach (AnatomyRelationRule relation in GetEffectiveRequiredRelations(structure))
+        {
+            fit += IsRequiredRelationSatisfied(relation, features) ? 1 : 0;
+            count++;
+        }
+
+        foreach (AnatomyRelationRule relation in GetEffectiveForbiddenRelations(structure))
+        {
+            fit += IsForbiddenRelationViolated(relation, features) ? 0 : 1;
+            count++;
+        }
+
+        return count == 0 ? 0 : fit / count;
+    }
+
+    private static bool IsRequiredRelationSatisfied(AnatomyRelationRule relation, ProbeKnowledgeFeatures features)
+    {
+        return relation.Type.ToLowerInvariant() switch
+        {
+            "left_of" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.SignedLeftRight <= -0.05,
+            "right_of" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.SignedLeftRight >= 0.05,
+            "near" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.DistanceToMidline <= 0.14,
+            "far_from" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.DistanceToMidline >= 0.14,
+            "cranial_to" when string.Equals(relation.Target, "brainstem", StringComparison.OrdinalIgnoreCase) => features.CranialCaudal >= 0.45,
+            "inside" when string.Equals(relation.Target, "posterior_fossa", StringComparison.OrdinalIgnoreCase) => features.LikelyPosteriorFossa,
+            "near" when string.Equals(relation.Target, "skull_base_plane", StringComparison.OrdinalIgnoreCase) => features.DistanceToSkullBase <= 0.18,
+            "away_from" when string.Equals(relation.Target, "skull_base_plane", StringComparison.OrdinalIgnoreCase) => features.DistanceToSkullBase >= 0.14,
+            _ => true,
+        };
+    }
+
+    private static bool IsForbiddenRelationViolated(AnatomyRelationRule relation, ProbeKnowledgeFeatures features)
+    {
+        return relation.Type.ToLowerInvariant() switch
+        {
+            "inside" when string.Equals(relation.Target, "posterior_fossa", StringComparison.OrdinalIgnoreCase) => features.LikelyPosteriorFossa,
+            "touches" when string.Equals(relation.Target, "skull_base_plane", StringComparison.OrdinalIgnoreCase) => features.DistanceToSkullBase <= 0.12,
+            "inside" when string.Equals(relation.Target, "ventricular_csf", StringComparison.OrdinalIgnoreCase) => features.LikelyVentricularCsf,
+            "near" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.DistanceToMidline <= 0.14,
+            "far_from" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.DistanceToMidline >= 0.14,
+            "away_from" when string.Equals(relation.Target, "skull_base_plane", StringComparison.OrdinalIgnoreCase) => features.DistanceToSkullBase >= 0.14,
+            "left_of" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.SignedLeftRight <= -0.05,
+            "right_of" when string.Equals(relation.Target, "midline", StringComparison.OrdinalIgnoreCase) => features.SignedLeftRight >= 0.05,
+            _ => false,
+        };
+    }
+
+    private static List<string> GetEffectiveAllowedCompartments(AnatomyStructureDefinition structure)
+    {
+        List<string> compartments = structure.AllowedCompartments
+            .Where(value => !string.IsNullOrWhiteSpace(value))
+            .Select(value => value.Trim())
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .ToList();
+
+        string identity = GetStructureIdentityText(structure);
+        if (identity.Contains("ventricle"))
+        {
+            MergeCompartment(compartments, "ventricular_csf");
+        }
+
+        if (identity.Contains("pons") || identity.Contains("brainstem") || identity.Contains("cerebell") || identity.Contains("vermis"))
+        {
+            MergeCompartment(compartments, "posterior_fossa");
+        }
+
+        if (compartments.Count == 0)
+        {
+            compartments.Add("intracranial_space");
+        }
+
+        return compartments;
+    }
+
+    private static IReadOnlyList<AnatomyRelationRule> GetEffectiveRequiredRelations(AnatomyStructureDefinition structure)
+    {
+        List<AnatomyRelationRule> relations = CloneRelations(structure.RequiredRelations);
+        string identity = GetStructureIdentityText(structure);
+
+        if (identity.Contains("pons") || identity.Contains("brainstem"))
+        {
+            AddRelation(relations, "inside", "posterior_fossa", "hard");
+            AddRelation(relations, "near", "skull_base_plane", "hard");
+            AddRelation(relations, "near", "midline", "hard");
+        }
+        else if (identity.Contains("vermis"))
+        {
+            AddRelation(relations, "inside", "posterior_fossa", "hard");
+            AddRelation(relations, "near", "midline", "hard");
+            AddRelation(relations, "away_from", "skull_base_plane", "soft");
+        }
+        else if (identity.Contains("thalam") || identity.Contains("caudate"))
+        {
+            AddRelation(relations, "cranial_to", "brainstem", "hard");
+            AddRelation(relations, "away_from", "skull_base_plane", "soft");
+
+            if (identity.Contains("left"))
+            {
+                AddRelation(relations, "left_of", "midline", "hard");
+            }
+            else if (identity.Contains("right"))
+            {
+                AddRelation(relations, "right_of", "midline", "hard");
+            }
+        }
+        else if (identity.Contains("lenticular") || identity.Contains("putamen") || identity.Contains("pallidus"))
+        {
+            AddRelation(relations, "far_from", "midline", "hard");
+
+            if (identity.Contains("left"))
+            {
+                AddRelation(relations, "left_of", "midline", "hard");
+            }
+            else if (identity.Contains("right"))
+            {
+                AddRelation(relations, "right_of", "midline", "hard");
+            }
+        }
+        else if (identity.Contains("left") && identity.Contains("cerebell"))
+        {
+            AddRelation(relations, "inside", "posterior_fossa", "hard");
+            AddRelation(relations, "left_of", "midline", "hard");
+            AddRelation(relations, "far_from", "midline", "hard");
+        }
+        else if (identity.Contains("right") && identity.Contains("cerebell"))
+        {
+            AddRelation(relations, "inside", "posterior_fossa", "hard");
+            AddRelation(relations, "right_of", "midline", "hard");
+            AddRelation(relations, "far_from", "midline", "hard");
+        }
+        else if (identity.Contains("cerebell"))
+        {
+            AddRelation(relations, "inside", "posterior_fossa", "hard");
+        }
+
+        return relations;
+    }
+
+    private static IReadOnlyList<AnatomyRelationRule> GetEffectiveForbiddenRelations(AnatomyStructureDefinition structure)
+    {
+        List<AnatomyRelationRule> relations = CloneRelations(structure.ForbiddenRelations);
+        string identity = GetStructureIdentityText(structure);
+
+        if (identity.Contains("pons") || identity.Contains("brainstem"))
+        {
+            AddRelation(relations, "far_from", "midline", "hard");
+        }
+        else if (identity.Contains("vermis"))
+        {
+            AddRelation(relations, "left_of", "midline", "hard");
+            AddRelation(relations, "right_of", "midline", "hard");
+            AddRelation(relations, "near", "skull_base_plane", "soft");
+        }
+        else if (identity.Contains("thalam") || identity.Contains("caudate"))
+        {
+            AddRelation(relations, "inside", "posterior_fossa", "hard");
+            AddRelation(relations, "touches", "skull_base_plane", "hard");
+
+            if ((identity.Contains("left") || identity.Contains("right")) && !identity.Contains("ventricle"))
+            {
+                AddRelation(relations, "near", "midline", "soft");
+            }
+        }
+        else if (identity.Contains("lenticular") || identity.Contains("putamen") || identity.Contains("pallidus"))
+        {
+            AddRelation(relations, "inside", "posterior_fossa", "hard");
+            AddRelation(relations, "touches", "skull_base_plane", "hard");
+            AddRelation(relations, "near", "midline", "hard");
+        }
+        else if ((identity.Contains("left") || identity.Contains("right")) && identity.Contains("cerebell"))
+        {
+            AddRelation(relations, "near", "midline", "hard");
+            AddRelation(relations, "near", "skull_base_plane", "soft");
+        }
+
+        return relations;
+    }
+
+    private static List<AnatomyRelationRule> CloneRelations(IEnumerable<AnatomyRelationRule> relations)
+    {
+        return relations
+            .Where(relation => relation is not null)
+            .Select(relation => new AnatomyRelationRule
+            {
+                Type = relation.Type,
+                Target = relation.Target,
+                Strength = relation.Strength,
+            })
+            .ToList();
+    }
+
+    private static void AddRelation(List<AnatomyRelationRule> relations, string type, string target, string strength)
+    {
+        bool exists = relations.Any(existing =>
+            string.Equals(existing.Type, type, StringComparison.OrdinalIgnoreCase)
+            && string.Equals(existing.Target, target, StringComparison.OrdinalIgnoreCase));
+        if (!exists)
+        {
+            relations.Add(new AnatomyRelationRule { Type = type, Target = target, Strength = strength });
+        }
+    }
+
+    private static void MergeCompartment(List<string> compartments, string compartment)
+    {
+        if (!compartments.Contains(compartment, StringComparer.OrdinalIgnoreCase))
+        {
+            compartments.Add(compartment);
+        }
+    }
+
+    private static string GetStructureIdentityText(AnatomyStructureDefinition structure)
+    {
+        return $"{structure.Id} {structure.DisplayName}".Trim().ToLowerInvariant();
+    }
+
+    private static double ComputeRangeFit(AnatomyNumericRange range, double value)
+    {
+        if (range.Min is null && range.Max is null)
+        {
+            return 0;
+        }
+
+        if (range.Min is not null && value < range.Min.Value)
+        {
+            return Math.Max(0, 1.0 - ((range.Min.Value - value) * 4.0));
+        }
+
+        if (range.Max is not null && value > range.Max.Value)
+        {
+            return Math.Max(0, 1.0 - ((value - range.Max.Value) * 4.0));
+        }
+
+        return 1.0;
+    }
+
+    private static bool IsLikelyCsfLike(VolumeRoiPriorProbe probe)
+    {
+        double intensityMedian = probe.StructureSignature?.IntensityMedian ?? double.NaN;
+        double intensitySpread = probe.StructureSignature?.IntensitySpread ?? double.NaN;
+        if (double.IsNaN(intensityMedian))
+        {
+            return false;
+        }
+
+        if (string.Equals(probe.Modality, "CT", StringComparison.OrdinalIgnoreCase))
+        {
+            return intensityMedian >= -15 && intensityMedian <= 24 && (double.IsNaN(intensitySpread) || intensitySpread <= 24);
+        }
+
+        return false;
     }
 
     private double ScoreSeriesRegionPrior(string modality, string bodyPart, string context, VolumeRoiAnatomyPriorRecord prior)
@@ -2101,6 +2734,241 @@ public partial class StudyViewerWindow
             corners.Max(point => point.Y),
             corners.Min(point => point.Z),
             corners.Max(point => point.Z));
+    }
+
+    private ProbeAxisCorrection? TryBuildProbeAxisCorrection(SeriesVolume? volume, SpatialVector3D patientCenter)
+    {
+        if (volume is null)
+        {
+            return null;
+        }
+
+        HeadAxisCorrectionModel model = GetOrCreateHeadAxisCorrectionModel(volume);
+        if (!model.IsReliable)
+        {
+            return null;
+        }
+
+        (double voxelX, double voxelY, double voxelZ) = volume.PatientToVoxel(new SpatialVector3D(patientCenter.X, patientCenter.Y, patientCenter.Z));
+        double expectedCenterX = model.CenterlineInterceptX + (model.CenterlineSlopeX * voxelZ);
+        double expectedCenterY = model.CenterlineInterceptY + (model.CenterlineSlopeY * voxelZ);
+        double offsetX = voxelX - expectedCenterX;
+        double offsetY = voxelY - expectedCenterY;
+
+        double lrProjection = (offsetX * model.LrAxisX) + (offsetY * model.LrAxisY);
+        double apProjection = (offsetX * model.ApAxisX) + (offsetY * model.ApAxisY);
+
+        double signedLeftRight = Math.Clamp((lrProjection / model.LrHalfExtent) * model.LrSign, -1.0, 1.0);
+        double signedAnteriorPosterior = Math.Clamp((apProjection / model.ApHalfExtent) * model.ApSign, -1.0, 1.0);
+        double centerlineShiftX = expectedCenterX - ((volume.SizeX - 1) * 0.5);
+        double centerlineShiftY = expectedCenterY - ((volume.SizeY - 1) * 0.5);
+
+        return new ProbeAxisCorrection(
+            signedLeftRight,
+            signedAnteriorPosterior,
+            Math.Abs(signedLeftRight),
+            model.RotationDegrees,
+            Math.Clamp(centerlineShiftX / Math.Max(1.0, volume.SizeX * 0.5), -1.0, 1.0),
+            Math.Clamp(centerlineShiftY / Math.Max(1.0, volume.SizeY * 0.5), -1.0, 1.0));
+    }
+
+    private HeadAxisCorrectionModel GetOrCreateHeadAxisCorrectionModel(SeriesVolume volume)
+    {
+        if (!string.IsNullOrWhiteSpace(volume.SeriesInstanceUid) &&
+            _headAxisCorrectionCache.TryGetValue(volume.SeriesInstanceUid, out HeadAxisCorrectionModel? cached))
+        {
+            return cached;
+        }
+
+        HeadAxisCorrectionModel model = BuildHeadAxisCorrectionModel(volume);
+        if (!string.IsNullOrWhiteSpace(volume.SeriesInstanceUid))
+        {
+            _headAxisCorrectionCache[volume.SeriesInstanceUid] = model;
+        }
+
+        return model;
+    }
+
+    private static HeadAxisCorrectionModel BuildHeadAxisCorrectionModel(SeriesVolume volume)
+    {
+        int width = volume.SizeX;
+        int height = volume.SizeY;
+        int depth = volume.SizeZ;
+        if (width < 16 || height < 16 || depth < 4)
+        {
+            return HeadAxisCorrectionModel.Unreliable;
+        }
+
+        int stepX = Math.Max(1, width / 96);
+        int stepY = Math.Max(1, height / 96);
+        int stepZ = Math.Max(1, depth / 48);
+        int sampledPixelsPerSlice = Math.Max(1, ((width + stepX - 1) / stepX) * ((height + stepY - 1) / stepY));
+        double threshold = volume.MinValue + ((volume.MaxValue - volume.MinValue) * 0.12);
+
+        List<HeadSliceSample> samples = [];
+        double aggregatedCovXX = 0;
+        double aggregatedCovYY = 0;
+        double aggregatedCovXY = 0;
+        double totalWeight = 0;
+
+        for (int sliceIndex = 0; sliceIndex < depth; sliceIndex += stepZ)
+        {
+            long tissueCount = 0;
+            double sumX = 0;
+            double sumY = 0;
+            double sumXX = 0;
+            double sumYY = 0;
+            double sumXY = 0;
+
+            for (int y = 0; y < height; y += stepY)
+            {
+                for (int x = 0; x < width; x += stepX)
+                {
+                    if (volume.GetVoxel(x, y, sliceIndex) <= threshold)
+                    {
+                        continue;
+                    }
+
+                    tissueCount++;
+                    sumX += x;
+                    sumY += y;
+                    sumXX += x * x;
+                    sumYY += y * y;
+                    sumXY += x * y;
+                }
+            }
+
+            if (tissueCount < 12)
+            {
+                continue;
+            }
+
+            double occupancy = tissueCount / (double)sampledPixelsPerSlice;
+            if (occupancy < 0.06)
+            {
+                continue;
+            }
+
+            double centerX = sumX / tissueCount;
+            double centerY = sumY / tissueCount;
+            double covXX = Math.Max(0, (sumXX / tissueCount) - (centerX * centerX));
+            double covYY = Math.Max(0, (sumYY / tissueCount) - (centerY * centerY));
+            double covXY = (sumXY / tissueCount) - (centerX * centerY);
+            double weight = tissueCount;
+
+            samples.Add(new HeadSliceSample(sliceIndex, centerX, centerY, weight));
+            aggregatedCovXX += covXX * weight;
+            aggregatedCovYY += covYY * weight;
+            aggregatedCovXY += covXY * weight;
+            totalWeight += weight;
+        }
+
+        if (samples.Count < 4 || totalWeight <= 0)
+        {
+            return HeadAxisCorrectionModel.Unreliable;
+        }
+
+        double meanCovXX = aggregatedCovXX / totalWeight;
+        double meanCovYY = aggregatedCovYY / totalWeight;
+        double meanCovXY = aggregatedCovXY / totalWeight;
+        double orientation = 0.5 * Math.Atan2(2.0 * meanCovXY, meanCovXX - meanCovYY);
+
+        double majorAxisX = Math.Cos(orientation);
+        double majorAxisY = Math.Sin(orientation);
+        double minorAxisX = -majorAxisY;
+        double minorAxisY = majorAxisX;
+
+        double lrPatientX = (volume.RowDirection.X * minorAxisX * volume.SpacingX) + (volume.ColumnDirection.X * minorAxisY * volume.SpacingY);
+        double apPatientY = (volume.RowDirection.Y * majorAxisX * volume.SpacingX) + (volume.ColumnDirection.Y * majorAxisY * volume.SpacingY);
+        double lrSign = lrPatientX >= 0 ? -1.0 : 1.0;
+        double apSign = apPatientY >= 0 ? -1.0 : 1.0;
+
+        (double slopeX, double interceptX) = ComputeWeightedLinearFit(samples, sample => sample.SliceZ, sample => sample.CenterX, sample => sample.Weight);
+        (double slopeY, double interceptY) = ComputeWeightedLinearFit(samples, sample => sample.SliceZ, sample => sample.CenterY, sample => sample.Weight);
+
+        double maxAbsMinor = 0;
+        double maxAbsMajor = 0;
+        foreach (HeadSliceSample sample in samples)
+        {
+            for (int y = 0; y < height; y += stepY)
+            {
+                for (int x = 0; x < width; x += stepX)
+                {
+                    if (volume.GetVoxel(x, y, sample.SliceZ) <= threshold)
+                    {
+                        continue;
+                    }
+
+                    double dx = x - sample.CenterX;
+                    double dy = y - sample.CenterY;
+                    double minorProjection = (dx * minorAxisX) + (dy * minorAxisY);
+                    double majorProjection = (dx * majorAxisX) + (dy * majorAxisY);
+                    maxAbsMinor = Math.Max(maxAbsMinor, Math.Abs(minorProjection));
+                    maxAbsMajor = Math.Max(maxAbsMajor, Math.Abs(majorProjection));
+                }
+            }
+        }
+
+        double lrHalfExtent = Math.Max(6.0, maxAbsMinor);
+        double apHalfExtent = Math.Max(6.0, maxAbsMajor);
+        double rotationDegrees = orientation * (180.0 / Math.PI);
+        bool reliable = lrHalfExtent >= 8.0 && apHalfExtent >= 8.0;
+
+        return new HeadAxisCorrectionModel(
+            slopeX,
+            interceptX,
+            slopeY,
+            interceptY,
+            minorAxisX,
+            minorAxisY,
+            majorAxisX,
+            majorAxisY,
+            lrHalfExtent,
+            apHalfExtent,
+            lrSign,
+            apSign,
+            rotationDegrees,
+            reliable);
+    }
+
+    private static (double Slope, double Intercept) ComputeWeightedLinearFit(
+        IReadOnlyList<HeadSliceSample> samples,
+        Func<HeadSliceSample, double> xSelector,
+        Func<HeadSliceSample, double> ySelector,
+        Func<HeadSliceSample, double> weightSelector)
+    {
+        double sumW = 0;
+        double sumX = 0;
+        double sumY = 0;
+        double sumXX = 0;
+        double sumXY = 0;
+
+        foreach (HeadSliceSample sample in samples)
+        {
+            double weight = Math.Max(1.0, weightSelector(sample));
+            double x = xSelector(sample);
+            double y = ySelector(sample);
+            sumW += weight;
+            sumX += weight * x;
+            sumY += weight * y;
+            sumXX += weight * x * x;
+            sumXY += weight * x * y;
+        }
+
+        if (sumW <= 0)
+        {
+            return (0, 0);
+        }
+
+        double denominator = (sumW * sumXX) - (sumX * sumX);
+        if (Math.Abs(denominator) <= 1e-6)
+        {
+            return (0, sumY / sumW);
+        }
+
+        double slope = ((sumW * sumXY) - (sumX * sumY)) / denominator;
+        double intercept = (sumY - (slope * sumX)) / sumW;
+        return (slope, intercept);
     }
 
     private void OnReportPanelPinClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -2309,6 +3177,7 @@ public partial class StudyViewerWindow
     }
 
     private sealed record ReportEntry(
+        StudyViewerWindow SourceWindow,
         Guid? MeasurementId,
         string Category,
         string Title,
@@ -2325,12 +3194,18 @@ public partial class StudyViewerWindow
         double RegionConfidence,
         bool IsAnatomyLearned,
         double AnatomyConfidence,
+        bool IsFromReportStudy,
         bool IsRegionEditable,
         bool IsAnatomyManual,
         bool IsAnatomyEditable,
         IReadOnlyList<string> AnatomyOptions,
         string ReviewState,
         int SortOrder);
+
+    private sealed record ReportMeasurementContext(
+        StudyViewerWindow SourceWindow,
+        StudyMeasurement Measurement,
+        ViewportSlot? Slot);
 
     private sealed record VolumeRoiPriorProbe(
         string Modality,
@@ -2344,9 +3219,87 @@ public partial class StudyViewerWindow
         double NormalizedSizeY,
         double NormalizedSizeZ,
         double EstimatedVolumeCubicMillimeters,
-        AnatomyStructureSignature? StructureSignature)
+        AnatomyStructureSignature? StructureSignature,
+        ProbeAxisCorrection? AxisCorrection)
     {
         public string ContextText => $"{StudyDescription} {SeriesDescription} {BodyPartExamined}".Trim();
+    }
+
+    private sealed record KnowledgePackPriorAssessment(
+        bool Rejected,
+        double ScoreAdjustment,
+        string Hint,
+        string DebugSummary,
+        string? RejectionReason,
+        double PositionFit,
+        double MaterialFit,
+        double RelationFit)
+    {
+        public static KnowledgePackPriorAssessment Neutral { get; } = new(false, 0, string.Empty, string.Empty, null, 0, 0, 0);
+    }
+
+    private sealed record MatchCandidateDebugInfo(
+        VolumeRoiAnatomyPriorRecord Prior,
+        double BaseScore,
+        double FinalScore,
+        KnowledgePackPriorAssessment Assessment);
+
+    private readonly record struct ProbeKnowledgeFeatures(
+        double SignedLeftRight,
+        double SignedAnteriorPosterior,
+        double CranialCaudal,
+        double DistanceToMidline,
+        double DistanceToSkullBase,
+        double DistanceToVertex,
+        bool LikelyCsf,
+        bool LikelyPosteriorFossa,
+        bool LikelyVentricularCsf);
+
+    private readonly record struct ProbeAxisCorrection(
+        double SignedLeftRight,
+        double SignedAnteriorPosterior,
+        double DistanceToMidline,
+        double RotationDegrees,
+        double CenterlineShiftX,
+        double CenterlineShiftY);
+
+    private readonly record struct HeadSliceSample(
+        int SliceZ,
+        double CenterX,
+        double CenterY,
+        double Weight);
+
+    private sealed record HeadAxisCorrectionModel(
+        double CenterlineSlopeX,
+        double CenterlineInterceptX,
+        double CenterlineSlopeY,
+        double CenterlineInterceptY,
+        double LrAxisX,
+        double LrAxisY,
+        double ApAxisX,
+        double ApAxisY,
+        double LrHalfExtent,
+        double ApHalfExtent,
+        double LrSign,
+        double ApSign,
+        double RotationDegrees,
+        bool IsReliable)
+    {
+        public static HeadAxisCorrectionModel Unreliable { get; } = new(
+            0,
+            0,
+            0,
+            0,
+            1,
+            0,
+            0,
+            1,
+            1,
+            1,
+            1,
+            1,
+            0,
+            false);
     }
 
     private sealed record RegionGuess(

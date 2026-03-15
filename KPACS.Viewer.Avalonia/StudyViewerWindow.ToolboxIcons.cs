@@ -17,6 +17,7 @@ public partial class StudyViewerWindow
         ConfigureIconButton(TopBarStudyBrowserButton, CreateStudyBrowserIcon(), "Bring the Study Browser to the front.");
         ConfigureIconButton(StudyBrowserButton, CreateStudyBrowserIcon(), "Bring the Study Browser to the front.");
         ConfigureLabeledIconButton(WorkspaceLayoutButton, CreateLayoutIcon(2, 2), "Layout", "Viewer layout presets and custom layouts.");
+        ConfigureLabeledIconButton(WorkspaceAnatomyButton, CreateAnatomyWorkspaceIcon(), "Anatomy", "Open the anatomy workspace to manage structures and assign selected 3D ROIs.");
         ToolTip.SetTip(WorkspaceReportButton, "Open the floating report panel with created findings, provenance, and anatomy hints.");
         ConfigureIconButton(ToolboxNavigateButton, CreateNavigateIcon(), "Navigate: left drag zoom/pan, wheel scroll, middle drag fast stack, right drag window/level.");
         ConfigureIconButton(ToolboxPixelLensButton, CreatePixelLensIcon(), "Pixel lens.");
@@ -37,6 +38,7 @@ public partial class StudyViewerWindow
         ConfigureIconButton(MeasurementInsightCollapseButton, CreateChevronDownIcon(), "Collapse or expand the ROI histogram section.");
         ConfigureIconButton(VolumeRoiDraftPinButton, CreatePinPanelIcon(), "Pin the 3D ROI model panel and retain the last preview.");
         ConfigureIconButton(ReportPanelPinButton, CreatePinPanelIcon(), "Pin the report panel and keep it open for the current workspace.");
+        ConfigureIconButton(AnatomyPanelPinButton, CreatePinPanelIcon(), "Pin the anatomy panel and keep it open for the current workspace.");
     }
 
     private static void ConfigureIconButton(ContentControl button, Control icon, string toolTip)
@@ -121,6 +123,12 @@ public partial class StudyViewerWindow
         LineShape(14, 6, 14, 10, 1.5),
         LineShape(17, 10, 17, 14, 1.5),
         LineShape(8, 13, 8, 17, 1.5));
+
+    private static Control CreateAnatomyWorkspaceIcon() => CreateIconHost(
+        OutlineEllipse(4.5, 4.5, 15, 15),
+        StrokePath("M12 6 L12 18"),
+        StrokePath("M6 12 L18 12"),
+        OutlineEllipse(10.2, 10.2, 3.6, 3.6));
 
     private static Control CreateBallRoiIcon() => CreateIconHost(
         OutlinePath("M7 8 L16 7 L18 12 L13 17 L7.5 15.5 Z"),

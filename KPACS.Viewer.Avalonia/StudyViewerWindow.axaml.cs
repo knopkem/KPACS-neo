@@ -38,9 +38,15 @@ public partial class StudyViewerWindow : Window
     private readonly DispatcherTimer _volumeRoiDraftPanelRefreshTimer = new();
     private readonly DispatcherTimer _viewportLayoutResetTimer = new();
     private readonly DispatcherTimer _workspaceDockHideTimer = new();
+    private readonly AnatomyKnowledgePackService _anatomyKnowledgePackService = new();
     private CancellationTokenSource? _adjacentPriorityDebounceCancellation;
     private readonly string? _viewerSettingsPath;
+    private readonly string? _anatomyKnowledgePackDirectory;
+    private readonly string? _defaultCraniumKnowledgePackPath;
+    private string? _activeCraniumKnowledgePackPath;
     private IReadOnlyList<PriorStudySummary> _priorStudies = [];
+    private readonly List<AnatomyKnowledgePack> _anatomyKnowledgePacks = [];
+    private AnatomyKnowledgePack? _activeCraniumKnowledgePack;
     private PriorStudySummary? _selectedPriorStudy;
     private StudyDetails? _thumbnailStripStudy;
     private CancellationTokenSource? _priorPreviewCancellation;
@@ -102,6 +108,8 @@ public partial class StudyViewerWindow : Window
         if (Application.Current is App app)
         {
             _viewerSettingsPath = Path.Combine(app.Paths.ApplicationDirectory, "study-viewer-settings.json");
+            _anatomyKnowledgePackDirectory = Path.Combine(app.Paths.ApplicationDirectory, "anatomy-packs");
+            _defaultCraniumKnowledgePackPath = Path.Combine(_anatomyKnowledgePackDirectory, "cranium-base.sample.json");
             app.WindowPlacementService.Register(this, placementKey);
         }
         RegisterForLinkedViewSync();
@@ -947,6 +955,7 @@ public partial class StudyViewerWindow : Window
         Opened -= OnViewerOpened;
         try
         {
+            await LoadAnatomyKnowledgePacksAsync();
             await LoadPriorStudiesAsync();
             await LoadVolumeRoiAnatomyPriorsAsync();
         }
@@ -959,6 +968,54 @@ public partial class StudyViewerWindow : Window
         if (_isShowingCurrentStudy)
         {
             _ = LoadVolumesForSlotsAsync();
+        }
+    }
+
+    private async Task LoadAnatomyKnowledgePacksAsync()
+    {
+        _anatomyKnowledgePacks.Clear();
+        _activeCraniumKnowledgePack = null;
+        _activeCraniumKnowledgePackPath = null;
+
+        if (string.IsNullOrWhiteSpace(_anatomyKnowledgePackDirectory) || string.IsNullOrWhiteSpace(_defaultCraniumKnowledgePackPath))
+        {
+            return;
+        }
+
+        Directory.CreateDirectory(_anatomyKnowledgePackDirectory);
+
+        if (!File.Exists(_defaultCraniumKnowledgePackPath))
+        {
+            AnatomyKnowledgePack defaultPack = _anatomyKnowledgePackService.CreateDefaultCraniumBasePack();
+            await _anatomyKnowledgePackService.SaveToFileAsync(defaultPack, _defaultCraniumKnowledgePackPath);
+        }
+
+        foreach (string filePath in Directory.EnumerateFiles(_anatomyKnowledgePackDirectory, "*.json", SearchOption.TopDirectoryOnly))
+        {
+            if (_anatomyKnowledgePackService.TryLoadFromFile(filePath, out AnatomyKnowledgePack? pack, out _)
+                && pack is not null)
+            {
+                _anatomyKnowledgePacks.Add(pack);
+                if (_activeCraniumKnowledgePackPath is null && string.Equals(pack.Module, "Cranium", StringComparison.OrdinalIgnoreCase))
+                {
+                    _activeCraniumKnowledgePackPath = filePath;
+                }
+            }
+        }
+
+        _activeCraniumKnowledgePack = _anatomyKnowledgePacks
+            .FirstOrDefault(static pack => string.Equals(pack.Module, "Cranium", StringComparison.OrdinalIgnoreCase));
+
+        if (_activeCraniumKnowledgePack is null)
+        {
+            _activeCraniumKnowledgePack = _anatomyKnowledgePackService.CreateDefaultCraniumBasePack();
+            _anatomyKnowledgePacks.Add(_activeCraniumKnowledgePack);
+            _activeCraniumKnowledgePackPath = _defaultCraniumKnowledgePackPath;
+        }
+
+        if (_activeCraniumKnowledgePackPath is null)
+        {
+            _activeCraniumKnowledgePackPath = _defaultCraniumKnowledgePackPath;
         }
     }
 
@@ -2367,16 +2424,39 @@ public partial class StudyViewerWindow : Window
             return null;
         }
 
-        SliceProjection? best = null;
-
+        DicomSpatialMetadata?[] metadataByIndex = new DicomSpatialMetadata?[slot.Series.Instances.Count];
         for (int index = 0; index < slot.Series.Instances.Count; index++)
         {
-            DicomSpatialMetadata? metadata = GetSpatialMetadata(slot.Series.Instances[index]);
-            if (metadata is null || (!allowUnrelatedMetadata && !metadata.IsCompatibleWith(sourceMetadata)))
+            metadataByIndex[index] = GetSpatialMetadata(slot.Series.Instances[index]);
+        }
+
+        bool[] scoutCandidates = IdentifyScoutCandidateImages(metadataByIndex);
+        List<(int Index, DicomSpatialMetadata Metadata)> candidates = [];
+
+        for (int index = 0; index < metadataByIndex.Length; index++)
+        {
+            DicomSpatialMetadata? metadata = metadataByIndex[index];
+            if (metadata is null || !IsProjectionCompatible(sourceMetadata, metadata, allowUnrelatedMetadata))
             {
                 continue;
             }
 
+            candidates.Add((index, metadata));
+        }
+
+        if (candidates.Count == 0)
+        {
+            return null;
+        }
+
+        IEnumerable<(int Index, DicomSpatialMetadata Metadata)> projectionCandidates = candidates.Any(candidate => !scoutCandidates[candidate.Index])
+            ? candidates.Where(candidate => !scoutCandidates[candidate.Index])
+            : candidates;
+
+        SliceProjection? best = null;
+
+        foreach ((int index, DicomSpatialMetadata metadata) in projectionCandidates)
+        {
             Point imagePoint = metadata.PixelPointFromPatient(patientPoint);
             double distance = metadata.DistanceToPlane(patientPoint);
             bool containsPoint = metadata.ContainsImagePoint(imagePoint, tolerance: 1.0);
@@ -2401,7 +2481,7 @@ public partial class StudyViewerWindow : Window
 
         int sliceIndex = GetVolumeSliceIndexForPatientPoint(slot.Volume, slot.Panel.VolumeOrientation, patientPoint);
         DicomSpatialMetadata metadata = VolumeReslicer.GetSliceSpatialMetadata(slot.Volume, slot.Panel.VolumeOrientation, sliceIndex);
-        if (!allowUnrelatedMetadata && !metadata.IsCompatibleWith(sourceMetadata))
+        if (!IsProjectionCompatible(sourceMetadata, metadata, allowUnrelatedMetadata))
         {
             return null;
         }
@@ -2434,7 +2514,7 @@ public partial class StudyViewerWindow : Window
         ViewportSlot targetSlot,
         DicomSpatialMetadata targetMetadata)
     {
-        if (sourceMetadata.IsCompatibleWith(targetMetadata))
+        if (HasSharedFrameOfReference(sourceMetadata, targetMetadata))
         {
             return sourceMetadata;
         }
@@ -2451,6 +2531,85 @@ public partial class StudyViewerWindow : Window
             FrameOfReferenceUid = targetMetadata.FrameOfReferenceUid,
             AcquisitionNumber = targetMetadata.AcquisitionNumber,
         };
+    }
+
+    private static bool IsProjectionCompatible(DicomSpatialMetadata sourceMetadata, DicomSpatialMetadata targetMetadata, bool allowUnrelatedMetadata)
+    {
+        if (allowUnrelatedMetadata)
+        {
+            return true;
+        }
+
+        return HasSharedFrameOfReference(sourceMetadata, targetMetadata);
+    }
+
+    private static bool HasSharedFrameOfReference(DicomSpatialMetadata first, DicomSpatialMetadata second)
+    {
+        if (string.IsNullOrWhiteSpace(first.FrameOfReferenceUid) || string.IsNullOrWhiteSpace(second.FrameOfReferenceUid))
+        {
+            return false;
+        }
+
+        return string.Equals(first.FrameOfReferenceUid, second.FrameOfReferenceUid, StringComparison.Ordinal);
+    }
+
+    private static bool[] IdentifyScoutCandidateImages(IReadOnlyList<DicomSpatialMetadata?> metadataByIndex)
+    {
+        bool[] scoutCandidates = new bool[metadataByIndex.Count];
+        if (metadataByIndex.Count < 2)
+        {
+            return scoutCandidates;
+        }
+
+        MarkLeadingScoutCandidate(metadataByIndex, scoutCandidates, 0, 1);
+        if (metadataByIndex.Count > 2)
+        {
+            MarkLeadingScoutCandidate(metadataByIndex, scoutCandidates, 1, 2);
+            MarkTrailingScoutCandidate(metadataByIndex, scoutCandidates, metadataByIndex.Count - 2, metadataByIndex.Count - 3);
+        }
+
+        MarkTrailingScoutCandidate(metadataByIndex, scoutCandidates, metadataByIndex.Count - 1, metadataByIndex.Count - 2);
+        return scoutCandidates;
+    }
+
+    private static void MarkLeadingScoutCandidate(IReadOnlyList<DicomSpatialMetadata?> metadataByIndex, bool[] scoutCandidates, int candidateIndex, int neighborIndex)
+    {
+        if ((uint)candidateIndex >= scoutCandidates.Length || (uint)neighborIndex >= metadataByIndex.Count)
+        {
+            return;
+        }
+
+        DicomSpatialMetadata? candidate = metadataByIndex[candidateIndex];
+        DicomSpatialMetadata? neighbor = metadataByIndex[neighborIndex];
+        if (candidate is null || neighbor is null)
+        {
+            return;
+        }
+
+        if (!ArePlanesParallel(candidate, neighbor))
+        {
+            scoutCandidates[candidateIndex] = true;
+        }
+    }
+
+    private static void MarkTrailingScoutCandidate(IReadOnlyList<DicomSpatialMetadata?> metadataByIndex, bool[] scoutCandidates, int candidateIndex, int neighborIndex)
+    {
+        if ((uint)candidateIndex >= scoutCandidates.Length || (uint)neighborIndex >= metadataByIndex.Count)
+        {
+            return;
+        }
+
+        DicomSpatialMetadata? candidate = metadataByIndex[candidateIndex];
+        DicomSpatialMetadata? neighbor = metadataByIndex[neighborIndex];
+        if (candidate is null || neighbor is null)
+        {
+            return;
+        }
+
+        if (!ArePlanesParallel(candidate, neighbor))
+        {
+            scoutCandidates[candidateIndex] = true;
+        }
     }
 
     private static bool ArePlanesParallel(DicomSpatialMetadata first, DicomSpatialMetadata second) =>
@@ -2770,7 +2929,7 @@ public partial class StudyViewerWindow : Window
         int count = _slots.Count(slot =>
             slot.Series is not null
             && slot.CurrentSpatialMetadata is not null
-            && (slot.CurrentSpatialMetadata.IsCompatibleWith(sourceMetadata)
+            && (HasSharedFrameOfReference(slot.CurrentSpatialMetadata, sourceMetadata)
                 || (sourceSlot.Volume is not null && slot.Volume is not null && VolumeRegistrationService.TryGetRegistration(sourceSlot.Volume, slot.Volume, out _))));
 
         lock (s_openViewerSyncLock)
@@ -2782,7 +2941,7 @@ public partial class StudyViewerWindow : Window
                 .Sum(window => window._slots.Count(slot =>
                     slot.Series is not null
                     && slot.CurrentSpatialMetadata is not null
-                    && (slot.CurrentSpatialMetadata.IsCompatibleWith(sourceMetadata)
+                    && (HasSharedFrameOfReference(slot.CurrentSpatialMetadata, sourceMetadata)
                         || (sourceSlot.Volume is not null && slot.Volume is not null && VolumeRegistrationService.TryGetRegistration(sourceSlot.Volume, slot.Volume, out _)))));
         }
 
@@ -3457,6 +3616,24 @@ public partial class StudyViewerWindow : Window
         }
     }
 
+    private void OnWorkspaceAnatomyClick(object? sender, RoutedEventArgs e)
+    {
+        CloseViewportToolbox();
+        ShowWorkspaceDock(restartHideTimer: false);
+        _workspaceDockHideTimer.Stop();
+        _anatomyPanelVisible = !_anatomyPanelVisible;
+        if (_anatomyPanelVisible)
+        {
+            RefreshAnatomyPanel(forceVisible: true);
+        }
+        else
+        {
+            HideAnatomyPanel();
+        }
+
+        SaveViewerSettings();
+    }
+
     private void OnWorkspaceReportClick(object? sender, RoutedEventArgs e)
     {
         CloseViewportToolbox();
@@ -3496,9 +3673,44 @@ public partial class StudyViewerWindow : Window
                 _measurementInsightOffset = new Point(settings.MeasurementInsightOffsetX, settings.MeasurementInsightOffsetY);
                 _volumeRoiPreviewPinned = settings.VolumeRoiPreviewPinned;
                 _volumeRoiPreviewOffset = new Point(settings.VolumeRoiPreviewOffsetX, settings.VolumeRoiPreviewOffsetY);
-                _reportPanelPinned = settings.ReportPanelPinned;
-                _reportPanelVisible = settings.ReportPanelVisible;
+                _reportPanelPinned = false;
+                _reportPanelVisible = false;
                 _reportPanelOffset = new Point(settings.ReportPanelOffsetX, settings.ReportPanelOffsetY);
+                _anatomyPanelPinned = false;
+                _anatomyPanelVisible = false;
+                _anatomyPanelOffset = new Point(settings.AnatomyPanelOffsetX, settings.AnatomyPanelOffsetY);
+                _customAnatomyRegions.Clear();
+                if (settings.CustomAnatomyRegions is not null)
+                {
+                    foreach (string region in settings.CustomAnatomyRegions.Where(value => !string.IsNullOrWhiteSpace(value)))
+                    {
+                        if (!_customAnatomyRegions.Contains(region.Trim(), StringComparer.OrdinalIgnoreCase))
+                        {
+                            _customAnatomyRegions.Add(region.Trim());
+                        }
+                    }
+                }
+                _customAnatomyStructuresByRegion.Clear();
+                if (settings.CustomAnatomyStructuresByRegion is not null)
+                {
+                    foreach ((string region, List<string> structures) in settings.CustomAnatomyStructuresByRegion)
+                    {
+                        if (string.IsNullOrWhiteSpace(region))
+                        {
+                            continue;
+                        }
+
+                        List<string> cleaned = structures
+                            .Where(value => !string.IsNullOrWhiteSpace(value))
+                            .Select(value => value.Trim())
+                            .Distinct(StringComparer.OrdinalIgnoreCase)
+                            .ToList();
+                        if (cleaned.Count > 0)
+                        {
+                            _customAnatomyStructuresByRegion[region.Trim()] = cleaned;
+                        }
+                    }
+                }
                 _reportRegionOverrides.Clear();
                 if (settings.ReportRegionOverrides is not null)
                 {
@@ -3576,6 +3788,15 @@ public partial class StudyViewerWindow : Window
                 ReportPanelVisible = _reportPanelVisible,
                 ReportPanelOffsetX = _reportPanelOffset.X,
                 ReportPanelOffsetY = _reportPanelOffset.Y,
+                AnatomyPanelPinned = _anatomyPanelPinned,
+                AnatomyPanelVisible = _anatomyPanelVisible,
+                AnatomyPanelOffsetX = _anatomyPanelOffset.X,
+                AnatomyPanelOffsetY = _anatomyPanelOffset.Y,
+                CustomAnatomyRegions = [.. _customAnatomyRegions],
+                CustomAnatomyStructuresByRegion = _customAnatomyStructuresByRegion.ToDictionary(
+                    pair => pair.Key,
+                    pair => pair.Value.ToList(),
+                    StringComparer.OrdinalIgnoreCase),
                 ReportRegionOverrides = _reportRegionOverrides.ToDictionary(
                     pair => pair.Key.ToString("D"),
                     pair => pair.Value,
@@ -3799,6 +4020,12 @@ public partial class StudyViewerWindow : Window
         public bool ReportPanelVisible { get; init; }
         public double ReportPanelOffsetX { get; init; }
         public double ReportPanelOffsetY { get; init; }
+        public bool AnatomyPanelPinned { get; init; }
+        public bool AnatomyPanelVisible { get; init; }
+        public double AnatomyPanelOffsetX { get; init; }
+        public double AnatomyPanelOffsetY { get; init; }
+        public List<string>? CustomAnatomyRegions { get; init; }
+        public Dictionary<string, List<string>>? CustomAnatomyStructuresByRegion { get; init; }
         public Dictionary<string, string>? ReportRegionOverrides { get; init; }
         public Dictionary<string, string>? ReportAnatomyOverrides { get; init; }
         public Dictionary<string, string>? ReportReviewStates { get; init; }

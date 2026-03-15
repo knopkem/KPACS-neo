@@ -45,6 +45,10 @@ public partial class StudyViewerWindow
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
         RefreshReportPanel();
+        if (_anatomyPanelVisible || _anatomyPanelPinned)
+        {
+            RefreshAnatomyPanel();
+        }
     }
 
     private void RefreshMeasurementPanels()
@@ -60,6 +64,10 @@ public partial class StudyViewerWindow
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
         RefreshReportPanel();
+        if (_anatomyPanelVisible || _anatomyPanelPinned)
+        {
+            RefreshAnatomyPanel();
+        }
         UpdateStatus();
     }
 

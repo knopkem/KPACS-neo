@@ -271,6 +271,12 @@
                                Margin="2,0,2,0" />
                     <WrapPanel Grid.Column="1" Orientation="Horizontal" ItemWidth="104">
                         <Button x:Name="WorkspaceLayoutButton" Classes="workspaceAction" Click="OnWorkspaceLayoutClick" ToolTip.Tip="Viewer layout presets and custom layouts." />
+                        <Button x:Name="WorkspaceAnatomyButton" Classes="workspaceAction" Click="OnWorkspaceAnatomyClick" ToolTip.Tip="Open the anatomy workspace to define structures, manage learned models, and assign selected 3D ROIs.">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <TextBlock Text="AN" FontWeight="SemiBold" FontSize="11" />
+                                <TextBlock Text="Anatomy" FontSize="11" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="WorkspaceReportButton" Classes="workspaceAction" Click="OnWorkspaceReportClick" ToolTip.Tip="Open the floating report panel with created findings, source provenance, and anatomy hints.">
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <TextBlock Text="RP" FontWeight="SemiBold" FontSize="11" />
@@ -637,6 +643,65 @@
                                   VerticalScrollBarVisibility="Auto">
                         <StackPanel x:Name="ReportItemsPanel"
                                     Spacing="8" />
+                    </ScrollViewer>
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="AnatomyPanel"
+                    IsVisible="False"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,72,452,0"
+                    Padding="12"
+                    MaxWidth="460"
+                    MinWidth="340"
+                    Background="#E6141820"
+                    BorderBrush="#8094C5A0"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    ZIndex="4">
+                <Border.RenderTransform>
+                    <TranslateTransform />
+                </Border.RenderTransform>
+                <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <StackPanel x:Name="AnatomyPanelDragHandle"
+                                    Spacing="2"
+                                    Cursor="SizeAll"
+                                    PointerPressed="OnAnatomyPanelHeaderPointerPressed"
+                                    PointerMoved="OnAnatomyPanelHeaderPointerMoved"
+                                    PointerReleased="OnAnatomyPanelHeaderPointerReleased">
+                            <TextBlock Text="Anatomy"
+                                       Foreground="#FFF6FBFF"
+                                       FontWeight="SemiBold"
+                                       FontSize="13" />
+                            <TextBlock x:Name="AnatomyPanelSummaryText"
+                                       Foreground="#FF9DB3C7"
+                                       FontSize="11"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleButton x:Name="AnatomyPanelPinButton"
+                                      Grid.Column="1"
+                                      Classes="iconToggle"
+                                      Width="30"
+                                      Height="30"
+                                      MinWidth="30"
+                                      Click="OnAnatomyPanelPinClick"
+                                      ToolTip.Tip="Pin the anatomy panel and keep it open for the current workspace." />
+                    </Grid>
+
+                    <Border Height="1" Background="#334D5F74" />
+
+                    <TextBlock x:Name="AnatomyPanelHintText"
+                               Foreground="#FFD3E5F5"
+                               FontSize="10"
+                               TextWrapping="Wrap" />
+
+                    <ScrollViewer MaxHeight="560"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <StackPanel x:Name="AnatomyPanelContent"
+                                    Spacing="10" />
                     </ScrollViewer>
                 </StackPanel>
             </Border>

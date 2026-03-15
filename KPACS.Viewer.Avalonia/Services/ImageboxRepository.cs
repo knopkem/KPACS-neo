@@ -498,6 +498,35 @@ public sealed class ImageboxRepository
         return results;
     }
 
+    public async Task UpdateVolumeRoiAnatomyPriorLabelsAsync(long priorKey, string regionLabel, string anatomyLabel, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = """
+            UPDATE volume_roi_anatomy_priors
+            SET region_label = $regionLabel,
+                anatomy_label = $anatomyLabel,
+                updated_at_utc = $updatedAtUtc
+            WHERE prior_key = $priorKey;
+            """;
+        command.Parameters.AddWithValue("$priorKey", priorKey);
+        command.Parameters.AddWithValue("$regionLabel", regionLabel?.Trim() ?? string.Empty);
+        command.Parameters.AddWithValue("$anatomyLabel", anatomyLabel?.Trim() ?? string.Empty);
+        command.Parameters.AddWithValue("$updatedAtUtc", DateTime.UtcNow.ToString("O", CultureInfo.InvariantCulture));
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
+    public async Task DeleteVolumeRoiAnatomyPriorAsync(long priorKey, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+        await using var command = connection.CreateCommand();
+        command.CommandText = "DELETE FROM volume_roi_anatomy_priors WHERE prior_key = $priorKey;";
+        command.Parameters.AddWithValue("$priorKey", priorKey);
+        await command.ExecuteNonQueryAsync(cancellationToken);
+    }
+
     public async Task UpdateStudyImportStateAsync(long studyKey, StudyAvailability availability, string storagePath, CancellationToken cancellationToken = default)
     {
         await using var connection = new SqliteConnection(_connectionString);
