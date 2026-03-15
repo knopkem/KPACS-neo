@@ -32,6 +32,9 @@ jobs:
           - os: ubuntu-22.04
             rid: linux-x64
             label: Linux x64
+          - os: macos-13
+            rid: osx-x64
+            label: macOS Intel
           - os: macos-14
             rid: osx-arm64
             label: macOS Apple Silicon
@@ -93,7 +96,7 @@ jobs:
         shell: bash
         run: |
           version="${{ steps.version.outputs.value }}"
-          package_name="${APP_NAME}-${version}-${{ matrix.rid }}.tar.gz"
+          package_name="KPACS.Viewer-${version}-${{ matrix.rid }}.tar.gz"
           chmod +x "artifacts/publish/${{ matrix.rid }}/KPACS.Viewer"
           cp "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" "artifacts/publish/${{ matrix.rid }}/k-pacs.png"
           cp "KPACS.Viewer.Avalonia/Assets/Branding/KPACS-neo.desktop" "artifacts/publish/${{ matrix.rid }}/KPACS-neo.desktop"
@@ -106,18 +109,24 @@ jobs:
           Optional desktop integration files included:
           - KPACS-neo.desktop
           - k-pacs.png
+
+          Bundled anatomy definitions:
+          - anatomy-packs/cranium-base.sample.json
           README
           mkdir -p artifacts/release
-          tar -C "artifacts/publish/${{ matrix.rid }}" -czf "artifacts/release/${package_name}" KPACS.Viewer KPACS-neo.desktop k-pacs.png README.txt
+          tar -C "artifacts/publish/${{ matrix.rid }}" -czf "artifacts/release/${package_name}" KPACS.Viewer KPACS-neo.desktop k-pacs.png README.txt anatomy-packs
 
       - name: Build macOS app bundle
-        if: matrix.rid == 'osx-arm64'
+        if: startsWith(matrix.rid, 'osx-')
         shell: bash
         run: |
           mkdir -p "artifacts/app/KPACS-neo.app/Contents/MacOS"
           mkdir -p "artifacts/app/KPACS-neo.app/Contents/Resources"
           cp "artifacts/publish/${{ matrix.rid }}/KPACS.Viewer" "artifacts/app/KPACS-neo.app/Contents/MacOS/KPACS.Viewer"
           chmod +x "artifacts/app/KPACS-neo.app/Contents/MacOS/KPACS.Viewer"
+          if [ -d "artifacts/publish/${{ matrix.rid }}/anatomy-packs" ]; then
+            cp -R "artifacts/publish/${{ matrix.rid }}/anatomy-packs" "artifacts/app/KPACS-neo.app/Contents/MacOS/anatomy-packs"
+          fi
           mkdir -p artifacts/k-pacs.iconset
           sips -z 16 16   "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_16x16.png >/dev/null
           sips -z 32 32   "KPACS.Viewer.Avalonia/Assets/Branding/k-pacs.png" --out artifacts/k-pacs.iconset/icon_16x16@2x.png >/dev/null
@@ -166,17 +175,20 @@ jobs:
 
           Open KPACS-neo.app after extracting the zip.
 
+          Bundled anatomy definitions:
+          - KPACS-neo.app/Contents/MacOS/anatomy-packs/cranium-base.sample.json
+
           This is an unsigned first-release app bundle.
           If macOS blocks the first launch, right-click the app and choose Open once.
           After that, it behaves like a normal local app.
           README
 
       - name: Package macOS release
-        if: matrix.rid == 'osx-arm64'
+        if: startsWith(matrix.rid, 'osx-')
         shell: bash
         run: |
           version="${{ steps.version.outputs.value }}"
-          package_name="${APP_NAME}-${version}-${{ matrix.rid }}.zip"
+          package_name="KPACS.Viewer-${version}-${{ matrix.rid }}.zip"
           mkdir -p artifacts/release
           ditto -c -k --sequesterRsrc --keepParent "artifacts/app/KPACS-neo.app" "artifacts/release/${package_name}"
 

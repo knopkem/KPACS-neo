@@ -162,10 +162,11 @@ dotnet build KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj
 
 ## Release Packaging
 
-The repository includes a GitHub Actions workflow at [.github/workflows/release-packages.yml](.github/workflows/release-packages.yml) that builds three native self-contained release artifacts for the Avalonia viewer:
+The repository includes a GitHub Actions workflow at [.github/workflows/release-packages.yml](.github/workflows/release-packages.yml) that builds four native self-contained release artifacts for the Avalonia viewer:
 
 - `win-x64` — single-file `.exe` packed as `.zip`
 - `linux-x64` — single-file executable packed as `.tar.gz`
+- `osx-x64` — zipped `KPACS-neo.app` bundle for Intel Macs
 - `osx-arm64` — zipped `KPACS-neo.app` bundle for Apple Silicon Macs
 
 These release builds use:
@@ -174,6 +175,7 @@ These release builds use:
 - single-file publish
 - embedded native libraries via self-extraction
 - release symbols disabled for smaller artifacts
+- bundled neuro anatomy pack in `anatomy-packs/cranium-base.sample.json`
 
 ### Local publish commands
 
@@ -184,12 +186,14 @@ dotnet publish KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj -c Release -r 
 
 dotnet publish KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj -c Release -r linux-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false
 
+dotnet publish KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj -c Release -r osx-x64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false
+
 dotnet publish KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj -c Release -r osx-arm64 --self-contained true -p:PublishSingleFile=true -p:EnableCompressionInSingleFile=true -p:IncludeNativeLibrariesForSelfExtract=true -p:DebugType=None -p:DebugSymbols=false
 ```
 
 ### GitHub Release flow
 
-- Create a tag such as `v0.1.0`
+- Create a tag such as `0.5.0`
 - Publish a GitHub Release for that tag
 - The workflow builds all three platform packages on native runners and attaches them to the release automatically
 
