@@ -1597,13 +1597,6 @@ public partial class StudyViewerWindow
 
         SaveViewerSettings();
         RefreshReportPanel(forceVisible: true);
-
-        if (_reportAnatomyOverrides.TryGetValue(measurementId, out string? anatomyLabel) &&
-            !string.IsNullOrWhiteSpace(anatomyLabel) &&
-            !string.Equals(anatomyLabel, "Auto", StringComparison.OrdinalIgnoreCase))
-        {
-            _ = PersistVolumeRoiAnatomyPriorAsync(measurementId, anatomyLabel.Trim());
-        }
     }
 
     private static string BuildSoftBodyPartHint(string bodyPart, string fallbackHint)
@@ -1643,11 +1636,6 @@ public partial class StudyViewerWindow
 
         SaveViewerSettings();
         RefreshReportPanel(forceVisible: true);
-
-        if (!string.Equals(selectedValue, "Auto", StringComparison.OrdinalIgnoreCase))
-        {
-            _ = PersistVolumeRoiAnatomyPriorAsync(measurementId, selectedValue.Trim());
-        }
     }
 
     private async Task LoadVolumeRoiAnatomyPriorsAsync()

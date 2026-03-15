@@ -28,6 +28,7 @@ public partial class StudyViewerWindow
         panel.SetMeasurementTool(GetEffectiveMeasurementTool());
         panel.SetMeasurementNudgeMode(false);
         panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
+        panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         panel.SetMeasurementTextSupplementProvider(GetMeasurementTextSupplement);
         panel.MeasurementCreated += OnPanelMeasurementCreated;
         panel.MeasurementUpdated += OnPanelMeasurementUpdated;
@@ -42,6 +43,7 @@ public partial class StudyViewerWindow
         slot.Panel.SetMeasurementTool(GetEffectiveMeasurementTool());
         slot.Panel.SetMeasurementNudgeMode(false);
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
+        slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
         RefreshReportPanel();
@@ -59,6 +61,7 @@ public partial class StudyViewerWindow
             slot.Panel.SetMeasurementTool(effectiveTool);
             slot.Panel.SetMeasurementNudgeMode(false);
             slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
+            slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         }
 
         RefreshMeasurementInsightPanel();

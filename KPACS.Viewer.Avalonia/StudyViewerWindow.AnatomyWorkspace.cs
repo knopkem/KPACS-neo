@@ -5,8 +5,10 @@ using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.Rendering;
 using System.Text.Json;
 using System.Globalization;
+using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer;
 
@@ -24,6 +26,7 @@ public partial class StudyViewerWindow
     private string _selectedAnatomyCatalogStructure = string.Empty;
     private string _selectedActivePackStructureId = string.Empty;
     private bool _useLegacyAnatomyPriors = true;
+    private bool _developerAnatomyModelProjectionEnabled;
 
     private void RefreshAnatomyPanel(bool forceVisible = false)
     {
@@ -44,11 +47,11 @@ public partial class StudyViewerWindow
 
         StudyMeasurement? selectedRoi = GetSelectedVolumeRoiMeasurement();
         AnatomyPanelSummaryText.Text = selectedRoi is null
-            ? $"{_volumeRoiAnatomyPriors.Count} learned models"
-            : $"Selected ROI ready · {_volumeRoiAnatomyPriors.Count} learned models";
+            ? $"{_volumeRoiAnatomyPriors.Count} legacy learned models"
+            : $"Selected ROI ready · {_volumeRoiAnatomyPriors.Count} legacy learned models";
         AnatomyPanelHintText.Text = selectedRoi is null
-            ? "Select a 3D ROI to assign it to an anatomy structure. Manage custom regions/structures and rename or delete learned models below."
-            : "The selected 3D ROI stays a normal finding in reporting. Define or assign its anatomy here and teach the matcher from this ROI.";
+            ? "Select a 3D ROI to assign it to an anatomy structure. Manage custom regions/structures and rename or delete legacy learned models below."
+            : "The selected 3D ROI stays a normal finding in reporting. Define or assign its anatomy here. Legacy learning only happens via explicit Learn actions.";
 
         AnatomyPanelContent.Children.Clear();
         AnatomyPanelContent.Children.Add(BuildSelectedRoiAssignmentSection(selectedRoi));
@@ -393,11 +396,20 @@ public partial class StudyViewerWindow
         };
         exportRoiDraftButton.Click += async (_, _) => await ExportSelectedRoiDraftAsync(selectedRoi);
 
+        var toggleProjectionButton = new Button
+        {
+            Content = _developerAnatomyModelProjectionEnabled ? "Hide projected pack structure" : "Project selected pack structure",
+            MinWidth = 188,
+            Height = 28,
+        };
+        ToolTip.SetTip(toggleProjectionButton, "Project the currently selected active-pack structure into all loaded volume series using the pack definition itself.");
+        toggleProjectionButton.Click += (_, _) => ToggleDeveloperAnatomyModelProjection();
+
         body.Children.Add(new WrapPanel
         {
             ItemSpacing = 8,
             LineSpacing = 6,
-            Children = { reloadPacksButton, savePackButton, feedRoiButton, applyToSelectedStructureButton, exportPackButton, exportLegacyButton, toggleLegacyButton, exportRoiDraftButton }
+            Children = { reloadPacksButton, savePackButton, feedRoiButton, applyToSelectedStructureButton, exportPackButton, exportLegacyButton, toggleLegacyButton, exportRoiDraftButton, toggleProjectionButton }
         });
 
         body.Children.Add(new TextBlock
@@ -421,6 +433,14 @@ public partial class StudyViewerWindow
             TextWrapping = TextWrapping.Wrap,
         });
 
+        body.Children.Add(new TextBlock
+        {
+            Text = BuildDeveloperAnatomyProjectionStatusText(),
+            Foreground = new SolidColorBrush(Color.Parse(_developerAnatomyModelProjectionEnabled ? "#FFC9F7D9" : "#FF9DB3C7")),
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap,
+        });
+
         return section;
     }
 
@@ -434,6 +454,7 @@ public partial class StudyViewerWindow
             return emptySection;
         }
 
+        StudyMeasurement? selectedRoi = GetSelectedVolumeRoiMeasurement();
         AnatomyStructureDefinition? selectedStructure = GetSelectedActivePackStructure();
         List<AnatomyStructureDefinition> orderedStructures = _activeCraniumKnowledgePack.Structures
             .OrderBy(candidate => candidate.DisplayName)
@@ -489,8 +510,24 @@ public partial class StudyViewerWindow
         };
         deleteButton.Click += async (_, _) => await DeleteSelectedActivePackStructureAsync(selectedStructure);
 
+        var projectModelsButton = new Button
+        {
+            Content = _developerAnatomyModelProjectionEnabled ? "Hide projected pack structure" : "Project selected pack structure",
+            MinWidth = 188,
+            Height = 28,
+        };
+        ToolTip.SetTip(projectModelsButton, "Project the currently selected active-pack structure into all loaded volume series using the pack definition itself.");
+        projectModelsButton.Click += (_, _) => ToggleDeveloperAnatomyModelProjection();
+
         body.Children.Add(CreateFieldRow("Structure", structureSelector));
-        body.Children.Add(new WrapPanel { ItemSpacing = 8, LineSpacing = 6, Children = { createButton, deleteButton } });
+        body.Children.Add(new WrapPanel { ItemSpacing = 8, LineSpacing = 6, Children = { createButton, deleteButton, projectModelsButton } });
+        body.Children.Add(new TextBlock
+        {
+            Text = BuildDeveloperAnatomyProjectionStatusText(),
+            Foreground = new SolidColorBrush(Color.Parse(_developerAnatomyModelProjectionEnabled ? "#FFC9F7D9" : "#FF9DB3C7")),
+            FontSize = 10,
+            TextWrapping = TextWrapping.Wrap,
+        });
 
         if (selectedStructure is null)
         {
@@ -673,7 +710,7 @@ public partial class StudyViewerWindow
 
             string regionLabel = regionCombo.SelectedItem as string ?? prior.RegionLabel;
             string anatomyLabel = anatomyBox.Text?.Trim() ?? prior.AnatomyLabel;
-            await AssignMeasurementToAnatomyAsync(selectedRoi.Id, regionLabel, anatomyLabel);
+            await AssignMeasurementToAnatomyAsync(selectedRoi.Id, regionLabel, anatomyLabel, persistLegacyPrior: true);
         };
 
         return new Border
@@ -822,7 +859,7 @@ public partial class StudyViewerWindow
         return options;
     }
 
-    private async Task AssignMeasurementToAnatomyAsync(Guid measurementId, string regionLabel, string anatomyLabel)
+    private async Task AssignMeasurementToAnatomyAsync(Guid measurementId, string regionLabel, string anatomyLabel, bool persistLegacyPrior = false)
     {
         EnsureCatalogRegion(regionLabel);
         EnsureCatalogStructure(regionLabel, anatomyLabel);
@@ -831,8 +868,16 @@ public partial class StudyViewerWindow
         _reportReviewStates[measurementId] = "Confirmed";
         SaveViewerSettings();
         RefreshReportPanel(forceVisible: _reportPanelVisible || _reportPanelPinned);
-        await PersistVolumeRoiAnatomyPriorAsync(measurementId, anatomyLabel.Trim());
-        ShowToast($"Assigned ROI to {anatomyLabel.Trim()} ({regionLabel.Trim()}).", ToastSeverity.Success);
+        if (persistLegacyPrior)
+        {
+            await PersistVolumeRoiAnatomyPriorAsync(measurementId, anatomyLabel.Trim());
+            ShowToast($"Assigned ROI to {anatomyLabel.Trim()} ({regionLabel.Trim()}) and updated the legacy learned model.", ToastSeverity.Success);
+        }
+        else
+        {
+            ShowToast($"Assigned ROI to {anatomyLabel.Trim()} ({regionLabel.Trim()}).", ToastSeverity.Success);
+        }
+
         RefreshAnatomyPanel(forceVisible: true);
     }
 
@@ -1422,6 +1467,325 @@ public partial class StudyViewerWindow
         }
 
         return anatomyLabel;
+    }
+
+    private string GetSelectedRoiAssignedRegionLabel(StudyMeasurement? selectedRoi)
+    {
+        if (selectedRoi is null)
+        {
+            return string.Empty;
+        }
+
+        ViewportSlot? slot = FindSlotForMeasurement(selectedRoi) ?? _activeSlot;
+        string regionLabel = _reportRegionOverrides.TryGetValue(selectedRoi.Id, out string? regionOverride) && !string.IsNullOrWhiteSpace(regionOverride)
+            ? regionOverride.Trim()
+            : ResolveMeasurementRegion(selectedRoi, slot).Label;
+
+        if (string.IsNullOrWhiteSpace(regionLabel)
+            || string.Equals(regionLabel, "Auto", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(regionLabel, "Unassigned", StringComparison.OrdinalIgnoreCase))
+        {
+            return string.Empty;
+        }
+
+        return regionLabel;
+    }
+
+    private void ToggleDeveloperAnatomyModelProjection()
+    {
+        if (_developerAnatomyModelProjectionEnabled)
+        {
+            _developerAnatomyModelProjectionEnabled = false;
+            RefreshMeasurementPanels();
+            RefreshAnatomyPanel(forceVisible: true);
+            ShowToast("Projected pack-structure overlay disabled.", ToastSeverity.Info);
+            return;
+        }
+
+        AnatomyStructureDefinition? selectedStructure = GetSelectedActivePackStructure();
+        if (selectedStructure is null)
+        {
+            ShowToast("Select a structure in the active pack first.", ToastSeverity.Warning);
+            return;
+        }
+
+        int projectedSeriesCount = _slots.Count(slot => slot.Volume is not null && GetActiveDeveloperAnatomyOverlayModels(slot).Count > 0);
+        if (projectedSeriesCount == 0)
+        {
+            ShowToast($"The selected pack structure {selectedStructure.DisplayName} cannot yet be projected into the loaded series. Add or widen its position ranges first.", ToastSeverity.Warning, TimeSpan.FromSeconds(6));
+            return;
+        }
+
+        _developerAnatomyModelProjectionEnabled = true;
+        RefreshMeasurementPanels();
+        RefreshAnatomyPanel(forceVisible: true);
+        ShowToast($"Projected pack structure {selectedStructure.DisplayName} into {projectedSeriesCount} loaded volume series.", ToastSeverity.Success, TimeSpan.FromSeconds(6));
+    }
+
+    private IReadOnlyList<AnatomyDeveloperOverlayModel> GetDeveloperAnatomyOverlaysForSlot(ViewportSlot slot) =>
+        !_developerAnatomyModelProjectionEnabled || slot.Volume is null
+            ? []
+            : GetActiveDeveloperAnatomyOverlayModels(slot);
+
+    private IReadOnlyList<AnatomyDeveloperOverlayModel> GetActiveDeveloperAnatomyOverlayModels(ViewportSlot slot)
+    {
+        if (slot.Volume is null)
+        {
+            return [];
+        }
+
+        AnatomyStructureDefinition? selectedStructure = GetSelectedActivePackStructure();
+        if (selectedStructure is null || !TryBuildPackStructureOverlayModel(selectedStructure, slot.Volume, out AnatomyDeveloperOverlayModel overlay))
+        {
+            return [];
+        }
+
+        return [overlay];
+    }
+
+    private string BuildDeveloperAnatomyProjectionStatusText()
+    {
+        AnatomyStructureDefinition? selectedStructure = GetSelectedActivePackStructure();
+        if (!_developerAnatomyModelProjectionEnabled)
+        {
+            return selectedStructure is null
+                ? "Projection mode is off. Select a structure in the active pack to project its current pack definition into any loaded plane/series."
+                : $"Projection mode is off. When enabled, the selected pack structure {selectedStructure.DisplayName} is projected into every loaded volume viewport in its current plane.";
+        }
+
+        if (selectedStructure is null)
+        {
+            return "Projection mode is on, but it currently needs a selected structure in the active pack editor.";
+        }
+
+        int projectedSeriesCount = _slots.Count(slot => slot.Volume is not null && GetActiveDeveloperAnatomyOverlayModels(slot).Count > 0);
+        return projectedSeriesCount == 0
+            ? $"Projection mode is on, but the selected pack structure {selectedStructure.DisplayName} does not yet have enough positional definition to project into the loaded series."
+            : $"Projection mode is on. Showing the selected pack structure {selectedStructure.DisplayName} in {projectedSeriesCount} loaded volume series and current planes.";
+    }
+
+    private bool TryBuildPackStructureOverlayModel(AnatomyStructureDefinition structure, SeriesVolume volume, out AnatomyDeveloperOverlayModel overlay)
+    {
+        overlay = null!;
+        SpatialBounds? bounds = GetSpatialBounds(volume);
+        if (bounds is null ||
+            !TryResolvePackStructureSemanticEnvelope(structure, out double centerLr, out double centerAp, out double centerCc, out double sizeLr, out double sizeAp, out double sizeCc))
+        {
+            return false;
+        }
+
+        SpatialVector3D patientCenter = ProjectSemanticPackPointToPatient(volume, centerLr, centerAp, centerCc);
+        (double patientSizeX, double patientSizeY, double patientSizeZ) = ProjectSemanticPackExtentsToPatientSize(volume, centerLr, centerAp, centerCc, sizeLr, sizeAp, sizeCc);
+
+        double rangeX = Math.Max(bounds.Value.MaxX - bounds.Value.MinX, double.Epsilon);
+        double rangeY = Math.Max(bounds.Value.MaxY - bounds.Value.MinY, double.Epsilon);
+        double rangeZ = Math.Max(bounds.Value.MaxZ - bounds.Value.MinZ, double.Epsilon);
+
+        overlay = new AnatomyDeveloperOverlayModel(
+            structure.DisplayName,
+            string.Join(", ", GetEffectiveAllowedCompartments(structure)),
+            "PACK",
+            "Active pack structure",
+            Normalize(patientCenter.X, bounds.Value.MinX, bounds.Value.MaxX),
+            Normalize(patientCenter.Y, bounds.Value.MinY, bounds.Value.MaxY),
+            Normalize(patientCenter.Z, bounds.Value.MinZ, bounds.Value.MaxZ),
+            Math.Clamp(patientSizeX / rangeX, 0.04, 1.0),
+            Math.Clamp(patientSizeY / rangeY, 0.04, 1.0),
+            Math.Clamp(patientSizeZ / rangeZ, 0.04, 1.0),
+            0,
+            1,
+            DateTime.UtcNow);
+        return true;
+    }
+
+    private bool TryResolvePackStructureSemanticEnvelope(
+        AnatomyStructureDefinition structure,
+        out double centerLr,
+        out double centerAp,
+        out double centerCc,
+        out double sizeLr,
+        out double sizeAp,
+        out double sizeCc)
+    {
+        centerLr = ResolvePackSignedLeftRightCenter(structure);
+        centerAp = ResolvePackSignedAnteriorPosteriorCenter(structure);
+        centerCc = ResolvePackCranialCaudalCenter(structure);
+        sizeLr = ResolvePackAxisSpan(structure.ExpectedPosition.LeftRight, defaultSpan: structure.ExpectedPosition.DistanceToMidline.Max is not null ? Math.Max(0.10, structure.ExpectedPosition.DistanceToMidline.Max.Value * 0.9) : 0.18);
+        sizeAp = ResolvePackAxisSpan(structure.ExpectedPosition.AnteriorPosterior, defaultSpan: HasRelation(structure, "inside", "posterior_fossa") ? 0.22 : 0.20);
+        sizeCc = ResolvePackAxisSpan(structure.ExpectedPosition.CranialCaudal, defaultSpan: 0.18);
+
+        bool hasDirectPosition = HasUsableRange(structure.ExpectedPosition.LeftRight)
+            || HasUsableRange(structure.ExpectedPosition.AnteriorPosterior)
+            || HasUsableRange(structure.ExpectedPosition.CranialCaudal)
+            || HasUsableRange(structure.ExpectedPosition.DistanceToMidline)
+            || HasUsableRange(structure.ExpectedPosition.DistanceToSkullBase)
+            || HasUsableRange(structure.ExpectedPosition.DistanceToVertex)
+            || structure.RequiredRelations.Count > 0;
+        if (!hasDirectPosition)
+        {
+            return false;
+        }
+
+        centerLr = Math.Clamp(centerLr, -1.0, 1.0);
+        centerAp = Math.Clamp(centerAp, -1.0, 1.0);
+        centerCc = Math.Clamp(centerCc, 0.0, 1.0);
+        sizeLr = Math.Clamp(sizeLr, 0.05, 1.0);
+        sizeAp = Math.Clamp(sizeAp, 0.05, 1.0);
+        sizeCc = Math.Clamp(sizeCc, 0.05, 1.0);
+        return true;
+    }
+
+    private static bool HasUsableRange(AnatomyNumericRange range) => range.Min is not null || range.Max is not null;
+
+    private static double ResolvePackSignedLeftRightCenter(AnatomyStructureDefinition structure)
+    {
+        if (HasUsableRange(structure.ExpectedPosition.LeftRight))
+        {
+            return ResolveRangeCenter(structure.ExpectedPosition.LeftRight, 0);
+        }
+
+        double distance = ResolveRangeCenter(structure.ExpectedPosition.DistanceToMidline,
+            HasRelation(structure, "far_from", "midline") ? 0.24 : HasRelation(structure, "near", "midline") ? 0.05 : 0.0);
+
+        if (HasRelation(structure, "left_of", "midline"))
+        {
+            return -Math.Max(0.04, distance);
+        }
+
+        if (HasRelation(structure, "right_of", "midline"))
+        {
+            return Math.Max(0.04, distance);
+        }
+
+        return 0;
+    }
+
+    private static double ResolvePackSignedAnteriorPosteriorCenter(AnatomyStructureDefinition structure)
+    {
+        if (HasUsableRange(structure.ExpectedPosition.AnteriorPosterior))
+        {
+            return ResolveRangeCenter(structure.ExpectedPosition.AnteriorPosterior, 0);
+        }
+
+        if (HasRelation(structure, "inside", "posterior_fossa"))
+        {
+            return -0.42;
+        }
+
+        return 0;
+    }
+
+    private static double ResolvePackCranialCaudalCenter(AnatomyStructureDefinition structure)
+    {
+        if (HasUsableRange(structure.ExpectedPosition.CranialCaudal))
+        {
+            return ResolveRangeCenter(structure.ExpectedPosition.CranialCaudal, 0.5);
+        }
+
+        if (HasUsableRange(structure.ExpectedPosition.DistanceToSkullBase))
+        {
+            return ResolveRangeCenter(structure.ExpectedPosition.DistanceToSkullBase, 0.5);
+        }
+
+        if (HasUsableRange(structure.ExpectedPosition.DistanceToVertex))
+        {
+            return 1.0 - ResolveRangeCenter(structure.ExpectedPosition.DistanceToVertex, 0.5);
+        }
+
+        if (HasRelation(structure, "near", "skull_base_plane"))
+        {
+            return 0.14;
+        }
+
+        if (HasRelation(structure, "cranial_to", "brainstem"))
+        {
+            return 0.66;
+        }
+
+        if (HasRelation(structure, "away_from", "skull_base_plane"))
+        {
+            return 0.56;
+        }
+
+        return 0.5;
+    }
+
+    private static double ResolveRangeCenter(AnatomyNumericRange range, double fallback)
+    {
+        if (range.Min is double min && range.Max is double max)
+        {
+            return (min + max) * 0.5;
+        }
+
+        if (range.Min is double onlyMin)
+        {
+            return onlyMin;
+        }
+
+        if (range.Max is double onlyMax)
+        {
+            return onlyMax;
+        }
+
+        return fallback;
+    }
+
+    private static double ResolvePackAxisSpan(AnatomyNumericRange range, double defaultSpan)
+    {
+        if (range.Min is double min && range.Max is double max)
+        {
+            return Math.Max(0.05, Math.Abs(max - min));
+        }
+
+        return defaultSpan;
+    }
+
+    private static bool HasRelation(AnatomyStructureDefinition structure, string type, string target) =>
+        GetEffectiveRequiredRelations(structure).Any(relation =>
+            string.Equals(relation.Type, type, StringComparison.OrdinalIgnoreCase) &&
+            string.Equals(relation.Target, target, StringComparison.OrdinalIgnoreCase));
+
+    private SpatialVector3D ProjectSemanticPackPointToPatient(SeriesVolume volume, double signedLeftRight, double signedAnteriorPosterior, double cranialCaudal)
+    {
+        double voxelZ = Math.Clamp(cranialCaudal, 0, 1) * Math.Max(1, volume.SizeZ - 1);
+        HeadAxisCorrectionModel model = GetOrCreateHeadAxisCorrectionModel(volume);
+        if (model.IsReliable)
+        {
+            double expectedCenterX = model.CenterlineInterceptX + (model.CenterlineSlopeX * voxelZ);
+            double expectedCenterY = model.CenterlineInterceptY + (model.CenterlineSlopeY * voxelZ);
+            double lrProjection = signedLeftRight * model.LrHalfExtent * Math.Sign(model.LrSign == 0 ? 1 : model.LrSign);
+            double apProjection = signedAnteriorPosterior * model.ApHalfExtent * Math.Sign(model.ApSign == 0 ? 1 : model.ApSign);
+            double offsetX = (lrProjection * model.LrAxisX) + (apProjection * model.ApAxisX);
+            double offsetY = (lrProjection * model.LrAxisY) + (apProjection * model.ApAxisY);
+            return volume.VoxelToPatient(expectedCenterX + offsetX, expectedCenterY + offsetY, voxelZ);
+        }
+
+        double voxelX = (1.0 - Math.Clamp(signedLeftRight, -1.0, 1.0)) * 0.5 * Math.Max(1, volume.SizeX - 1);
+        double voxelY = (1.0 - Math.Clamp(signedAnteriorPosterior, -1.0, 1.0)) * 0.5 * Math.Max(1, volume.SizeY - 1);
+        return volume.VoxelToPatient(voxelX, voxelY, voxelZ);
+    }
+
+    private (double SizeX, double SizeY, double SizeZ) ProjectSemanticPackExtentsToPatientSize(SeriesVolume volume, double centerLr, double centerAp, double centerCc, double sizeLr, double sizeAp, double sizeCc)
+    {
+        SpatialVector3D center = ProjectSemanticPackPointToPatient(volume, centerLr, centerAp, centerCc);
+        double halfLr = sizeLr * 0.5;
+        double halfAp = sizeAp * 0.5;
+        double halfCc = sizeCc * 0.5;
+
+        SpatialVector3D[] samples =
+        [
+            ProjectSemanticPackPointToPatient(volume, centerLr - halfLr, centerAp, centerCc),
+            ProjectSemanticPackPointToPatient(volume, centerLr + halfLr, centerAp, centerCc),
+            ProjectSemanticPackPointToPatient(volume, centerLr, centerAp - halfAp, centerCc),
+            ProjectSemanticPackPointToPatient(volume, centerLr, centerAp + halfAp, centerCc),
+            ProjectSemanticPackPointToPatient(volume, centerLr, centerAp, centerCc - halfCc),
+            ProjectSemanticPackPointToPatient(volume, centerLr, centerAp, centerCc + halfCc),
+        ];
+
+        double halfX = samples.Max(point => Math.Abs(point.X - center.X));
+        double halfY = samples.Max(point => Math.Abs(point.Y - center.Y));
+        double halfZ = samples.Max(point => Math.Abs(point.Z - center.Z));
+        return (Math.Max(2.0, halfX * 2.0), Math.Max(2.0, halfY * 2.0), Math.Max(2.0, halfZ * 2.0));
     }
 
     private static AnatomyStructureDefinition CreatePackStructureDefinition(string anatomyLabel, VolumeRoiPriorProbe probe)

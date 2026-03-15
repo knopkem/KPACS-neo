@@ -41,3 +41,18 @@ public sealed record VolumeRoiAnatomyPriorMatch(
     VolumeRoiAnatomyPriorRecord Prior,
     double Score,
     string Hint);
+
+public sealed record AnatomyDeveloperOverlayModel(
+    string AnatomyLabel,
+    string RegionLabel,
+    string SourceModality,
+    string SourceSeriesDescription,
+    double NormalizedCenterX,
+    double NormalizedCenterY,
+    double NormalizedCenterZ,
+    double NormalizedSizeX,
+    double NormalizedSizeY,
+    double NormalizedSizeZ,
+    double EstimatedVolumeCubicMillimeters,
+    int UseCount,
+    DateTime UpdatedAtUtc);

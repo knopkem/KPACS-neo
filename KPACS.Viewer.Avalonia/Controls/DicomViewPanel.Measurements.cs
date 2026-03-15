@@ -2,12 +2,15 @@ using System.Buffers.Binary;
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Collections;
 using Avalonia.Controls.Shapes;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
 using Avalonia.Platform;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.Rendering;
+using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer.Controls;
 
@@ -40,6 +43,7 @@ public partial class DicomViewPanel
     private MeasurementDraft? _measurementDraft;
     private MeasurementEditSession? _measurementEditSession;
     private Func<StudyMeasurement, Point[], string?>? _measurementTextSupplementProvider;
+    private readonly List<AnatomyDeveloperOverlayModel> _developerAnatomyOverlays = new();
 
     public event Action<StudyMeasurement>? MeasurementCreated;
     public event Action<StudyMeasurement>? MeasurementUpdated;
@@ -98,6 +102,17 @@ public partial class DicomViewPanel
         _selectedMeasurementId = _measurements.Any(measurement => measurement.Id == selectedMeasurementId)
             ? selectedMeasurementId
             : null;
+        UpdateMeasurementPresentation();
+    }
+
+    public void SetDeveloperAnatomyOverlays(IEnumerable<AnatomyDeveloperOverlayModel>? overlays)
+    {
+        _developerAnatomyOverlays.Clear();
+        if (overlays is not null)
+        {
+            _developerAnatomyOverlays.AddRange(overlays);
+        }
+
         UpdateMeasurementPresentation();
     }
 
@@ -699,6 +714,8 @@ public partial class DicomViewPanel
     {
         MeasurementOverlay.Children.Clear();
 
+        DrawDeveloperAnatomyOverlays();
+
         foreach (RenderedMeasurement rendered in GetRenderedMeasurements())
         {
             DrawRenderedMeasurement(rendered);
@@ -707,6 +724,201 @@ public partial class DicomViewPanel
         DrawMeasurementDraft();
         DrawVolumeRoiDraftOverlay();
         DrawBallRoiBrushOverlay();
+    }
+
+    private void DrawDeveloperAnatomyOverlays()
+    {
+        if (SpatialMetadata is null || BoundVolume is null || _developerAnatomyOverlays.Count == 0)
+        {
+            return;
+        }
+
+        IReadOnlyList<AnatomyDeveloperOverlayModel> overlays = _developerAnatomyOverlays
+            .OrderByDescending(candidate => candidate.UseCount)
+            .ThenByDescending(candidate => candidate.UpdatedAtUtc)
+            .ToArray();
+
+        int labelBudget = Math.Min(3, overlays.Count);
+        for (int index = 0; index < overlays.Count; index++)
+        {
+            AnatomyDeveloperOverlayModel overlay = overlays[index];
+            if (!TryProjectDeveloperAnatomyOverlay(overlay, SpatialMetadata, BoundVolume, out Point[] imagePoints) || imagePoints.Length < 3)
+            {
+                continue;
+            }
+
+            Color strokeColor = GetDeveloperAnatomyOverlayColor(overlay.AnatomyLabel);
+            var polygon = new Polygon
+            {
+                Points = new Points(imagePoints.Select(ImageToControlPoint)),
+                Stroke = new SolidColorBrush(strokeColor),
+                Fill = new SolidColorBrush(Color.FromArgb(28, strokeColor.R, strokeColor.G, strokeColor.B)),
+                StrokeThickness = 1.4,
+                StrokeDashArray = new AvaloniaList<double> { 6, 4 },
+                IsHitTestVisible = false,
+            };
+            MeasurementOverlay.Children.Add(polygon);
+
+            if (index >= labelBudget)
+            {
+                continue;
+            }
+
+            Point labelAnchor = GetPolygonCenter(imagePoints.Select(ImageToControlPoint).ToArray());
+            string labelText = overlay.UseCount > 1
+                ? $"{overlay.AnatomyLabel} · model ×{overlay.UseCount}"
+                : $"{overlay.AnatomyLabel} · model";
+            Border label = CreateMeasurementLabelBorder(isSelected: false, labelText);
+            label.BorderBrush = new SolidColorBrush(strokeColor);
+            label.Opacity = 0.92;
+            label.Measure(s_unboundedMeasureSize);
+            Canvas.SetLeft(label, labelAnchor.X + 8);
+            Canvas.SetTop(label, labelAnchor.Y + 8);
+            MeasurementOverlay.Children.Add(label);
+        }
+    }
+
+    private bool TryProjectDeveloperAnatomyOverlay(
+        AnatomyDeveloperOverlayModel overlay,
+        DicomSpatialMetadata metadata,
+        SeriesVolume volume,
+        out Point[] imagePoints)
+    {
+        imagePoints = Array.Empty<Point>();
+        if (!TryGetDeveloperOverlayBounds(volume, out DeveloperOverlaySpatialBounds bounds))
+        {
+            return false;
+        }
+
+        SpatialVector3D center = new(
+            DenormalizeOverlayCoordinate(overlay.NormalizedCenterX, bounds.MinX, bounds.MaxX),
+            DenormalizeOverlayCoordinate(overlay.NormalizedCenterY, bounds.MinY, bounds.MaxY),
+            DenormalizeOverlayCoordinate(overlay.NormalizedCenterZ, bounds.MinZ, bounds.MaxZ));
+
+        SpatialVector3D radii = new(
+            Math.Max(1.5, (bounds.MaxX - bounds.MinX) * Math.Max(overlay.NormalizedSizeX, 0.01) * 0.5),
+            Math.Max(1.5, (bounds.MaxY - bounds.MinY) * Math.Max(overlay.NormalizedSizeY, 0.01) * 0.5),
+            Math.Max(1.5, (bounds.MaxZ - bounds.MinZ) * Math.Max(overlay.NormalizedSizeZ, 0.01) * 0.5));
+
+        return TryIntersectAxisAlignedEllipsoidWithPlane(center, radii, metadata, out imagePoints);
+    }
+
+    private static bool TryGetDeveloperOverlayBounds(SeriesVolume volume, out DeveloperOverlaySpatialBounds bounds)
+    {
+        SpatialVector3D[] corners =
+        {
+            volume.VoxelToPatient(0, 0, 0),
+            volume.VoxelToPatient(volume.SizeX - 1, 0, 0),
+            volume.VoxelToPatient(0, volume.SizeY - 1, 0),
+            volume.VoxelToPatient(0, 0, volume.SizeZ - 1),
+            volume.VoxelToPatient(volume.SizeX - 1, volume.SizeY - 1, 0),
+            volume.VoxelToPatient(volume.SizeX - 1, 0, volume.SizeZ - 1),
+            volume.VoxelToPatient(0, volume.SizeY - 1, volume.SizeZ - 1),
+            volume.VoxelToPatient(volume.SizeX - 1, volume.SizeY - 1, volume.SizeZ - 1),
+        };
+
+        bounds = new DeveloperOverlaySpatialBounds(
+            corners.Min(point => point.X),
+            corners.Max(point => point.X),
+            corners.Min(point => point.Y),
+            corners.Max(point => point.Y),
+            corners.Min(point => point.Z),
+            corners.Max(point => point.Z));
+        return true;
+    }
+
+    private static double DenormalizeOverlayCoordinate(double normalized, double min, double max)
+    {
+        if (double.IsNaN(normalized) || double.IsInfinity(normalized))
+        {
+            normalized = 0.5;
+        }
+
+        return min + (Math.Clamp(normalized, 0, 1) * (max - min));
+    }
+
+    private static bool TryIntersectAxisAlignedEllipsoidWithPlane(
+        SpatialVector3D center,
+        SpatialVector3D radii,
+        DicomSpatialMetadata metadata,
+        out Point[] imagePoints)
+    {
+        imagePoints = Array.Empty<Point>();
+
+        double invRadiusX2 = 1.0 / Math.Max(radii.X * radii.X, 1e-6);
+        double invRadiusY2 = 1.0 / Math.Max(radii.Y * radii.Y, 1e-6);
+        double invRadiusZ2 = 1.0 / Math.Max(radii.Z * radii.Z, 1e-6);
+
+        SpatialVector3D delta = metadata.Origin - center;
+        SpatialVector3D row = metadata.RowDirection.Normalize();
+        SpatialVector3D column = metadata.ColumnDirection.Normalize();
+
+        double a = (row.X * row.X * invRadiusX2) + (row.Y * row.Y * invRadiusY2) + (row.Z * row.Z * invRadiusZ2);
+        double b = 2 * ((row.X * column.X * invRadiusX2) + (row.Y * column.Y * invRadiusY2) + (row.Z * column.Z * invRadiusZ2));
+        double c = (column.X * column.X * invRadiusX2) + (column.Y * column.Y * invRadiusY2) + (column.Z * column.Z * invRadiusZ2);
+        double d = 2 * ((delta.X * row.X * invRadiusX2) + (delta.Y * row.Y * invRadiusY2) + (delta.Z * row.Z * invRadiusZ2));
+        double e = 2 * ((delta.X * column.X * invRadiusX2) + (delta.Y * column.Y * invRadiusY2) + (delta.Z * column.Z * invRadiusZ2));
+
+        double determinant = (4 * a * c) - (b * b);
+        if (determinant <= 1e-9)
+        {
+            return false;
+        }
+
+        double s0 = ((b * e) - (2 * c * d)) / determinant;
+        double t0 = ((b * d) - (2 * a * e)) / determinant;
+
+        double f0 = EvaluateEllipsoidPlaneConic(a, b, c, d, e,
+            (delta.X * delta.X * invRadiusX2) + (delta.Y * delta.Y * invRadiusY2) + (delta.Z * delta.Z * invRadiusZ2) - 1,
+            s0,
+            t0);
+        if (f0 >= -1e-6)
+        {
+            return false;
+        }
+
+        const int sampleCount = 72;
+        var points = new List<Point>(sampleCount);
+        for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+        {
+            double angle = (Math.PI * 2 * sampleIndex) / sampleCount;
+            double cos = Math.Cos(angle);
+            double sin = Math.Sin(angle);
+            double directionDenominator = (a * cos * cos) + (b * cos * sin) + (c * sin * sin);
+            if (directionDenominator <= 1e-9)
+            {
+                continue;
+            }
+
+            double radius = Math.Sqrt(Math.Max(0, -f0 / directionDenominator));
+            double s = s0 + (cos * radius);
+            double t = t0 + (sin * radius);
+            SpatialVector3D patientPoint = metadata.Origin + (row * s) + (column * t);
+            Point pixelPoint = metadata.PixelPointFromPatient(patientPoint);
+            if (double.IsNaN(pixelPoint.X) || double.IsNaN(pixelPoint.Y) || double.IsInfinity(pixelPoint.X) || double.IsInfinity(pixelPoint.Y))
+            {
+                continue;
+            }
+
+            points.Add(pixelPoint);
+        }
+
+        imagePoints = points.ToArray();
+        return imagePoints.Length >= 12;
+    }
+
+    private static double EvaluateEllipsoidPlaneConic(double a, double b, double c, double d, double e, double f, double s, double t) =>
+        (a * s * s) + (b * s * t) + (c * t * t) + (d * s) + (e * t) + f;
+
+    private static Color GetDeveloperAnatomyOverlayColor(string label)
+    {
+        string normalized = string.IsNullOrWhiteSpace(label) ? "model" : label.Trim();
+        int hash = StringComparer.OrdinalIgnoreCase.GetHashCode(normalized);
+        byte[] paletteR = { 0x7F, 0x5C, 0x8E, 0x47, 0xE2, 0x4F };
+        byte[] paletteG = { 0xEA, 0xD9, 0xC7, 0xD1, 0xA0, 0xB5 };
+        byte[] paletteB = { 0x9A, 0xFF, 0xF7, 0xFF, 0x5B, 0xFF };
+        int paletteIndex = Math.Abs(hash % paletteR.Length);
+        return Color.FromArgb(0xE8, paletteR[paletteIndex], paletteG[paletteIndex], paletteB[paletteIndex]);
     }
 
     private List<RenderedMeasurement> GetRenderedMeasurements()
@@ -1749,6 +1961,14 @@ public partial class DicomViewPanel
         public bool MoveLabel { get; } = moveLabel;
         public Point InitialLabelOffset { get; } = initialLabelOffset;
     }
+
+    private readonly record struct DeveloperOverlaySpatialBounds(
+        double MinX,
+        double MaxX,
+        double MinY,
+        double MaxY,
+        double MinZ,
+        double MaxZ);
 
     private sealed record MeasurementHit(StudyMeasurement Measurement, Point[] ImagePoints, int HandleIndex, bool MoveWholeMeasurement, bool MoveLabel);
     private sealed record RenderedMeasurement(StudyMeasurement Measurement, Point[] ImagePoints, Point[] ControlPoints, MeasurementLabel? Label, bool IsSelected, bool IsInterpolatedVolumeSlice = false);
