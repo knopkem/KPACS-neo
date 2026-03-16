@@ -8,8 +8,8 @@
         <!-- DICOM image display -->
         <!-- RenderTransformOrigin must be 0,0 (top-left) to match WPF behavior.
              Avalonia defaults to 0.5,0.5 (center), which breaks the zoom/pan math. -->
-        <Image x:Name="DicomImage"
-               Stretch="None"
+         <Image x:Name="DicomImage"
+             Stretch="Fill"
                HorizontalAlignment="Left"
                VerticalAlignment="Top"
                RenderTransformOrigin="0%,0%"

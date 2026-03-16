@@ -1381,14 +1381,23 @@ public partial class DicomViewPanel
 
         const int sourceSize = 17;
         const int destinationSize = 128;
-        int centerX = (int)Math.Round(imagePoint.X);
-        int centerY = (int)Math.Round(imagePoint.Y);
         int sourceRadius = sourceSize / 2;
 
         using ILockedFramebuffer sourceFramebuffer = _displayBitmap.Lock();
         int sourceStride = sourceFramebuffer.RowBytes;
         byte[] sourceBytes = new byte[sourceStride * sourceFramebuffer.Size.Height];
         Marshal.Copy(sourceFramebuffer.Address, sourceBytes, 0, sourceBytes.Length);
+
+        int renderWidth = sourceFramebuffer.Size.Width;
+        int renderHeight = sourceFramebuffer.Size.Height;
+        int centerX = Math.Clamp(
+            (int)Math.Round(((imagePoint.X + 0.5) * renderWidth / Math.Max(1, _imageWidth)) - 0.5),
+            0,
+            Math.Max(0, renderWidth - 1));
+        int centerY = Math.Clamp(
+            (int)Math.Round(((imagePoint.Y + 0.5) * renderHeight / Math.Max(1, _imageHeight)) - 0.5),
+            0,
+            Math.Max(0, renderHeight - 1));
 
         var bitmap = new WriteableBitmap(
             new PixelSize(destinationSize, destinationSize),
@@ -1402,10 +1411,10 @@ public partial class DicomViewPanel
 
         for (int y = 0; y < destinationSize; y++)
         {
-            int sourceY = Math.Clamp(centerY - sourceRadius + (y * sourceSize / destinationSize), 0, _imageHeight - 1);
+            int sourceY = Math.Clamp(centerY - sourceRadius + (y * sourceSize / destinationSize), 0, renderHeight - 1);
             for (int x = 0; x < destinationSize; x++)
             {
-                int sourceX = Math.Clamp(centerX - sourceRadius + (x * sourceSize / destinationSize), 0, _imageWidth - 1);
+                int sourceX = Math.Clamp(centerX - sourceRadius + (x * sourceSize / destinationSize), 0, renderWidth - 1);
                 int sourceIndex = (sourceY * sourceStride) + (sourceX * bytesPerPixel);
                 int destinationIndex = (y * destinationFramebuffer.RowBytes) + (x * bytesPerPixel);
                 Array.Copy(sourceBytes, sourceIndex, destinationBytes, destinationIndex, bytesPerPixel);

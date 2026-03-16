@@ -57,6 +57,111 @@ public static class DicomPixelRenderer
         }
     }
 
+    public static void RenderScaled(
+        byte[] rawPixels,
+        int width,
+        int height,
+        int bitsAllocated,
+        int bitsStored,
+        bool isSigned,
+        int samplesPerPixel,
+        double slope,
+        double intercept,
+        double windowCenter,
+        double windowWidth,
+        byte[] lutR,
+        byte[] lutG,
+        byte[] lutB,
+        bool isMonochrome1,
+        string photometricInterpretation,
+        int planarConfiguration,
+        int outputWidth,
+        int outputHeight,
+        byte[] outputBgra)
+    {
+        if (outputWidth <= 0 || outputHeight <= 0)
+        {
+            return;
+        }
+
+        if (outputWidth == width && outputHeight == height)
+        {
+            Render(
+                rawPixels,
+                width,
+                height,
+                bitsAllocated,
+                bitsStored,
+                isSigned,
+                samplesPerPixel,
+                slope,
+                intercept,
+                windowCenter,
+                windowWidth,
+                lutR,
+                lutG,
+                lutB,
+                isMonochrome1,
+                photometricInterpretation,
+                planarConfiguration,
+                outputBgra);
+            return;
+        }
+
+        if (samplesPerPixel >= 3)
+        {
+            RenderRgbScaled(
+                rawPixels,
+                width,
+                height,
+                outputWidth,
+                outputHeight,
+                windowCenter,
+                windowWidth,
+                photometricInterpretation,
+                planarConfiguration,
+                outputBgra);
+        }
+        else if (bitsAllocated >= 16)
+        {
+            Render16BitScaled(
+                rawPixels,
+                width,
+                height,
+                bitsStored,
+                isSigned,
+                slope,
+                intercept,
+                windowCenter,
+                windowWidth,
+                lutR,
+                lutG,
+                lutB,
+                isMonochrome1,
+                outputWidth,
+                outputHeight,
+                outputBgra);
+        }
+        else
+        {
+            Render8BitScaled(
+                rawPixels,
+                width,
+                height,
+                slope,
+                intercept,
+                windowCenter,
+                windowWidth,
+                lutR,
+                lutG,
+                lutB,
+                isMonochrome1,
+                outputWidth,
+                outputHeight,
+                outputBgra);
+        }
+    }
+
     public static (double Center, double Width) ComputeAutoWindow(
         byte[] rawPixels, int width, int height,
         int bitsAllocated, int bitsStored, bool isSigned,
@@ -74,7 +179,7 @@ public static class DicomPixelRenderer
 
             for (int i = 0; i < count; i += step)
             {
-                double raw = isSigned ? (double)(short)pixels[i] : pixels[i];
+                double raw = DecodeStored16Bit(pixels[i], bitsStored, isSigned);
                 double rescaled = slope * raw + intercept;
                 if (rescaled < min) min = rescaled;
                 if (rescaled > max) max = rescaled;
@@ -114,7 +219,7 @@ public static class DicomPixelRenderer
         byte[] outputBgra)
     {
         int pixelCount = width * height;
-        byte[] windowLut = GetOrCreate16BitWindowLut(isSigned, slope, intercept, windowCenter, windowWidth, isMonochrome1);
+        byte[] windowLut = GetOrCreate16BitWindowLut(bitsStored, isSigned, slope, intercept, windowCenter, windowWidth, isMonochrome1);
 
         var srcSpan = MemoryMarshal.Cast<byte, ushort>(rawPixels.AsSpan());
         int count = Math.Min(srcSpan.Length, pixelCount);
@@ -186,6 +291,87 @@ public static class DicomPixelRenderer
         }
     }
 
+    public static void RenderRescaled16BitScaled(
+        short[] rescaledPixels,
+        int width,
+        int height,
+        double windowCenter,
+        double windowWidth,
+        byte[] lutR,
+        byte[] lutG,
+        byte[] lutB,
+        bool isMonochrome1,
+        int outputWidth,
+        int outputHeight,
+        byte[] outputBgra)
+    {
+        if (outputWidth <= 0 || outputHeight <= 0)
+        {
+            return;
+        }
+
+        if (outputWidth == width && outputHeight == height)
+        {
+            RenderRescaled16Bit(
+                rescaledPixels,
+                width,
+                height,
+                windowCenter,
+                windowWidth,
+                lutR,
+                lutG,
+                lutB,
+                isMonochrome1,
+                outputBgra);
+            return;
+        }
+
+        // Build window LUT without monochrome1 – we apply inversion after interpolation
+        byte[] windowLut = GetOrCreateRescaled16BitWindowLut(windowCenter, windowWidth, false);
+        bool downscaling = outputWidth < width || outputHeight < height;
+        int dstIdx = 0;
+
+        if (downscaling)
+        {
+            // DOWNSCALING: window each source pixel first, then area-sample the windowed values.
+            for (int y = 0; y < outputHeight; y++)
+            {
+                for (int x = 0; x < outputWidth; x++)
+                {
+                    double grayValue = SampleRescaledWindowedArea(rescaledPixels, width, height, x, y, outputWidth, outputHeight, windowLut);
+                    byte gray = ClampToByte(grayValue);
+                    if (isMonochrome1) gray = (byte)(255 - gray);
+                    outputBgra[dstIdx] = lutB[gray];
+                    outputBgra[dstIdx + 1] = lutG[gray];
+                    outputBgra[dstIdx + 2] = lutR[gray];
+                    outputBgra[dstIdx + 3] = 255;
+                    dstIdx += 4;
+                }
+            }
+        }
+        else
+        {
+            // UPSCALING: bilinear-interpolate raw rescaled 16-bit values, then window.
+            double wMin = windowCenter - (windowWidth / 2.0);
+            double wMax = windowCenter + (windowWidth / 2.0);
+
+            for (int y = 0; y < outputHeight; y++)
+            {
+                for (int x = 0; x < outputWidth; x++)
+                {
+                    double value = SampleRescaled16BitBilinear(rescaledPixels, width, height, x, y, outputWidth, outputHeight);
+                    byte gray = WindowToGray(value, wMin, wMax, windowWidth);
+                    if (isMonochrome1) gray = (byte)(255 - gray);
+                    outputBgra[dstIdx] = lutB[gray];
+                    outputBgra[dstIdx + 1] = lutG[gray];
+                    outputBgra[dstIdx + 2] = lutR[gray];
+                    outputBgra[dstIdx + 3] = 255;
+                    dstIdx += 4;
+                }
+            }
+        }
+    }
+
     /// <summary>
     /// Computes auto window center/width from a rescaled 16-bit signed buffer.
     /// </summary>
@@ -246,6 +432,204 @@ public static class DicomPixelRenderer
         }
     }
 
+    private static void Render16BitScaled(
+        byte[] rawPixels,
+        int width,
+        int height,
+        int bitsStored,
+        bool isSigned,
+        double slope,
+        double intercept,
+        double windowCenter,
+        double windowWidth,
+        byte[] lutR,
+        byte[] lutG,
+        byte[] lutB,
+        bool isMonochrome1,
+        int outputWidth,
+        int outputHeight,
+        byte[] outputBgra)
+    {
+        var src = MemoryMarshal.Cast<byte, ushort>(rawPixels.AsSpan());
+        bool downscaling = outputWidth < width || outputHeight < height;
+        int dstIdx = 0;
+
+        if (downscaling)
+        {
+            // DOWNSCALING: window each source pixel first, then area-sample the windowed 0..255 values.
+            // Post-windowing interpolation prevents aliasing from averaging disparate HU values.
+            byte[] windowLut = GetOrCreate16BitWindowLut(bitsStored, isSigned, slope, intercept,
+                windowCenter, windowWidth, false);
+
+            for (int y = 0; y < outputHeight; y++)
+            {
+                for (int x = 0; x < outputWidth; x++)
+                {
+                    double grayValue = SampleWindowedArea(src, width, height, x, y, outputWidth, outputHeight, windowLut);
+                    byte gray = ClampToByte(grayValue);
+                    if (isMonochrome1) gray = (byte)(255 - gray);
+                    outputBgra[dstIdx] = lutB[gray];
+                    outputBgra[dstIdx + 1] = lutG[gray];
+                    outputBgra[dstIdx + 2] = lutR[gray];
+                    outputBgra[dstIdx + 3] = 255;
+                    dstIdx += 4;
+                }
+            }
+        }
+        else
+        {
+            // UPSCALING: bilinear-interpolate raw 16-bit values, then window.
+            // Pre-windowing interpolation provides subpixel-accurate edge positioning
+            // at tissue boundaries — the same approach used by IQ-View's Stretch16BitBuffer.
+            // This anti-aliases diagonal bone-air edges that would otherwise show staircases.
+            double wMin = windowCenter - (windowWidth / 2.0);
+            double wMax = windowCenter + (windowWidth / 2.0);
+
+            for (int y = 0; y < outputHeight; y++)
+            {
+                for (int x = 0; x < outputWidth; x++)
+                {
+                    double value = SampleStored16BitBilinear(src, width, height, x, y, outputWidth, outputHeight, bitsStored, isSigned, slope, intercept);
+                    byte gray = WindowToGray(value, wMin, wMax, windowWidth);
+                    if (isMonochrome1) gray = (byte)(255 - gray);
+                    outputBgra[dstIdx] = lutB[gray];
+                    outputBgra[dstIdx + 1] = lutG[gray];
+                    outputBgra[dstIdx + 2] = lutR[gray];
+                    outputBgra[dstIdx + 3] = 255;
+                    dstIdx += 4;
+                }
+            }
+        }
+    }
+
+    private static void Render8BitScaled(
+        byte[] rawPixels,
+        int width,
+        int height,
+        double slope,
+        double intercept,
+        double windowCenter,
+        double windowWidth,
+        byte[] lutR,
+        byte[] lutG,
+        byte[] lutB,
+        bool isMonochrome1,
+        int outputWidth,
+        int outputHeight,
+        byte[] outputBgra)
+    {
+        // Build window LUT without monochrome1 – we apply inversion after interpolation
+        byte[] windowLut = GetOrCreate8BitWindowLut(slope, intercept, windowCenter, windowWidth, false);
+        int dstIdx = 0;
+
+        for (int y = 0; y < outputHeight; y++)
+        {
+            double sourceY = MapOutputToSource(y, height, outputHeight);
+            int yBase = (int)Math.Floor(sourceY);
+            int y0 = ClampIndex(yBase, height);
+            int y1 = ClampIndex(y0 + 1, height);
+            double yWeight = sourceY - yBase;
+
+            for (int x = 0; x < outputWidth; x++)
+            {
+                double sourceX = MapOutputToSource(x, width, outputWidth);
+                int xBase = (int)Math.Floor(sourceX);
+                int x0 = ClampIndex(xBase, width);
+                int x1 = ClampIndex(x0 + 1, width);
+                double xWeight = sourceX - xBase;
+
+                // Window each source pixel FIRST, then bilinear interpolate the windowed values
+                double top = Lerp(
+                    windowLut[rawPixels[(y0 * width) + x0]],
+                    windowLut[rawPixels[(y0 * width) + x1]],
+                    xWeight);
+                double bottom = Lerp(
+                    windowLut[rawPixels[(y1 * width) + x0]],
+                    windowLut[rawPixels[(y1 * width) + x1]],
+                    xWeight);
+                double value = Lerp(top, bottom, yWeight);
+
+                byte gray = ClampToByte(value);
+                if (isMonochrome1)
+                {
+                    gray = (byte)(255 - gray);
+                }
+
+                outputBgra[dstIdx] = lutB[gray];
+                outputBgra[dstIdx + 1] = lutG[gray];
+                outputBgra[dstIdx + 2] = lutR[gray];
+                outputBgra[dstIdx + 3] = 255;
+                dstIdx += 4;
+            }
+        }
+    }
+
+    private static void RenderRgbScaled(
+        byte[] rawPixels,
+        int width,
+        int height,
+        int outputWidth,
+        int outputHeight,
+        double windowCenter,
+        double windowWidth,
+        string photometricInterpretation,
+        int planarConfiguration,
+        byte[] outputBgra)
+    {
+        byte[]? contrastLut = null;
+        bool needsContrast = !(Math.Abs(windowCenter - 127) < 1 && Math.Abs(windowWidth - 255) < 1)
+                             && windowWidth > 0;
+        string photometric = (photometricInterpretation ?? "RGB").Trim().ToUpperInvariant();
+
+        if (needsContrast)
+        {
+            contrastLut = GetOrCreateContrastLut(windowCenter, windowWidth);
+        }
+
+        int pixelCount = width * height;
+        int dstIdx = 0;
+
+        for (int y = 0; y < outputHeight; y++)
+        {
+            double sourceY = MapOutputToSource(y, height, outputHeight);
+            int yBase = (int)Math.Floor(sourceY);
+            int y0 = ClampIndex(yBase, height);
+            int y1 = ClampIndex(y0 + 1, height);
+            double yWeight = sourceY - yBase;
+
+            for (int x = 0; x < outputWidth; x++)
+            {
+                double sourceX = MapOutputToSource(x, width, outputWidth);
+                int xBase = (int)Math.Floor(sourceX);
+                int x0 = ClampIndex(xBase, width);
+                int x1 = ClampIndex(x0 + 1, width);
+                double xWeight = sourceX - xBase;
+
+                ReadColorPixel(rawPixels, pixelCount, (y0 * width) + x0, photometric, planarConfiguration, out byte nwR, out byte nwG, out byte nwB);
+                ReadColorPixel(rawPixels, pixelCount, (y0 * width) + x1, photometric, planarConfiguration, out byte neR, out byte neG, out byte neB);
+                ReadColorPixel(rawPixels, pixelCount, (y1 * width) + x0, photometric, planarConfiguration, out byte swR, out byte swG, out byte swB);
+                ReadColorPixel(rawPixels, pixelCount, (y1 * width) + x1, photometric, planarConfiguration, out byte seR, out byte seG, out byte seB);
+
+                byte r = ClampToByte(Lerp(Lerp(nwR, neR, xWeight), Lerp(swR, seR, xWeight), yWeight));
+                byte g = ClampToByte(Lerp(Lerp(nwG, neG, xWeight), Lerp(swG, seG, xWeight), yWeight));
+                byte b = ClampToByte(Lerp(Lerp(nwB, neB, xWeight), Lerp(swB, seB, xWeight), yWeight));
+
+                if (contrastLut != null)
+                {
+                    r = contrastLut[r];
+                    g = contrastLut[g];
+                    b = contrastLut[b];
+                }
+
+                outputBgra[dstIdx] = b;
+                outputBgra[dstIdx + 1] = g;
+                outputBgra[dstIdx + 2] = r;
+                outputBgra[dstIdx + 3] = 255;
+                dstIdx += 4;
+            }
+        }
+    }
+
     private static byte[] GetOrCreate8BitWindowLut(
         double slope,
         double intercept,
@@ -253,11 +637,12 @@ public static class DicomPixelRenderer
         double windowWidth,
         bool isMonochrome1)
     {
-        var key = new WindowLutKey(8, false, slope, intercept, windowCenter, windowWidth, isMonochrome1);
+        var key = new WindowLutKey(8, 8, false, slope, intercept, windowCenter, windowWidth, isMonochrome1);
         return s_windowLutCache.GetOrAdd(key, static cacheKey => Build8BitWindowLut(cacheKey));
     }
 
     private static byte[] GetOrCreate16BitWindowLut(
+        int bitsStored,
         bool isSigned,
         double slope,
         double intercept,
@@ -265,7 +650,7 @@ public static class DicomPixelRenderer
         double windowWidth,
         bool isMonochrome1)
     {
-        var key = new WindowLutKey(16, isSigned, slope, intercept, windowCenter, windowWidth, isMonochrome1);
+        var key = new WindowLutKey(16, bitsStored, isSigned, slope, intercept, windowCenter, windowWidth, isMonochrome1);
         return s_windowLutCache.GetOrAdd(key, static cacheKey => Build16BitWindowLut(cacheKey));
     }
 
@@ -274,7 +659,7 @@ public static class DicomPixelRenderer
         double windowWidth,
         bool isMonochrome1)
     {
-        var key = new WindowLutKey(17, true, 1.0, 0.0, windowCenter, windowWidth, isMonochrome1);
+        var key = new WindowLutKey(17, 16, true, 1.0, 0.0, windowCenter, windowWidth, isMonochrome1);
         return s_windowLutCache.GetOrAdd(key, static cacheKey => BuildRescaled16BitWindowLut(cacheKey));
     }
 
@@ -313,7 +698,7 @@ public static class DicomPixelRenderer
 
         for (int i = 0; i < windowLut.Length; i++)
         {
-            double rawValue = key.IsSigned ? (double)(short)unchecked((ushort)i) : i;
+            double rawValue = DecodeStored16Bit(unchecked((ushort)i), key.BitsStored, key.IsSigned);
             double rescaled = key.Slope * rawValue + key.Intercept;
             byte gray = WindowToGray(rescaled, wMin, wMax, key.WindowWidth);
             if (key.IsMonochrome1)
@@ -381,8 +766,340 @@ public static class DicomPixelRenderer
         return (byte)((value - windowMin) / windowWidth * 255.0);
     }
 
+    private static double DecodeStored16Bit(ushort stored, int bitsStored, bool isSigned)
+    {
+        int effectiveBits = Math.Clamp(bitsStored, 1, 16);
+        if (effectiveBits >= 16)
+        {
+            return isSigned ? (short)stored : stored;
+        }
+
+        uint mask = (1u << effectiveBits) - 1u;
+        uint value = stored & mask;
+
+        if (!isSigned)
+        {
+            return value;
+        }
+
+        uint signBit = 1u << (effectiveBits - 1);
+        if ((value & signBit) == 0)
+        {
+            return value;
+        }
+
+        int signedValue = (int)value - (1 << effectiveBits);
+        return signedValue;
+    }
+
+    // -----------------------------------------------------------------------
+    // Pre-windowing bilinear interpolation (for UPSCALING).
+    // Used when outputSize > sourceSize. Bilinear-interpolates raw 16-bit values,
+    // then windows the result. This provides subpixel-accurate edge positioning
+    // at tissue boundaries, anti-aliasing diagonal bone-air edges.
+    // This is exactly IQ-View's approach (Stretch16BitBuffer → Buffer16ToBmp).
+    // -----------------------------------------------------------------------
+
+    private static double ReadRescaled16BitValue(
+        ReadOnlySpan<ushort> source,
+        int width,
+        int x,
+        int y,
+        int bitsStored,
+        bool isSigned,
+        double slope,
+        double intercept)
+    {
+        ushort stored = source[(y * width) + x];
+        double raw = DecodeStored16Bit(stored, bitsStored, isSigned);
+        return (raw * slope) + intercept;
+    }
+
+    /// <summary>
+    /// Pre-windowing bilinear interpolation on raw 16-bit stored data.
+    /// Interpolates rescaled HU values, then the caller applies windowing.
+    /// </summary>
+    private static double SampleStored16BitBilinear(
+        ReadOnlySpan<ushort> source,
+        int width,
+        int height,
+        int outputX,
+        int outputY,
+        int outputWidth,
+        int outputHeight,
+        int bitsStored,
+        bool isSigned,
+        double slope,
+        double intercept)
+    {
+        double sourceY = MapOutputToSource(outputY, height, outputHeight);
+        int yBase = (int)Math.Floor(sourceY);
+        int y0 = ClampIndex(yBase, height);
+        int y1 = ClampIndex(y0 + 1, height);
+        double yWeight = sourceY - yBase;
+
+        double sourceX = MapOutputToSource(outputX, width, outputWidth);
+        int xBase = (int)Math.Floor(sourceX);
+        int x0 = ClampIndex(xBase, width);
+        int x1 = ClampIndex(x0 + 1, width);
+        double xWeight = sourceX - xBase;
+
+        double top = Lerp(
+            ReadRescaled16BitValue(source, width, x0, y0, bitsStored, isSigned, slope, intercept),
+            ReadRescaled16BitValue(source, width, x1, y0, bitsStored, isSigned, slope, intercept),
+            xWeight);
+        double bottom = Lerp(
+            ReadRescaled16BitValue(source, width, x0, y1, bitsStored, isSigned, slope, intercept),
+            ReadRescaled16BitValue(source, width, x1, y1, bitsStored, isSigned, slope, intercept),
+            xWeight);
+        return Lerp(top, bottom, yWeight);
+    }
+
+    /// <summary>
+    /// Pre-windowing bilinear interpolation on pre-rescaled short[] data.
+    /// Interpolates raw rescaled values, then the caller applies windowing.
+    /// </summary>
+    private static double SampleRescaled16BitBilinear(
+        short[] source,
+        int width,
+        int height,
+        int outputX,
+        int outputY,
+        int outputWidth,
+        int outputHeight)
+    {
+        double sourceY = MapOutputToSource(outputY, height, outputHeight);
+        int yBase = (int)Math.Floor(sourceY);
+        int y0 = ClampIndex(yBase, height);
+        int y1 = ClampIndex(y0 + 1, height);
+        double yWeight = sourceY - yBase;
+
+        double sourceX = MapOutputToSource(outputX, width, outputWidth);
+        int xBase = (int)Math.Floor(sourceX);
+        int x0 = ClampIndex(xBase, width);
+        int x1 = ClampIndex(x0 + 1, width);
+        double xWeight = sourceX - xBase;
+
+        double top = Lerp(source[(y0 * width) + x0], source[(y0 * width) + x1], xWeight);
+        double bottom = Lerp(source[(y1 * width) + x0], source[(y1 * width) + x1], xWeight);
+        return Lerp(top, bottom, yWeight);
+    }
+
+    // -----------------------------------------------------------------------
+    // Post-windowing interpolation functions (for DOWNSCALING).
+    // Window each source pixel FIRST (via LUT), THEN area-sample the windowed
+    // 0..255 values. This prevents narrow-window aliasing when multiple source
+    // pixels are averaged into one output pixel.
+    // -----------------------------------------------------------------------
+
+    /// <summary>
+    /// Bilinear interpolation on windowed (post-LUT) values from raw 16-bit stored data.
+    /// </summary>
+    private static double SampleWindowedBilinear(
+        ReadOnlySpan<ushort> source,
+        int width,
+        int height,
+        int outputX,
+        int outputY,
+        int outputWidth,
+        int outputHeight,
+        byte[] windowLut)
+    {
+        double sourceY = MapOutputToSource(outputY, height, outputHeight);
+        int yBase = (int)Math.Floor(sourceY);
+        int y0 = ClampIndex(yBase, height);
+        int y1 = ClampIndex(y0 + 1, height);
+        double yWeight = sourceY - yBase;
+
+        double sourceX = MapOutputToSource(outputX, width, outputWidth);
+        int xBase = (int)Math.Floor(sourceX);
+        int x0 = ClampIndex(xBase, width);
+        int x1 = ClampIndex(x0 + 1, width);
+        double xWeight = sourceX - xBase;
+
+        double top = Lerp(
+            windowLut[source[(y0 * width) + x0]],
+            windowLut[source[(y0 * width) + x1]],
+            xWeight);
+        double bottom = Lerp(
+            windowLut[source[(y1 * width) + x0]],
+            windowLut[source[(y1 * width) + x1]],
+            xWeight);
+        return Lerp(top, bottom, yWeight);
+    }
+
+    /// <summary>
+    /// Area-weighted sampling on windowed (post-LUT) values from raw 16-bit stored data.
+    /// </summary>
+    private static double SampleWindowedArea(
+        ReadOnlySpan<ushort> source,
+        int width,
+        int height,
+        int outputX,
+        int outputY,
+        int outputWidth,
+        int outputHeight,
+        byte[] windowLut)
+    {
+        double xStart = (double)outputX * width / outputWidth;
+        double xEnd = (double)(outputX + 1) * width / outputWidth;
+        double yStart = (double)outputY * height / outputHeight;
+        double yEnd = (double)(outputY + 1) * height / outputHeight;
+
+        int xFirst = ClampIndex((int)Math.Floor(xStart), width);
+        int xLast = ClampIndex((int)Math.Ceiling(xEnd) - 1, width);
+        int yFirst = ClampIndex((int)Math.Floor(yStart), height);
+        int yLast = ClampIndex((int)Math.Ceiling(yEnd) - 1, height);
+
+        double weightedSum = 0;
+        double totalWeight = 0;
+
+        for (int sy = yFirst; sy <= yLast; sy++)
+        {
+            double overlapY = Math.Min(yEnd, sy + 1.0) - Math.Max(yStart, sy);
+            if (overlapY <= 0)
+            {
+                continue;
+            }
+
+            for (int sx = xFirst; sx <= xLast; sx++)
+            {
+                double overlapX = Math.Min(xEnd, sx + 1.0) - Math.Max(xStart, sx);
+                if (overlapX <= 0)
+                {
+                    continue;
+                }
+
+                double weight = overlapX * overlapY;
+                weightedSum += windowLut[source[(sy * width) + sx]] * weight;
+                totalWeight += weight;
+            }
+        }
+
+        if (totalWeight <= 0)
+        {
+            int fallbackX = ClampIndex((int)Math.Round((xStart + xEnd) * 0.5), width);
+            int fallbackY = ClampIndex((int)Math.Round((yStart + yEnd) * 0.5), height);
+            return windowLut[source[(fallbackY * width) + fallbackX]];
+        }
+
+        return weightedSum / totalWeight;
+    }
+
+    /// <summary>
+    /// Bilinear interpolation on windowed (post-LUT) values from pre-rescaled short[] data.
+    /// </summary>
+    private static double SampleRescaledWindowedBilinear(
+        short[] source,
+        int width,
+        int height,
+        int outputX,
+        int outputY,
+        int outputWidth,
+        int outputHeight,
+        byte[] windowLut)
+    {
+        double sourceY = MapOutputToSource(outputY, height, outputHeight);
+        int yBase = (int)Math.Floor(sourceY);
+        int y0 = ClampIndex(yBase, height);
+        int y1 = ClampIndex(y0 + 1, height);
+        double yWeight = sourceY - yBase;
+
+        double sourceX = MapOutputToSource(outputX, width, outputWidth);
+        int xBase = (int)Math.Floor(sourceX);
+        int x0 = ClampIndex(xBase, width);
+        int x1 = ClampIndex(x0 + 1, width);
+        double xWeight = sourceX - xBase;
+
+        double top = Lerp(
+            windowLut[unchecked((ushort)source[(y0 * width) + x0])],
+            windowLut[unchecked((ushort)source[(y0 * width) + x1])],
+            xWeight);
+        double bottom = Lerp(
+            windowLut[unchecked((ushort)source[(y1 * width) + x0])],
+            windowLut[unchecked((ushort)source[(y1 * width) + x1])],
+            xWeight);
+        return Lerp(top, bottom, yWeight);
+    }
+
+    /// <summary>
+    /// Area-weighted sampling on windowed (post-LUT) values from pre-rescaled short[] data.
+    /// </summary>
+    private static double SampleRescaledWindowedArea(
+        short[] source,
+        int width,
+        int height,
+        int outputX,
+        int outputY,
+        int outputWidth,
+        int outputHeight,
+        byte[] windowLut)
+    {
+        double xStart = (double)outputX * width / outputWidth;
+        double xEnd = (double)(outputX + 1) * width / outputWidth;
+        double yStart = (double)outputY * height / outputHeight;
+        double yEnd = (double)(outputY + 1) * height / outputHeight;
+
+        int xFirst = ClampIndex((int)Math.Floor(xStart), width);
+        int xLast = ClampIndex((int)Math.Ceiling(xEnd) - 1, width);
+        int yFirst = ClampIndex((int)Math.Floor(yStart), height);
+        int yLast = ClampIndex((int)Math.Ceiling(yEnd) - 1, height);
+
+        double weightedSum = 0;
+        double totalWeight = 0;
+
+        for (int sy = yFirst; sy <= yLast; sy++)
+        {
+            double overlapY = Math.Min(yEnd, sy + 1.0) - Math.Max(yStart, sy);
+            if (overlapY <= 0)
+            {
+                continue;
+            }
+
+            for (int sx = xFirst; sx <= xLast; sx++)
+            {
+                double overlapX = Math.Min(xEnd, sx + 1.0) - Math.Max(xStart, sx);
+                if (overlapX <= 0)
+                {
+                    continue;
+                }
+
+                double weight = overlapX * overlapY;
+                weightedSum += windowLut[unchecked((ushort)source[(sy * width) + sx])] * weight;
+                totalWeight += weight;
+            }
+        }
+
+        if (totalWeight <= 0)
+        {
+            int fallbackX = ClampIndex((int)Math.Round((xStart + xEnd) * 0.5), width);
+            int fallbackY = ClampIndex((int)Math.Round((yStart + yEnd) * 0.5), height);
+            return windowLut[unchecked((ushort)source[(fallbackY * width) + fallbackX])];
+        }
+
+        return weightedSum / totalWeight;
+    }
+
+    private static double MapOutputToSource(int outputIndex, int sourceSize, int outputSize)
+    {
+        if (sourceSize <= 1 || outputSize <= 1)
+        {
+            return 0;
+        }
+
+        double ratio = (double)sourceSize / outputSize;
+        return Math.Clamp(((outputIndex + 0.5) * ratio) - 0.5, 0, sourceSize - 1);
+    }
+
+    private static int ClampIndex(int index, int length) =>
+        Math.Clamp(index, 0, Math.Max(0, length - 1));
+
+    private static double Lerp(double start, double end, double amount) =>
+        start + ((end - start) * amount);
+
     private readonly record struct WindowLutKey(
         int Kind,
+        int BitsStored,
         bool IsSigned,
         double Slope,
         double Intercept,

@@ -146,6 +146,11 @@ public partial class DicomViewPanel : UserControl
     private byte[] _lutB = new byte[256];
     private byte[]? _renderBuffer;
 
+    // Progressive rendering: render fast at native resolution during interaction,
+    // then re-render at display resolution after a short idle delay.
+    private DispatcherTimer? _sharpRenderTimer;
+    private bool _isSharpRender = true;  // true = render at display resolution, false = fast native-res
+
     // Transforms (created in code — Avalonia doesn't support x:Name on transforms)
     private readonly ScaleTransform _zoomTransform = new ScaleTransform(1, 1);
     private readonly TranslateTransform _panTransform = new TranslateTransform();
@@ -502,13 +507,8 @@ public partial class DicomViewPanel : UserControl
             else
                 SetColorLutInternal(_colorScheme);
 
-            // --- Create display bitmap at native resolution (Avalonia WriteableBitmap) ---
-            _displayBitmap = new WriteableBitmap(
-                new PixelSize(_imageWidth, _imageHeight),
-                new Vector(96, 96),
-                Avalonia.Platform.PixelFormat.Bgra8888,
-                Avalonia.Platform.AlphaFormat.Opaque);
-            DicomImage.Source = _displayBitmap;
+            _displayBitmap = null;
+            DicomImage.Source = null;
             ApplyDisplayImageSize();
             DicomImage.InvalidateMeasure();
 
@@ -732,24 +732,10 @@ public partial class DicomViewPanel : UserControl
 
         SpatialMetadata = resliced.SpatialMetadata;
         _fileName = SpatialMetadata?.FilePath ?? "";
-        // Create or resize the display bitmap if dimensions changed
-        if (_displayBitmap is null ||
-            _displayBitmap.PixelSize.Width != _imageWidth ||
-            _displayBitmap.PixelSize.Height != _imageHeight)
-        {
-            _displayBitmap = new WriteableBitmap(
-                new PixelSize(_imageWidth, _imageHeight),
-                new Vector(96, 96),
-                Avalonia.Platform.PixelFormat.Bgra8888,
-                Avalonia.Platform.AlphaFormat.Opaque);
-            DicomImage.Source = _displayBitmap;
-            DicomImage.InvalidateMeasure();
-        }
-
         ApplyDisplayImageSize();
 
         PlaceholderText.IsVisible = false;
-        RenderImage();
+        RenderImageFastThenSharp();
 
         if (_fitToWindow)
             ApplyInitialFitToWindow();
@@ -864,24 +850,41 @@ public partial class DicomViewPanel : UserControl
     // Rendering (ported from TdView.SetDimension → TdcmImgObj pipeline)
     // ==============================================================================================
 
-    private void RenderImage()
+    private void RenderImage() => RenderImage(sharp: true);
+
+    /// <summary>
+    /// Renders the image at fast (native) or sharp (display) resolution.
+    /// Use <see cref="RenderImageFastThenSharp"/> during continuous interaction
+    /// to get immediate visual feedback with deferred high-quality rendering.
+    /// </summary>
+    private void RenderImage(bool sharp)
     {
+        _isSharpRender = sharp;
+        int renderWidth = GetRenderPixelWidth();
+        int renderHeight = GetRenderPixelHeight();
+        if (!EnsureDisplayBitmap(renderWidth, renderHeight))
+        {
+            return;
+        }
+
         // Volume-based rendering path
         if (_volumeSlicePixels is not null && _displayBitmap is not null)
         {
-            int pixelCount = _imageWidth * _imageHeight;
+            int pixelCount = renderWidth * renderHeight;
             int requiredBytes = pixelCount * 4;
             byte[] outputBgra = EnsureRenderBuffer(requiredBytes);
 
-            DicomPixelRenderer.RenderRescaled16Bit(
+            DicomPixelRenderer.RenderRescaled16BitScaled(
                 _volumeSlicePixels,
                 _imageWidth, _imageHeight,
                 _windowCenter, _windowWidth,
                 _lutR, _lutG, _lutB,
                 _isMonochrome1,
+                renderWidth,
+                renderHeight,
                 outputBgra);
 
-            CopyToDisplayBitmap(outputBgra, requiredBytes);
+            CopyToDisplayBitmap(outputBgra, requiredBytes, renderWidth, renderHeight);
             return;
         }
 
@@ -889,11 +892,11 @@ public partial class DicomViewPanel : UserControl
         if (_rawPixelData == null || _displayBitmap == null) return;
 
         {
-            int pixelCount = _imageWidth * _imageHeight;
+            int pixelCount = renderWidth * renderHeight;
             int requiredBytes = pixelCount * 4;
             byte[] outputBgra = EnsureRenderBuffer(requiredBytes);
 
-            DicomPixelRenderer.Render(
+            DicomPixelRenderer.RenderScaled(
                 _rawPixelData,
                 _imageWidth, _imageHeight,
                 _bitsAllocated, _bitsStored,
@@ -904,12 +907,66 @@ public partial class DicomViewPanel : UserControl
                 _isMonochrome1,
                 _photometricInterpretation,
                 _planarConfiguration,
+                renderWidth,
+                renderHeight,
                 outputBgra);
 
-            ApplyBitmapOverlays(outputBgra);
+            ApplyBitmapOverlays(outputBgra, renderWidth, renderHeight);
 
-            CopyToDisplayBitmap(outputBgra, requiredBytes);
+            CopyToDisplayBitmap(outputBgra, requiredBytes, renderWidth, renderHeight);
         }
+    }
+
+    /// <summary>
+    /// Renders at fast native resolution for immediate feedback, then schedules
+    /// a deferred high-quality re-render after a short idle delay.
+    /// Use during continuous interactions (scroll, window drag, zoom drag).
+    /// </summary>
+    private void RenderImageFastThenSharp()
+    {
+        RenderImage(sharp: false);
+        ScheduleSharpRender();
+    }
+
+    private void ScheduleSharpRender()
+    {
+        if (_sharpRenderTimer is null)
+        {
+            _sharpRenderTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };
+            _sharpRenderTimer.Tick += (_, _) =>
+            {
+                _sharpRenderTimer.Stop();
+                RenderImage(sharp: true);
+            };
+        }
+
+        // Restart the timer on each call — only fires after 150ms idle
+        _sharpRenderTimer.Stop();
+        _sharpRenderTimer.Start();
+    }
+
+    private bool EnsureDisplayBitmap(int pixelWidth, int pixelHeight)
+    {
+        if (pixelWidth <= 0 || pixelHeight <= 0)
+        {
+            return false;
+        }
+
+        if (_displayBitmap is not null &&
+            _displayBitmap.PixelSize.Width == pixelWidth &&
+            _displayBitmap.PixelSize.Height == pixelHeight)
+        {
+            return true;
+        }
+
+        _displayBitmap = new WriteableBitmap(
+            new PixelSize(pixelWidth, pixelHeight),
+            new Vector(96, 96),
+            Avalonia.Platform.PixelFormat.Bgra8888,
+            Avalonia.Platform.AlphaFormat.Opaque);
+        DicomImage.Source = _displayBitmap;
+        DicomImage.InvalidateMeasure();
+        return true;
     }
 
     private byte[] EnsureRenderBuffer(int requiredBytes)
@@ -922,14 +979,14 @@ public partial class DicomViewPanel : UserControl
         return _renderBuffer;
     }
 
-    private void CopyToDisplayBitmap(byte[] outputBgra, int usedLength)
+    private void CopyToDisplayBitmap(byte[] outputBgra, int usedLength, int bitmapWidth, int bitmapHeight)
     {
         if (_displayBitmap is null) return;
 
         using (var fb = _displayBitmap.Lock())
         {
             int stride = fb.RowBytes;
-            int rowSize = _imageWidth * 4;
+            int rowSize = bitmapWidth * 4;
             IntPtr addr = fb.Address;
 
             if (stride == rowSize)
@@ -938,7 +995,7 @@ public partial class DicomViewPanel : UserControl
             }
             else
             {
-                for (int y = 0; y < _imageHeight; y++)
+                for (int y = 0; y < bitmapHeight; y++)
                     Marshal.Copy(outputBgra, y * rowSize, IntPtr.Add(addr, y * stride), rowSize);
             }
         }
@@ -1045,9 +1102,9 @@ public partial class DicomViewPanel : UserControl
         return pixels;
     }
 
-    private void ApplyBitmapOverlays(byte[] outputBgra)
+    private void ApplyBitmapOverlays(byte[] outputBgra, int outputWidth, int outputHeight)
     {
-        if (_bitmapOverlays.Count == 0)
+        if (_bitmapOverlays.Count == 0 || outputWidth <= 0 || outputHeight <= 0)
         {
             return;
         }
@@ -1082,7 +1139,9 @@ public partial class DicomViewPanel : UserControl
                         continue;
                     }
 
-                    int outputIndex = ((imageY * _imageWidth) + imageX) * 4;
+                    int scaledX = Math.Clamp((int)Math.Round(((imageX + 0.5) * outputWidth / _imageWidth) - 0.5), 0, outputWidth - 1);
+                    int scaledY = Math.Clamp((int)Math.Round(((imageY + 0.5) * outputHeight / _imageHeight) - 0.5), 0, outputHeight - 1);
+                    int outputIndex = ((scaledY * outputWidth) + scaledX) * 4;
                     outputBgra[outputIndex] = (byte)Math.Clamp((outputBgra[outputIndex] * baseWeight) + (overlayB * overlayWeight), 0, 255);
                     outputBgra[outputIndex + 1] = (byte)Math.Clamp((outputBgra[outputIndex + 1] * baseWeight) + (overlayG * overlayWeight), 0, 255);
                     outputBgra[outputIndex + 2] = (byte)Math.Clamp((outputBgra[outputIndex + 2] * baseWeight) + (overlayR * overlayWeight), 0, 255);
@@ -1183,6 +1242,7 @@ public partial class DicomViewPanel : UserControl
         _fitToWindow = true;
         ApplyZoomTransform();
         CenterImage();
+    RenderImage();
         Update3DCursorOverlay();
         UpdateMeasurementPresentation();
         ZoomChanged?.Invoke();
@@ -1217,6 +1277,7 @@ public partial class DicomViewPanel : UserControl
         _zoomFactor = 1.0;
         ApplyZoomTransform();
         CenterImage();
+        RenderImage();
         Update3DCursorOverlay();
         UpdateMeasurementPresentation();
         ZoomChanged?.Invoke();
@@ -1231,6 +1292,7 @@ public partial class DicomViewPanel : UserControl
         _fitToWindow = false;
         _zoomFactor = Math.Min(20.0, _zoomFactor * 1.1);
         ApplyZoomTransform();
+        RenderImage();
         Update3DCursorOverlay();
         UpdateMeasurementPresentation();
         ZoomChanged?.Invoke();
@@ -1245,6 +1307,7 @@ public partial class DicomViewPanel : UserControl
         _fitToWindow = false;
         _zoomFactor = Math.Max(0.01, _zoomFactor / 1.1);
         ApplyZoomTransform();
+        RenderImage();
         Update3DCursorOverlay();
         UpdateMeasurementPresentation();
         ZoomChanged?.Invoke();
@@ -1259,6 +1322,7 @@ public partial class DicomViewPanel : UserControl
         _fitToWindow = false;
         _zoomFactor = Math.Clamp(factor, 0.01, 20.0);
         ApplyZoomTransform();
+        RenderImage();
         Update3DCursorOverlay();
         UpdateMeasurementPresentation();
         ZoomChanged?.Invoke();
@@ -1373,6 +1437,7 @@ public partial class DicomViewPanel : UserControl
             : Math.Clamp(state.ZoomFactor, 0.01, 20.0);
         _zoomFactor = Math.Clamp(targetZoomFactor, 0.01, 20.0);
         ApplyZoomTransform();
+        RenderImage();
 
         double cx = RootGrid.Bounds.Width / 2.0;
         double cy = RootGrid.Bounds.Height / 2.0;
@@ -1389,8 +1454,9 @@ public partial class DicomViewPanel : UserControl
 
     private void ApplyZoomTransform()
     {
-        _zoomTransform.ScaleX = _zoomFactor;
-        _zoomTransform.ScaleY = _zoomFactor;
+        _zoomTransform.ScaleX = 1;
+        _zoomTransform.ScaleY = 1;
+        ApplyDisplayImageSize();
 
         // Switch interpolation: nearest-neighbor for zoomed-in pixel inspection,
         // high quality for zoomed-out overview
@@ -2044,7 +2110,7 @@ public partial class DicomViewPanel : UserControl
             _windowWidth = Math.Max(1, _startWindowWidth + dx * sensitivity);
             _windowCenter = _startWindowCenter + dy * sensitivity;
 
-            RenderImage();
+            RenderImageFastThenSharp();
             UpdateOverlay();
             WindowChanged?.Invoke();
             NotifyViewStateChanged();
@@ -2099,6 +2165,7 @@ public partial class DicomViewPanel : UserControl
                 _zoomFactor = newZoom;
                 _fitToWindow = false;
                 ApplyZoomTransform();
+                RenderImageFastThenSharp();
                 Update3DCursorOverlay();
                 UpdateMeasurementPresentation();
                 UpdateOverlay();
@@ -2191,6 +2258,7 @@ public partial class DicomViewPanel : UserControl
         _zoomFactor = newZoom;
         _fitToWindow = false;
         ApplyZoomTransform();
+        RenderImageFastThenSharp();
         Update3DCursorOverlay();
         UpdateMeasurementPresentation();
 
@@ -2233,8 +2301,43 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
-        DicomImage.Width = GetDisplayWidth();
-        DicomImage.Height = GetDisplayHeight();
+        DicomImage.Width = GetDisplayWidth() * _zoomFactor;
+        DicomImage.Height = GetDisplayHeight() * _zoomFactor;
+    }
+
+    private int GetRenderPixelWidth()
+    {
+        if (_imageWidth <= 0)
+        {
+            return 0;
+        }
+
+        if (!_isSharpRender)
+        {
+            // Fast mode: render at native resolution, let Avalonia upscale the bitmap
+            return _imageWidth;
+        }
+
+        // Sharp mode: render at display resolution for subpixel-accurate interpolation.
+        // Cap at zoomFactor ≤ 2.0 — beyond that, nearest-neighbor is fine for pixel inspection.
+        double scale = _displayScaleX * Math.Min(_zoomFactor, 2.0);
+        return Math.Max(1, (int)Math.Ceiling(_imageWidth * scale));
+    }
+
+    private int GetRenderPixelHeight()
+    {
+        if (_imageHeight <= 0)
+        {
+            return 0;
+        }
+
+        if (!_isSharpRender)
+        {
+            return _imageHeight;
+        }
+
+        double scale = _displayScaleY * Math.Min(_zoomFactor, 2.0);
+        return Math.Max(1, (int)Math.Ceiling(_imageHeight * scale));
     }
 
     private double GetDisplayWidth() => _imageWidth * _displayScaleX;
