@@ -128,8 +128,8 @@ public partial class StudyViewerWindow
         UpdateVolumeRoiCorrectionControls(preview, isDraft);
         VolumeRoiDraftHintText.Text = isDraft
             ? preview.IsAdditiveModeEnabled
-                ? "Add mode is on: click to draft another region on the current slice or double-click to auto-outline and merge it into the 3D ROI. Shrink/Grow still refine the latest auto-outline, and you can rotate the mesh with ↔/↕, arrow keys, or auto mode. Enter finishes, Esc cancels."
-                : "Click to place points, double-click without a drawn line to auto-outline, or double-click with a line to close a slice contour. Turn on Add to merge another region into the model, use Shrink/Grow to refine the auto-outline, scroll to another slice, and rotate the mesh with ↔/↕, arrow keys, or auto mode before pressing Enter or Esc."
+                ? "Add mode is on: click to draft another region on the current slice or double-click to auto-outline and merge it into the 3D ROI. Shrink/Grow refine the latest auto-outline. For local cleanup such as removing wall or stray bridges, switch to ROI ball and drag along the edge. Rotate with ↔/↕, arrow keys, or auto mode. Enter finishes, Esc cancels."
+                : "Click to place points, double-click without a drawn line to auto-outline, or double-click with a line to close a slice contour. Turn on Add to merge another region into the model, use Shrink/Grow to refine the auto-outline, and use ROI ball for local cleanup of wrong wall/bridge segments. Scroll to another slice and rotate with ↔/↕, arrow keys, or auto mode before pressing Enter or Esc."
             : "Selected 3D ROI model preview. Scroll through the series to highlight the current slice contour and rotate the model with ↔/↕, arrow keys, or auto mode.";
         RenderVolumeRoiDraftPreview(preview);
         VolumeRoiDraftPanel.IsVisible = true;
@@ -443,7 +443,8 @@ public partial class StudyViewerWindow
                     contour.PlanePosition,
                     IsCurrentMeasurementPlane(contour.PlanePosition, currentPlanePosition),
                     true,
-                    false));
+                    false,
+                    contour.ComponentId));
 
                 if (index >= closedContours.Count - 1)
                 {
@@ -456,12 +457,21 @@ public partial class StudyViewerWindow
                 {
                     double t = section / (double)sectionCount;
                     double planePosition = Lerp(contour.PlanePosition, nextContour.PlanePosition, t);
+                    SpatialVector3D[] interpolatedPoints = VolumeRoiInterpolationHelper.TryInterpolateContour(
+                        CreateMeasurementInterpolationInput(contour),
+                        CreateMeasurementInterpolationInput(nextContour),
+                        t,
+                        previewSampleCount,
+                        out SpatialVector3D[] maskInterpolatedPoints)
+                        ? maskInterpolatedPoints
+                        : InterpolateMeasurementContourPoints(points, nextPoints, t);
                     previewContours.Add(new DicomViewPanel.VolumeRoiDraftPreviewContour(
-                        InterpolateMeasurementContourPoints(points, nextPoints, t),
+                        interpolatedPoints,
                         planePosition,
                         IsCurrentMeasurementPlane(planePosition, currentPlanePosition),
                         true,
-                        true));
+                        true,
+                        contour.ComponentId));
                 }
             }
         }
@@ -583,6 +593,19 @@ public partial class StudyViewerWindow
         }
 
         return points;
+    }
+
+    private static VolumeContourInterpolationInput CreateMeasurementInterpolationInput(VolumeRoiContour contour)
+    {
+        return new VolumeContourInterpolationInput(
+            contour.Anchors.Where(anchor => anchor.PatientPoint is not null).Select(anchor => anchor.PatientPoint!.Value).ToArray(),
+            contour.PlaneOrigin,
+            contour.RowDirection,
+            contour.ColumnDirection,
+            contour.Normal,
+            contour.PlanePosition,
+            contour.RowSpacing,
+            contour.ColumnSpacing);
     }
 
     private static int GetMeasurementInterpolationSectionCount(double gapMillimeters)
@@ -842,37 +865,39 @@ public partial class StudyViewerWindow
     {
         List<PreviewTriangle> triangles = [];
 
-        List<PreviewContourGeometry> closedContours = contours
+        foreach (List<PreviewContourGeometry> closedContours in contours
             .Where(contour => contour.Contour.IsClosed && contour.Points.Length >= 3)
-            .OrderBy(contour => contour.Contour.PlanePosition)
-            .ToList();
-
-        for (int contourIndex = 0; contourIndex < closedContours.Count - 1; contourIndex++)
+            .GroupBy(contour => contour.Contour.ComponentId)
+            .OrderBy(group => group.Key)
+            .Select(group => group.OrderBy(contour => contour.Contour.PlanePosition).ToList()))
         {
-            PreviewContourGeometry first = closedContours[contourIndex];
-            PreviewContourGeometry second = closedContours[contourIndex + 1];
-            int pointCount = Math.Min(first.Points.Length, second.Points.Length);
-            for (int pointIndex = 0; pointIndex < pointCount; pointIndex++)
+            for (int contourIndex = 0; contourIndex < closedContours.Count - 1; contourIndex++)
             {
-                SpatialVector3D a0 = first.Points[pointIndex];
-                SpatialVector3D a1 = first.Points[(pointIndex + 1) % pointCount];
-                SpatialVector3D b0 = second.Points[pointIndex];
-                SpatialVector3D b1 = second.Points[(pointIndex + 1) % pointCount];
-                double planePosition = (first.Contour.PlanePosition + second.Contour.PlanePosition) * 0.5;
-                bool isCurrentSlice = first.Contour.IsCurrentSlice || second.Contour.IsCurrentSlice;
-                bool isInterpolated = first.Contour.IsInterpolated || second.Contour.IsInterpolated;
+                PreviewContourGeometry first = closedContours[contourIndex];
+                PreviewContourGeometry second = closedContours[contourIndex + 1];
+                int pointCount = Math.Min(first.Points.Length, second.Points.Length);
+                for (int pointIndex = 0; pointIndex < pointCount; pointIndex++)
+                {
+                    SpatialVector3D a0 = first.Points[pointIndex];
+                    SpatialVector3D a1 = first.Points[(pointIndex + 1) % pointCount];
+                    SpatialVector3D b0 = second.Points[pointIndex];
+                    SpatialVector3D b1 = second.Points[(pointIndex + 1) % pointCount];
+                    double planePosition = (first.Contour.PlanePosition + second.Contour.PlanePosition) * 0.5;
+                    bool isCurrentSlice = first.Contour.IsCurrentSlice || second.Contour.IsCurrentSlice;
+                    bool isInterpolated = first.Contour.IsInterpolated || second.Contour.IsInterpolated;
 
-                triangles.Add(CreatePreviewTriangle(a0, a1, b1, planePosition, isCurrentSlice, isInterpolated));
-                triangles.Add(CreatePreviewTriangle(a0, b1, b0, planePosition, isCurrentSlice, isInterpolated));
+                    triangles.Add(CreatePreviewTriangle(a0, a1, b1, planePosition, isCurrentSlice, isInterpolated));
+                    triangles.Add(CreatePreviewTriangle(a0, b1, b0, planePosition, isCurrentSlice, isInterpolated));
+                }
             }
-        }
 
-        if (closedContours.Count > 0)
-        {
-            AddContourCapTriangles(triangles, closedContours[0]);
-            if (closedContours.Count > 1)
+            if (closedContours.Count > 0)
             {
-                AddContourCapTriangles(triangles, closedContours[^1]);
+                AddContourCapTriangles(triangles, closedContours[0]);
+                if (closedContours.Count > 1)
+                {
+                    AddContourCapTriangles(triangles, closedContours[^1]);
+                }
             }
         }
 

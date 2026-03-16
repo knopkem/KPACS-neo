@@ -233,9 +233,9 @@ public sealed record StudyMeasurement(
             return true;
         }
 
-        if (TryProjectInterpolatedVolumeContour(metadata, out Point[] interpolatedContour))
+        if (TryProjectInterpolatedVolumeContours(metadata, out Point[][] interpolatedContours) && interpolatedContours.Length > 0)
         {
-            contours = [interpolatedContour];
+            contours = interpolatedContours;
             isInterpolated = true;
             return true;
         }
@@ -243,7 +243,7 @@ public sealed record StudyMeasurement(
         return false;
     }
 
-    private bool TryProjectInterpolatedVolumeContour(DicomSpatialMetadata metadata, out Point[] imagePoints)
+    private bool TryProjectInterpolatedVolumeContours(DicomSpatialMetadata metadata, out Point[][] imagePoints)
     {
         imagePoints = [];
 
@@ -255,56 +255,86 @@ public sealed record StudyMeasurement(
         const int sampleCount = 40;
         double currentPlanePosition = metadata.Origin.Dot(metadata.Normal);
 
-        (VolumeRoiContour Contour, Vector3D[] Points)[] closedContours = VolumeContours
+        List<Point[]> interpolated = [];
+        foreach ((VolumeRoiContour Contour, Vector3D[] Points)[] closedContours in VolumeContours
             .Where(contour => contour.IsClosed && contour.Anchors.Length >= 3)
-            .OrderBy(contour => contour.PlanePosition)
-            .Select(contour => (Contour: contour, Points: ResampleClosedContour(contour, sampleCount)))
-            .Where(item => item.Points.Length >= 3)
-            .ToArray();
-
-        if (closedContours.Length < 2)
+            .GroupBy(contour => contour.ComponentId)
+            .OrderBy(group => group.Key)
+            .Select(group => group
+                .OrderBy(contour => contour.PlanePosition)
+                .Select(contour => (Contour: contour, Points: ResampleClosedContour(contour, sampleCount)))
+                .Where(item => item.Points.Length >= 3)
+                .ToArray()))
         {
-            return false;
-        }
-
-        for (int index = 1; index < closedContours.Length; index++)
-        {
-            if (closedContours[index - 1].Points.Length == closedContours[index].Points.Length)
-            {
-                closedContours[index] = (
-                    closedContours[index].Contour,
-                    AlignContourPoints(closedContours[index - 1].Points, closedContours[index].Points));
-            }
-        }
-
-        for (int index = 0; index < closedContours.Length - 1; index++)
-        {
-            (VolumeRoiContour lowerContour, Vector3D[] lowerPoints) = closedContours[index];
-            (VolumeRoiContour upperContour, Vector3D[] upperPoints) = closedContours[index + 1];
-
-            double lowerPlane = lowerContour.PlanePosition;
-            double upperPlane = upperContour.PlanePosition;
-            if (currentPlanePosition <= lowerPlane || currentPlanePosition >= upperPlane)
+            if (closedContours.Length < 2)
             {
                 continue;
             }
 
-            double thickness = upperPlane - lowerPlane;
-            if (Math.Abs(thickness) <= double.Epsilon)
+            for (int index = 1; index < closedContours.Length; index++)
             {
-                continue;
+                if (closedContours[index - 1].Points.Length == closedContours[index].Points.Length)
+                {
+                    closedContours[index] = (
+                        closedContours[index].Contour,
+                        AlignContourPoints(closedContours[index - 1].Points, closedContours[index].Points));
+                }
             }
 
-            double t = (currentPlanePosition - lowerPlane) / thickness;
-            Vector3D[] interpolatedPoints = InterpolateContourPoints(lowerPoints, upperPoints, t);
-            imagePoints = interpolatedPoints
-                .Select(metadata.PixelPointFromPatient)
-                .ToArray();
+            for (int index = 0; index < closedContours.Length - 1; index++)
+            {
+                (VolumeRoiContour lowerContour, Vector3D[] lowerPoints) = closedContours[index];
+                (VolumeRoiContour upperContour, Vector3D[] upperPoints) = closedContours[index + 1];
 
-            return imagePoints.Length >= 3;
+                double lowerPlane = lowerContour.PlanePosition;
+                double upperPlane = upperContour.PlanePosition;
+                if (currentPlanePosition <= lowerPlane || currentPlanePosition >= upperPlane)
+                {
+                    continue;
+                }
+
+                double thickness = upperPlane - lowerPlane;
+                if (Math.Abs(thickness) <= double.Epsilon)
+                {
+                    continue;
+                }
+
+                double t = (currentPlanePosition - lowerPlane) / thickness;
+                Vector3D[] interpolatedPoints = VolumeRoiInterpolationHelper.TryInterpolateContour(
+                    CreateInterpolationInput(lowerContour),
+                    CreateInterpolationInput(upperContour),
+                    t,
+                    sampleCount,
+                    out Vector3D[] maskInterpolatedPoints)
+                    ? maskInterpolatedPoints
+                    : InterpolateContourPoints(lowerPoints, upperPoints, t);
+                Point[] projected = interpolatedPoints
+                    .Select(metadata.PixelPointFromPatient)
+                    .ToArray();
+                if (projected.Length >= 3)
+                {
+                    interpolated.Add(projected);
+                }
+
+                break;
+            }
         }
 
-        return false;
+        imagePoints = interpolated.ToArray();
+        return imagePoints.Length > 0;
+    }
+
+    private static VolumeContourInterpolationInput CreateInterpolationInput(VolumeRoiContour contour)
+    {
+        return new VolumeContourInterpolationInput(
+            contour.Anchors.Where(anchor => anchor.PatientPoint is not null).Select(anchor => anchor.PatientPoint!.Value).ToArray(),
+            contour.PlaneOrigin,
+            contour.RowDirection,
+            contour.ColumnDirection,
+            contour.Normal,
+            contour.PlanePosition,
+            contour.RowSpacing,
+            contour.ColumnSpacing);
     }
 
     private static Vector3D[] ResampleClosedContour(VolumeRoiContour contour, int sampleCount)

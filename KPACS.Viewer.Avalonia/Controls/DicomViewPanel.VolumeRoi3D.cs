@@ -32,7 +32,8 @@ public partial class DicomViewPanel
         double PlanePosition,
         bool IsCurrentSlice,
         bool IsClosed,
-        bool IsInterpolated);
+        bool IsInterpolated,
+        int ComponentId = 0);
 
     private VolumeRoiDraft? _volumeRoiDraft;
     private int _volumeRoiDraftPreviewVersion;
@@ -213,8 +214,9 @@ public partial class DicomViewPanel
         bool additiveOnClosedContour = draft.AdditiveModeEnabled && existingContour?.IsClosed == true;
         VolumeRoiDraftContour contour = GetActiveVolumeRoiContour(draft, SpatialMetadata);
 
-        if (clickCount >= 2 && (contour.Anchors.Count < 2 || additiveOnClosedContour) && TryCreateAutoOutlinedVolumeRoiDraft(clamped))
+        if (clickCount >= 2 && (contour.Anchors.Count < 2 || additiveOnClosedContour))
         {
+            TryCreateAutoOutlinedVolumeRoiDraft(clamped);
             return;
         }
 
@@ -598,7 +600,8 @@ public partial class DicomViewPanel
                     contour.PlanePosition,
                     string.Equals(contour.SliceKey, currentSliceKey, StringComparison.Ordinal),
                     true,
-                    false));
+                    false,
+                    contour.ComponentId));
 
                 if (index >= closedContours.Count - 1)
                 {
@@ -610,12 +613,21 @@ public partial class DicomViewPanel
                 for (int section = 1; section < sectionCount; section++)
                 {
                     double t = section / (double)sectionCount;
+                    SpatialVector3D[] interpolatedPoints = VolumeRoiInterpolationHelper.TryInterpolateContour(
+                        CreateInterpolationInput(contour),
+                        CreateInterpolationInput(nextContour),
+                        t,
+                        previewSampleCount,
+                        out SpatialVector3D[] maskInterpolatedPoints)
+                        ? maskInterpolatedPoints
+                        : InterpolateContourPoints(points, nextPoints, t);
                     previewContours.Add(new VolumeRoiDraftPreviewContour(
-                        InterpolateContourPoints(points, nextPoints, t),
+                        interpolatedPoints,
                         Lerp(contour.PlanePosition, nextContour.PlanePosition, t),
                         false,
                         true,
-                        true));
+                        true,
+                        contour.ComponentId));
                 }
             }
         }
@@ -636,7 +648,8 @@ public partial class DicomViewPanel
                 contour.PlanePosition,
                 string.Equals(contour.SliceKey, currentSliceKey, StringComparison.Ordinal),
                 false,
-                false));
+                false,
+                contour.ComponentId));
         }
 
         return previewContours
@@ -755,6 +768,19 @@ public partial class DicomViewPanel
         }
 
         return points;
+    }
+
+    private static VolumeContourInterpolationInput CreateInterpolationInput(VolumeRoiDraftContour contour)
+    {
+        return new VolumeContourInterpolationInput(
+            contour.Anchors.Where(anchor => anchor.PatientPoint is not null).Select(anchor => anchor.PatientPoint!.Value).ToArray(),
+            contour.PlaneOrigin,
+            contour.RowDirection,
+            contour.ColumnDirection,
+            contour.Normal,
+            contour.PlanePosition,
+            contour.RowSpacing,
+            contour.ColumnSpacing);
     }
 
     private static int GetInterpolationSectionCount(double gapMillimeters)

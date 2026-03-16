@@ -35,6 +35,7 @@ public partial class StudyViewerWindow
         panel.MeasurementDeleted += OnPanelMeasurementDeleted;
         panel.SelectedMeasurementChanged += OnPanelMeasurementSelectedChanged;
         panel.AutoOutlinedMeasurementCreated += OnPanelAutoOutlinedMeasurementCreated;
+        panel.AutoOutlineAttempted += OnPanelAutoOutlineAttempted;
         panel.VolumeRoiDraftChanged += _ => ScheduleVolumeRoiDraftPanelRefresh();
     }
 
@@ -233,6 +234,23 @@ public partial class StudyViewerWindow
 
         _polygonAutoOutlineStates[info.MeasurementId] = new PolygonAutoOutlineState(info.SeedPoint, info.SensitivityLevel);
         RefreshMeasurementInsightPanel();
+    }
+
+    private void OnPanelAutoOutlineAttempted(DicomViewPanel.AutoOutlineAttemptInfo info)
+    {
+        if (info.Kind == MeasurementKind.VolumeRoi)
+        {
+            ShowToast(
+                info.Succeeded ? info.Message : $"Auto 3D ROI failed: {info.Message}",
+                info.Succeeded ? ToastSeverity.Info : ToastSeverity.Warning,
+                TimeSpan.FromSeconds(info.Succeeded ? 4 : 7));
+            return;
+        }
+
+        if (!info.Succeeded)
+        {
+            ShowToast(info.Message, ToastSeverity.Warning, TimeSpan.FromSeconds(5));
+        }
     }
 
     private sealed record PolygonAutoOutlineState(Point SeedPoint, int SensitivityLevel);
