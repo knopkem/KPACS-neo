@@ -35,6 +35,10 @@ public partial class DicomViewPanel
     // Windowing: saved before entering DVR so we can restore on exit
     private double _preDvrWindowCenter;
     private double _preDvrWindowWidth;
+    private double _dvrTransferCenter;
+    private double _dvrTransferWidth;
+    private double _dvrDragStartTransferCenter;
+    private double _dvrDragStartTransferWidth;
 
     // Orbit drag tracking
     private bool _isDvrOrbitDragging;
@@ -89,7 +93,7 @@ public partial class DicomViewPanel
         _dvrAzimuth = 0;
         _dvrElevation = 0;
 
-        _dvrTransferFunction = VolumeTransferFunction.Create(_dvrPreset, _volume.MinValue, _volume.MaxValue);
+        ResetDvrTransferWindow();
 
         // Save current windowing and apply full-range window for DVR output
         _preDvrWindowCenter = _windowCenter;
@@ -372,13 +376,89 @@ public partial class DicomViewPanel
         }
 
         _dvrPreset = preset;
-        _dvrTransferFunction = VolumeTransferFunction.Create(preset, _volume.MinValue, _volume.MaxValue);
+        ResetDvrTransferWindow();
 
         if (IsDvrMode)
         {
             RenderDvrViewFast();
             ScheduleDvrSharpRender();
         }
+    }
+
+    public void ResetDvrTransferWindow()
+    {
+        if (_volume is null)
+        {
+            return;
+        }
+
+        (_dvrTransferCenter, _dvrTransferWidth) = VolumeTransferFunction.GetSuggestedWindow(
+            _dvrPreset,
+            _volume.MinValue,
+            _volume.MaxValue);
+        RebuildDvrTransferFunction();
+    }
+
+    public void SetDvrTransferWindow(double center, double width)
+    {
+        if (_volume is null)
+        {
+            return;
+        }
+
+        double range = Math.Max(1.0, _volume.MaxValue - _volume.MinValue);
+        _dvrTransferCenter = Math.Clamp(center, _volume.MinValue - range * 0.25, _volume.MaxValue + range * 0.25);
+        _dvrTransferWidth = Math.Clamp(width, range / 200.0, range * 1.25);
+        RebuildDvrTransferFunction();
+    }
+
+    public double DvrTransferCenter => _dvrTransferCenter;
+
+    public double DvrTransferWidth => _dvrTransferWidth;
+
+    internal void BeginDvrTransferDrag()
+    {
+        _dvrDragStartTransferCenter = _dvrTransferCenter;
+        _dvrDragStartTransferWidth = _dvrTransferWidth;
+    }
+
+    internal bool UpdateDvrTransferDrag(Point pos)
+    {
+        if (_volume is null)
+        {
+            return false;
+        }
+
+        double dx = pos.X - _mouseDownPos.X;
+        double dy = pos.Y - _mouseDownPos.Y;
+        double range = Math.Max(1.0, _volume.MaxValue - _volume.MinValue);
+        double sensitivity = Math.Max(1.0, range / 450.0);
+
+        SetDvrTransferWindow(
+            _dvrDragStartTransferCenter + dy * sensitivity,
+            _dvrDragStartTransferWidth + dx * sensitivity);
+
+        RenderDvrViewFast();
+        ScheduleDvrSharpRender();
+        UpdateOverlay();
+        WindowChanged?.Invoke();
+        NotifyViewStateChanged();
+        return true;
+    }
+
+    private void RebuildDvrTransferFunction()
+    {
+        if (_volume is null)
+        {
+            return;
+        }
+
+        _dvrTransferFunction = VolumeTransferFunction.CreateWindowed(
+            _dvrPreset,
+            _volume.MinValue,
+            _volume.MaxValue,
+            _dvrTransferCenter,
+            _dvrTransferWidth);
     }
 
     // ==============================================================================================

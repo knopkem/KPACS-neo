@@ -1555,6 +1555,17 @@ public partial class DicomViewPanel : UserControl
     /// </summary>
     public void ResetWindowLevel()
     {
+        if (IsDvrMode)
+        {
+            ResetDvrTransferWindow();
+            RenderDvrViewFast();
+            ScheduleDvrSharpRender();
+            UpdateOverlay();
+            WindowChanged?.Invoke();
+            NotifyViewStateChanged();
+            return;
+        }
+
         _windowCenter = _defaultWindowCenter;
         _windowWidth = _defaultWindowWidth;
         RenderImage();
@@ -1624,7 +1635,9 @@ public partial class DicomViewPanel : UserControl
         OverlayCenterRight.Text = GetHorizontalOrientationLabel(isRightEdge: true);
         OverlayCenterLeft.Text = GetHorizontalOrientationLabel(isRightEdge: false);
 
-        OverlayBottomLeft.Text = $"W: {_windowWidth:F0}  C: {_windowCenter:F0}";
+        OverlayBottomLeft.Text = IsDvrMode
+            ? $"TF W: {DvrTransferWidth:F0}  TF C: {DvrTransferCenter:F0}"
+            : $"W: {_windowWidth:F0}  C: {_windowCenter:F0}";
 
         string zoomPct = $"Zoom: {_zoomFactor * 100:F0}%";
         string dims = $"{_imageWidth}×{_imageHeight}  {_bitsStored}-bit";
@@ -1817,8 +1830,16 @@ public partial class DicomViewPanel : UserControl
     {
         _isRightDragging = true;
         _mouseDownPos = pos;
-        _startWindowCenter = _windowCenter;
-        _startWindowWidth = _windowWidth;
+        if (IsDvrMode)
+        {
+            BeginDvrTransferDrag();
+        }
+        else
+        {
+            _startWindowCenter = _windowCenter;
+            _startWindowWidth = _windowWidth;
+        }
+
         pointer.Capture(RootGrid);
         _capturedPointer = pointer;
         AttachCapturedPointerHandlers();
@@ -2159,6 +2180,12 @@ public partial class DicomViewPanel : UserControl
 
         if (_isRightDragging)
         {
+            if (IsDvrMode && UpdateDvrTransferDrag(pos))
+            {
+                e.Handled = true;
+                return;
+            }
+
             // Window/Level: horizontal = width, vertical = center
             double dx = pos.X - _mouseDownPos.X;
             double dy = pos.Y - _mouseDownPos.Y;

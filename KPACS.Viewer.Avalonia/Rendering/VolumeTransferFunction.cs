@@ -128,15 +128,52 @@ public sealed class VolumeTransferFunction
     public static VolumeTransferFunction Create(
         TransferFunctionPreset preset,
         double minValue,
-        double maxValue) => preset switch
+        double maxValue)
     {
-        TransferFunctionPreset.Bone => CreateBone(minValue, maxValue),
-        TransferFunctionPreset.SoftTissue => CreateSoftTissue(minValue, maxValue),
-        TransferFunctionPreset.Lung => CreateLung(minValue, maxValue),
-        TransferFunctionPreset.Angio => CreateAngio(minValue, maxValue),
-        TransferFunctionPreset.Skin => CreateSkin(minValue, maxValue),
-        _ => CreateDefault(minValue, maxValue),
-    };
+        PresetDefinition definition = GetPresetDefinition(preset, minValue, maxValue);
+        return new VolumeTransferFunction(
+            definition.ControlPoints,
+            minValue,
+            maxValue,
+            definition.GradientModulationStrength,
+            definition.Preset);
+    }
+
+    public static VolumeTransferFunction CreateWindowed(
+        TransferFunctionPreset preset,
+        double minValue,
+        double maxValue,
+        double center,
+        double width)
+    {
+        PresetDefinition definition = GetPresetDefinition(preset, minValue, maxValue);
+        (double defaultCenter, double defaultWidth) = GetSuggestedWindow(definition.ControlPoints, minValue, maxValue);
+        double safeDefaultWidth = Math.Max(1.0, defaultWidth);
+        double safeWidth = Math.Max(1.0, width);
+
+        List<OpacityControlPoint> remappedControlPoints = definition.ControlPoints
+            .Select(point => new OpacityControlPoint(
+                Math.Clamp(center + ((point.Value - defaultCenter) / safeDefaultWidth) * safeWidth, minValue, maxValue),
+                point.Opacity))
+            .OrderBy(point => point.Value)
+            .ToList();
+
+        return new VolumeTransferFunction(
+            remappedControlPoints,
+            minValue,
+            maxValue,
+            definition.GradientModulationStrength,
+            definition.Preset);
+    }
+
+    public static (double Center, double Width) GetSuggestedWindow(
+        TransferFunctionPreset preset,
+        double minValue,
+        double maxValue)
+    {
+        PresetDefinition definition = GetPresetDefinition(preset, minValue, maxValue);
+        return GetSuggestedWindow(definition.ControlPoints, minValue, maxValue);
+    }
 
     /// <summary>
     /// General-purpose ramp similar to the legacy hardcoded opacity function.
@@ -144,25 +181,7 @@ public sealed class VolumeTransferFunction
     /// </summary>
     public static VolumeTransferFunction CreateDefault(double minValue, double maxValue)
     {
-        // Reproduce the feel of the old Pow(norm, 1.6) * 0.35 curve
-        // with a piecewise-linear approximation.
-        double range = maxValue - minValue;
-        double p05 = minValue + 0.05 * range;
-        double p20 = minValue + 0.20 * range;
-        double p50 = minValue + 0.50 * range;
-        double p80 = minValue + 0.80 * range;
-
-        return new VolumeTransferFunction(
-            new OpacityControlPoint[]
-            {
-                new(minValue, 0.0),
-                new(p05, 0.0),
-                new(p20, 0.02),
-                new(p50, 0.12),
-                new(p80, 0.28),
-                new(maxValue, 0.35),
-            },
-            minValue, maxValue, 0.0, TransferFunctionPreset.Default);
+        return Create(TransferFunctionPreset.Default, minValue, maxValue);
     }
 
     /// <summary>
@@ -170,18 +189,7 @@ public sealed class VolumeTransferFunction
     /// </summary>
     public static VolumeTransferFunction CreateBone(double minValue, double maxValue)
     {
-        return new VolumeTransferFunction(
-            new OpacityControlPoint[]
-            {
-                new(minValue, 0.0),
-                new(100, 0.0),
-                new(200, 0.0),
-                new(400, 0.15),
-                new(700, 0.60),
-                new(1200, 0.85),
-                new(maxValue, 0.90),
-            },
-            minValue, maxValue, 0.0, TransferFunctionPreset.Bone);
+        return Create(TransferFunctionPreset.Bone, minValue, maxValue);
     }
 
     /// <summary>
@@ -189,21 +197,7 @@ public sealed class VolumeTransferFunction
     /// </summary>
     public static VolumeTransferFunction CreateSoftTissue(double minValue, double maxValue)
     {
-        return new VolumeTransferFunction(
-            new OpacityControlPoint[]
-            {
-                new(minValue, 0.0),
-                new(-200, 0.0),
-                new(-100, 0.01),
-                new(0, 0.08),
-                new(40, 0.20),
-                new(80, 0.25),
-                new(200, 0.18),
-                new(300, 0.05),
-                new(500, 0.0),
-                new(maxValue, 0.0),
-            },
-            minValue, maxValue, 0.008, TransferFunctionPreset.SoftTissue);
+        return Create(TransferFunctionPreset.SoftTissue, minValue, maxValue);
     }
 
     /// <summary>
@@ -212,21 +206,7 @@ public sealed class VolumeTransferFunction
     /// </summary>
     public static VolumeTransferFunction CreateLung(double minValue, double maxValue)
     {
-        return new VolumeTransferFunction(
-            new OpacityControlPoint[]
-            {
-                new(minValue, 0.0),
-                new(-950, 0.0),
-                new(-900, 0.02),
-                new(-700, 0.12),
-                new(-500, 0.20),
-                new(-300, 0.15),
-                new(-200, 0.08),
-                new(-50, 0.03),
-                new(100, 0.0),
-                new(maxValue, 0.0),
-            },
-            minValue, maxValue, 0.0, TransferFunctionPreset.Lung);
+        return Create(TransferFunctionPreset.Lung, minValue, maxValue);
     }
 
     /// <summary>
@@ -235,19 +215,7 @@ public sealed class VolumeTransferFunction
     /// </summary>
     public static VolumeTransferFunction CreateAngio(double minValue, double maxValue)
     {
-        return new VolumeTransferFunction(
-            new OpacityControlPoint[]
-            {
-                new(minValue, 0.0),
-                new(100, 0.0),
-                new(150, 0.0),
-                new(200, 0.20),
-                new(300, 0.55),
-                new(500, 0.80),
-                new(800, 0.90),
-                new(maxValue, 0.90),
-            },
-            minValue, maxValue, 0.0, TransferFunctionPreset.Angio);
+        return Create(TransferFunctionPreset.Angio, minValue, maxValue);
     }
 
     /// <summary>
@@ -255,19 +223,7 @@ public sealed class VolumeTransferFunction
     /// </summary>
     public static VolumeTransferFunction CreateSkin(double minValue, double maxValue)
     {
-        return new VolumeTransferFunction(
-            new OpacityControlPoint[]
-            {
-                new(minValue, 0.0),
-                new(-400, 0.0),
-                new(-200, 0.05),
-                new(-100, 0.40),
-                new(0, 0.50),
-                new(100, 0.15),
-                new(200, 0.0),
-                new(maxValue, 0.0),
-            },
-            minValue, maxValue, 0.015, TransferFunctionPreset.Skin);
+        return Create(TransferFunctionPreset.Skin, minValue, maxValue);
     }
 
     // ------------------------------------------------------------------
@@ -324,4 +280,130 @@ public sealed class VolumeTransferFunction
 
         return points[^1].Opacity;
     }
+
+    private static PresetDefinition GetPresetDefinition(
+        TransferFunctionPreset preset,
+        double minValue,
+        double maxValue)
+    {
+        return preset switch
+        {
+            TransferFunctionPreset.Bone => new PresetDefinition(
+                [
+                    new(minValue, 0.0),
+                    new(100, 0.0),
+                    new(200, 0.0),
+                    new(400, 0.15),
+                    new(700, 0.60),
+                    new(1200, 0.85),
+                    new(maxValue, 0.90),
+                ],
+                0.0,
+                TransferFunctionPreset.Bone),
+            TransferFunctionPreset.SoftTissue => new PresetDefinition(
+                [
+                    new(minValue, 0.0),
+                    new(-200, 0.0),
+                    new(-100, 0.01),
+                    new(0, 0.08),
+                    new(40, 0.20),
+                    new(80, 0.25),
+                    new(200, 0.18),
+                    new(300, 0.05),
+                    new(500, 0.0),
+                    new(maxValue, 0.0),
+                ],
+                0.008,
+                TransferFunctionPreset.SoftTissue),
+            TransferFunctionPreset.Lung => new PresetDefinition(
+                [
+                    new(minValue, 0.0),
+                    new(-950, 0.0),
+                    new(-900, 0.02),
+                    new(-700, 0.12),
+                    new(-500, 0.20),
+                    new(-300, 0.15),
+                    new(-200, 0.08),
+                    new(-50, 0.03),
+                    new(100, 0.0),
+                    new(maxValue, 0.0),
+                ],
+                0.0,
+                TransferFunctionPreset.Lung),
+            TransferFunctionPreset.Angio => new PresetDefinition(
+                [
+                    new(minValue, 0.0),
+                    new(100, 0.0),
+                    new(150, 0.0),
+                    new(200, 0.20),
+                    new(300, 0.55),
+                    new(500, 0.80),
+                    new(800, 0.90),
+                    new(maxValue, 0.90),
+                ],
+                0.0,
+                TransferFunctionPreset.Angio),
+            TransferFunctionPreset.Skin => new PresetDefinition(
+                [
+                    new(minValue, 0.0),
+                    new(-400, 0.0),
+                    new(-200, 0.05),
+                    new(-100, 0.40),
+                    new(0, 0.50),
+                    new(100, 0.15),
+                    new(200, 0.0),
+                    new(maxValue, 0.0),
+                ],
+                0.015,
+                TransferFunctionPreset.Skin),
+            _ => CreateDefaultDefinition(minValue, maxValue),
+        };
+    }
+
+    private static PresetDefinition CreateDefaultDefinition(double minValue, double maxValue)
+    {
+        double range = maxValue - minValue;
+        double p05 = minValue + 0.05 * range;
+        double p20 = minValue + 0.20 * range;
+        double p50 = minValue + 0.50 * range;
+        double p80 = minValue + 0.80 * range;
+
+        return new PresetDefinition(
+            [
+                new(minValue, 0.0),
+                new(p05, 0.0),
+                new(p20, 0.02),
+                new(p50, 0.12),
+                new(p80, 0.28),
+                new(maxValue, 0.35),
+            ],
+            0.0,
+            TransferFunctionPreset.Default);
+    }
+
+    private static (double Center, double Width) GetSuggestedWindow(
+        IReadOnlyList<OpacityControlPoint> controlPoints,
+        double minValue,
+        double maxValue)
+    {
+        List<OpacityControlPoint> significant = controlPoints
+            .Where(point => point.Opacity > 0.0001)
+            .ToList();
+
+        if (significant.Count == 0)
+        {
+            double range = Math.Max(1.0, maxValue - minValue);
+            return (minValue + range * 0.5, range);
+        }
+
+        double low = significant.First().Value;
+        double high = significant.Last().Value;
+        double width = Math.Max(1.0, high - low);
+        return ((low + high) * 0.5, width);
+    }
+
+    private sealed record PresetDefinition(
+        IReadOnlyList<OpacityControlPoint> ControlPoints,
+        double GradientModulationStrength,
+        TransferFunctionPreset Preset);
 }
