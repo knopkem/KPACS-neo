@@ -117,11 +117,21 @@ public partial class DicomViewPanel
 
         SpatialVector3D cameraPos = _dvrVolumeCenter - forward * _dvrDistance;
 
-        // Use consistent output dimensions regardless of quality level
-        // to avoid layout shifts during orbit interaction.
-        // Performance gain during interaction comes from coarser ray-march steps.
-        int outputWidth = Math.Clamp((int)(Bounds.Width * 0.5), 128, 640);
-        int outputHeight = Math.Clamp((int)(Bounds.Height * 0.5), 128, 640);
+        // Fast interaction: low resolution + coarse steps for responsive feedback.
+        // Sharp render: half of display resolution with fine steps.
+        // The layout does NOT shift because RenderDvrViewFast skips ApplyDisplayImageSize.
+        int outputWidth;
+        int outputHeight;
+        if (highQuality)
+        {
+            outputWidth = Math.Clamp((int)(Bounds.Width * 0.5), 128, 640);
+            outputHeight = Math.Clamp((int)(Bounds.Height * 0.5), 128, 640);
+        }
+        else
+        {
+            outputWidth = 256;
+            outputHeight = 256;
+        }
 
         _dvrRenderState = new VolumeRenderState
         {
@@ -133,7 +143,7 @@ public partial class DicomViewPanel
             OrthographicScale = 1.0,
             OutputWidth = outputWidth,
             OutputHeight = outputHeight,
-            SamplingStepFactor = highQuality ? 1.0 : 2.5,  // coarser steps during interaction
+            SamplingStepFactor = highQuality ? 1.0 : 3.5,  // coarser steps during interaction
         };
     }
 

@@ -63,21 +63,25 @@ public static class VolumeRayCaster
                     double voxelValue = volume.GetVoxelInterpolated(x, y, z);
                     double opacity = transferFunction.LookupOpacity(voxelValue);
 
-                    // Gradient-magnitude modulation (boundary emphasis)
-                    if (transferFunction.GradientModulationStrength > 0.0)
-                    {
-                        Vector3D grad = gradients.SampleGradientTrilinear(x, y, z);
-                        double gradMag = grad.Length;
-                        opacity = transferFunction.ModulateByGradient(opacity, gradMag);
-                    }
-
                     if (opacity <= 0.0001)
                     {
                         continue;
                     }
 
+                    // Sample gradient once — reuse for modulation and shading
+                    Vector3D gradient = gradients.SampleGradientTrilinear(x, y, z);
+
+                    if (transferFunction.GradientModulationStrength > 0.0)
+                    {
+                        opacity = transferFunction.ModulateByGradient(opacity, gradient.Length);
+                        if (opacity <= 0.0001)
+                        {
+                            continue;
+                        }
+                    }
+
                     double normalized = Math.Clamp((voxelValue - volume.MinValue) / valueRange, 0.0, 1.0);
-                    Vector3D normal = gradients.SampleGradientTrilinear(x, y, z).Normalize();
+                    Vector3D normal = gradient.Normalize();
                     double illumination = ComputePhong(normal, lightDirection, halfVector, state);
                     double shadedValue = Math.Clamp(normalized * illumination, 0.0, 1.0);
 
@@ -213,21 +217,21 @@ public static class VolumeRayCaster
                     double vy = worldPos.Y / spacingY;
                     double vz = worldPos.Z / spacingZ;
 
-                    // Bounds check (with small margin for interpolation)
-                    if (vx < -0.5 || vy < -0.5 || vz < -0.5 ||
-                        vx > volume.SizeX - 0.5 || vy > volume.SizeY - 0.5 || vz > volume.SizeZ - 0.5)
+                    double voxelValue = volume.GetVoxelInterpolated(vx, vy, vz);
+                    double opacity = transferFunction.LookupOpacity(voxelValue);
+
+                    // Early skip before expensive gradient sampling
+                    if (opacity <= 0.0001)
                     {
                         continue;
                     }
 
-                    double voxelValue = volume.GetVoxelInterpolated(vx, vy, vz);
-                    double opacity = transferFunction.LookupOpacity(voxelValue);
+                    // Sample gradient once — reuse for modulation and shading
+                    Vector3D gradient = gradients.SampleGradientTrilinear(vx, vy, vz);
 
-                    // Gradient-magnitude modulation
                     if (transferFunction.GradientModulationStrength > 0.0)
                     {
-                        Vector3D grad = gradients.SampleGradientTrilinear(vx, vy, vz);
-                        opacity = transferFunction.ModulateByGradient(opacity, grad.Length);
+                        opacity = transferFunction.ModulateByGradient(opacity, gradient.Length);
                     }
 
                     // Opacity correction for step size relative to 1mm
@@ -240,7 +244,7 @@ public static class VolumeRayCaster
 
                     // Phong shading
                     double normalized = Math.Clamp((voxelValue - volume.MinValue) / valueRange, 0.0, 1.0);
-                    Vector3D normal = gradients.SampleGradientTrilinear(vx, vy, vz).Normalize();
+                    Vector3D normal = gradient.Normalize();
                     Vector3D viewDir = rayDir * -1.0;
                     Vector3D halfVec = (lightDirection + viewDir).Normalize();
                     double illumination = ComputePhong(normal, lightDirection, halfVec, state);
