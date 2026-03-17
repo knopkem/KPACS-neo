@@ -745,6 +745,7 @@ public partial class StudyViewerWindow : Window
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
         RefreshReportPanel();
+        RefreshRenderingWorkspacePanel();
         UpdateStatus();
     }
 
@@ -779,6 +780,7 @@ public partial class StudyViewerWindow : Window
         if (ReferenceEquals(slot, _activeSlot))
         {
             ScheduleVolumeRoiDraftPanelRefresh();
+            RefreshRenderingWorkspacePanel(forceVisible: _renderingPanelVisible || _renderingPanelPinned);
         }
 
         RefreshLinkedReferenceLines();
@@ -893,6 +895,7 @@ public partial class StudyViewerWindow : Window
             }
         }
 
+        RefreshRenderingWorkspacePanel(forceVisible: _renderingPanelVisible || _renderingPanelPinned);
         UpdateStatus();
     }
 
@@ -3745,6 +3748,9 @@ public partial class StudyViewerWindow : Window
                 _anatomyPanelPinned = false;
                 _anatomyPanelVisible = false;
                 _anatomyPanelOffset = new Point(settings.AnatomyPanelOffsetX, settings.AnatomyPanelOffsetY);
+                _renderingPanelPinned = false;
+                _renderingPanelVisible = false;
+                _renderingPanelOffset = new Point(settings.RenderingPanelOffsetX, settings.RenderingPanelOffsetY);
                 _reportDebugEnabled = settings.ReportDebugEnabled;
                 _customAnatomyRegions.Clear();
                 if (settings.CustomAnatomyRegions is not null)
@@ -3860,6 +3866,10 @@ public partial class StudyViewerWindow : Window
                 AnatomyPanelVisible = _anatomyPanelVisible,
                 AnatomyPanelOffsetX = _anatomyPanelOffset.X,
                 AnatomyPanelOffsetY = _anatomyPanelOffset.Y,
+                RenderingPanelPinned = _renderingPanelPinned,
+                RenderingPanelVisible = _renderingPanelVisible,
+                RenderingPanelOffsetX = _renderingPanelOffset.X,
+                RenderingPanelOffsetY = _renderingPanelOffset.Y,
                 ReportDebugEnabled = _reportDebugEnabled,
                 CustomAnatomyRegions = [.. _customAnatomyRegions],
                 CustomAnatomyStructuresByRegion = _customAnatomyStructuresByRegion.ToDictionary(
@@ -4101,6 +4111,10 @@ public partial class StudyViewerWindow : Window
         public bool AnatomyPanelVisible { get; init; }
         public double AnatomyPanelOffsetX { get; init; }
         public double AnatomyPanelOffsetY { get; init; }
+        public bool RenderingPanelPinned { get; init; }
+        public bool RenderingPanelVisible { get; init; }
+        public double RenderingPanelOffsetX { get; init; }
+        public double RenderingPanelOffsetY { get; init; }
         public bool ReportDebugEnabled { get; init; }
         public List<string>? CustomAnatomyRegions { get; init; }
         public Dictionary<string, List<string>>? CustomAnatomyStructuresByRegion { get; init; }

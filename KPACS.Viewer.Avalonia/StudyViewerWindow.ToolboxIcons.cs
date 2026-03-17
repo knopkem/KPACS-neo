@@ -18,6 +18,7 @@ public partial class StudyViewerWindow
         ConfigureIconButton(StudyBrowserButton, CreateStudyBrowserIcon(), "Bring the Study Browser to the front.");
         ConfigureLabeledIconButton(WorkspaceLayoutButton, CreateLayoutIcon(2, 2), "Layout", "Viewer layout presets and custom layouts.");
         ConfigureLabeledIconButton(WorkspaceAnatomyButton, CreateAnatomyWorkspaceIcon(), "Anatomy", "Open the anatomy workspace to manage structures and assign selected 3D ROIs.");
+        ConfigureLabeledIconButton(WorkspaceRenderingButton, CreateRenderingWorkspaceIcon(), "3D Rendering", "Open the 3D rendering workspace for projection, DVR preset, and color-map settings.");
         ToolTip.SetTip(WorkspaceReportButton, "Open the floating report panel with created findings, provenance, and anatomy hints.");
         ConfigureIconButton(ToolboxNavigateButton, CreateNavigateIcon(), "Navigate: left drag zoom/pan, wheel scroll, middle drag fast stack, right drag window/level.");
         ConfigureIconButton(ToolboxPixelLensButton, CreatePixelLensIcon(), "Pixel lens.");
@@ -129,6 +130,13 @@ public partial class StudyViewerWindow
         StrokePath("M12 6 L12 18"),
         StrokePath("M6 12 L18 12"),
         OutlineEllipse(10.2, 10.2, 3.6, 3.6));
+
+    private static Control CreateRenderingWorkspaceIcon() => CreateIconHost(
+        OutlineRectangle(4.5, 5, 15, 14),
+        StrokePath("M7 15 L10.5 10.5 L13.2 13 L17.5 8.5"),
+        LineShape(7.5, 18, 16.5, 18),
+        LineShape(7.5, 18, 7.5, 8.5),
+        FilledEllipse(16.2, 7.2, 2.2, 2.2));
 
     private static Control CreateBallRoiIcon() => CreateIconHost(
         OutlinePath("M7 8 L16 7 L18 12 L13 17 L7.5 15.5 Z"),

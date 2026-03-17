@@ -307,6 +307,12 @@
                                 <TextBlock Text="Anatomy" FontSize="11" />
                             </StackPanel>
                         </Button>
+                        <Button x:Name="WorkspaceRenderingButton" Classes="workspaceAction" Click="OnWorkspaceRenderingClick" ToolTip.Tip="Open the 3D rendering workspace for projection, DVR preset, and color-map settings.">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <TextBlock Text="3D" FontWeight="SemiBold" FontSize="11" />
+                                <TextBlock Text="Rendering" FontSize="11" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="WorkspaceReportButton" Classes="workspaceAction" Click="OnWorkspaceReportClick" ToolTip.Tip="Open the floating report panel with created findings, source provenance, and anatomy hints.">
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <TextBlock Text="RP" FontWeight="SemiBold" FontSize="11" />
@@ -752,6 +758,105 @@
                                   VerticalScrollBarVisibility="Auto">
                         <StackPanel x:Name="AnatomyPanelContent"
                                     Spacing="10" />
+                    </ScrollViewer>
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="RenderingPanel"
+                    IsVisible="False"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,72,924,0"
+                    Padding="12"
+                    MaxWidth="360"
+                    MinWidth="300"
+                    Background="#E6141820"
+                    BorderBrush="#8082B8E8"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    ZIndex="4">
+                <Border.RenderTransform>
+                    <TranslateTransform />
+                </Border.RenderTransform>
+                <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <StackPanel x:Name="RenderingPanelDragHandle"
+                                    Spacing="2"
+                                    Cursor="SizeAll"
+                                    PointerPressed="OnRenderingPanelHeaderPointerPressed"
+                                    PointerMoved="OnRenderingPanelHeaderPointerMoved"
+                                    PointerReleased="OnRenderingPanelHeaderPointerReleased">
+                            <TextBlock Text="3D Rendering"
+                                       Foreground="#FFF6FBFF"
+                                       FontWeight="SemiBold"
+                                       FontSize="13" />
+                            <TextBlock x:Name="RenderingPanelSummaryText"
+                                       Foreground="#FF9DB3C7"
+                                       FontSize="11"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleButton x:Name="RenderingPanelPinButton"
+                                      Grid.Column="1"
+                                      Classes="iconToggle"
+                                      Width="30"
+                                      Height="30"
+                                      MinWidth="30"
+                                      Click="OnRenderingPanelPinClick"
+                                      ToolTip.Tip="Pin the 3D rendering workspace and keep it open for the current viewer." />
+                    </Grid>
+
+                    <Border Height="1" Background="#334D5F74" />
+
+                    <TextBlock x:Name="RenderingPanelHintText"
+                               Foreground="#FFD3E5F5"
+                               FontSize="10"
+                               TextWrapping="Wrap" />
+
+                    <ScrollViewer MaxHeight="500"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <StackPanel Spacing="10">
+                            <Border Background="#1F7AA6D9" BorderBrush="#337AA6D9" BorderThickness="1" CornerRadius="10" Padding="10,8">
+                                <TextBlock x:Name="RenderingWorkspaceTargetText"
+                                           Foreground="#FFEAF3FB"
+                                           FontSize="11"
+                                           TextWrapping="Wrap" />
+                            </Border>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Projection"
+                                           Foreground="#FFF0F6FC"
+                                           FontWeight="SemiBold"
+                                           FontSize="11" />
+                                <ComboBox x:Name="RenderingWorkspaceProjectionCombo"
+                                          MinWidth="220"
+                                          SelectionChanged="OnRenderingWorkspaceProjectionSelectionChanged" />
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="DVR transfer preset"
+                                           Foreground="#FFF0F6FC"
+                                           FontWeight="SemiBold"
+                                           FontSize="11" />
+                                <ComboBox x:Name="RenderingWorkspaceDvrPresetCombo"
+                                          MinWidth="220"
+                                          SelectionChanged="OnRenderingWorkspaceDvrPresetSelectionChanged" />
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Color map"
+                                           Foreground="#FFF0F6FC"
+                                           FontWeight="SemiBold"
+                                           FontSize="11" />
+                                <ComboBox x:Name="RenderingWorkspaceColorMapCombo"
+                                          MinWidth="220"
+                                          SelectionChanged="OnRenderingWorkspaceColorMapSelectionChanged" />
+                                <TextBlock Text="Color map is currently applied viewer-wide to keep existing slot synchronization intact."
+                                           Foreground="#FF9DB3C7"
+                                           FontSize="10"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+                        </StackPanel>
                     </ScrollViewer>
                 </StackPanel>
             </Border>
