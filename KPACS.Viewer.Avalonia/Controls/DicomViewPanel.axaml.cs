@@ -721,6 +721,7 @@ public partial class DicomViewPanel : UserControl
         ReslicedImage resliced;
         if (IsDvrMode && _dvrRenderState is not null)
         {
+            UpdateDvrRenderState(highQuality: false);
             resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
                 _volume, _dvrRenderState, _dvrTransferFunction);
         }
@@ -774,6 +775,11 @@ public partial class DicomViewPanel : UserControl
         _volumeOrientation = orientation;
         _projectionThicknessMm = Math.Max(_projectionThicknessMm, GetMinimumProjectionThicknessMm());
         int midSlice = VolumeReslicer.GetSliceCount(_volume, orientation) / 2;
+        if (IsDvrMode)
+        {
+            InitializeDvrCamera();
+        }
+
         bool changed = ShowVolumeSlice(midSlice);
         if (changed)
         {
@@ -848,6 +854,18 @@ public partial class DicomViewPanel : UserControl
         if (_volume is null)
         {
             return 500.0;
+        }
+
+        if (IsDvrMode)
+        {
+            double spacingX = _volume.SpacingX > 0 ? _volume.SpacingX : 1.0;
+            double spacingY = _volume.SpacingY > 0 ? _volume.SpacingY : 1.0;
+            double spacingZ = _volume.SpacingZ > 0 ? _volume.SpacingZ : 1.0;
+            double extentX = Math.Max(0, (_volume.SizeX - 1) * spacingX);
+            double extentY = Math.Max(0, (_volume.SizeY - 1) * spacingY);
+            double extentZ = Math.Max(0, (_volume.SizeZ - 1) * spacingZ);
+            double diagonal = Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
+            return Math.Max(GetMinimumProjectionThicknessMm(), diagonal);
         }
 
         return Math.Max(

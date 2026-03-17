@@ -74,7 +74,7 @@ public partial class DicomViewPanel
         double extentY = (_volume.SizeY - 1) * spacingY;
         double extentZ = (_volume.SizeZ - 1) * spacingZ;
 
-        _dvrVolumeCenter = new SpatialVector3D(extentX * 0.5, extentY * 0.5, extentZ * 0.5);
+        _dvrVolumeCenter = GetDvrSliceCenterMm(_volumeSliceIndex);
         double diagonal = Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
         _dvrDistance = diagonal * 1.5;
 
@@ -115,6 +115,8 @@ public partial class DicomViewPanel
             return;
         }
 
+        _dvrVolumeCenter = GetDvrSliceCenterMm(_volumeSliceIndex);
+
         // Compute rotated camera vectors via Rodrigues rotation
         SpatialVector3D right = _dvrInitialForward.Cross(_dvrInitialUp).Normalize();
 
@@ -141,9 +143,33 @@ public partial class DicomViewPanel
             CameraUp = up,
             LightDirection = forward,   // headlight: light follows camera
             OrthographicScale = 1.0,
+            SlabThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), _projectionThicknessMm),
             OutputWidth = outputWidth,
             OutputHeight = outputHeight,
             SamplingStepFactor = highQuality ? 1.0 : 3.5,  // coarser steps during interaction
+        };
+    }
+
+    private SpatialVector3D GetDvrSliceCenterMm(int sliceIndex)
+    {
+        if (_volume is null)
+        {
+            return _dvrVolumeCenter;
+        }
+
+        double spacingX = _volume.SpacingX > 0 ? _volume.SpacingX : 1.0;
+        double spacingY = _volume.SpacingY > 0 ? _volume.SpacingY : 1.0;
+        double spacingZ = _volume.SpacingZ > 0 ? _volume.SpacingZ : 1.0;
+
+        double extentX = (_volume.SizeX - 1) * spacingX;
+        double extentY = (_volume.SizeY - 1) * spacingY;
+        double extentZ = (_volume.SizeZ - 1) * spacingZ;
+
+        return _volumeOrientation switch
+        {
+            SliceOrientation.Coronal => new SpatialVector3D(extentX * 0.5, sliceIndex * spacingY, extentZ * 0.5),
+            SliceOrientation.Sagittal => new SpatialVector3D(sliceIndex * spacingX, extentY * 0.5, extentZ * 0.5),
+            _ => new SpatialVector3D(extentX * 0.5, extentY * 0.5, sliceIndex * spacingZ),
         };
     }
 

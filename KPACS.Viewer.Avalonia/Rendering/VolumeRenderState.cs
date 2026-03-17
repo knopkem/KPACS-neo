@@ -41,6 +41,8 @@ public sealed record VolumeRenderState
 
     public double OpacityTerminationThreshold { get; init; } = 0.99;
 
+    public double SlabThicknessMm { get; init; } = double.PositiveInfinity;
+
     public int OutputWidth { get; init; }
 
     public int OutputHeight { get; init; }

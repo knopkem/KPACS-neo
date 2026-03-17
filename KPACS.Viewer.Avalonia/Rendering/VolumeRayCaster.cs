@@ -204,6 +204,29 @@ public static class VolumeRayCaster
 
                 tNear = Math.Max(tNear, 0.0);
 
+                if (state.SlabThicknessMm > 0.0 && !double.IsInfinity(state.SlabThicknessMm))
+                {
+                    double rayForwardDot = rayDir.Dot(forward);
+                    if (Math.Abs(rayForwardDot) < 1e-6)
+                    {
+                        pixels[row * width + column] = (short)volume.MinValue;
+                        continue;
+                    }
+
+                    double halfThicknessMm = state.SlabThicknessMm * 0.5;
+                    double tCenter = (state.CameraTarget - rayOrigin).Dot(forward) / rayForwardDot;
+                    double tHalfSpan = halfThicknessMm / Math.Abs(rayForwardDot);
+                    double slabNear = tCenter - tHalfSpan;
+                    double slabFar = tCenter + tHalfSpan;
+                    tNear = Math.Max(tNear, slabNear);
+                    tFar = Math.Min(tFar, slabFar);
+                    if (tFar < tNear)
+                    {
+                        pixels[row * width + column] = (short)volume.MinValue;
+                        continue;
+                    }
+                }
+
                 double accumulatedValue = 0.0;
                 double accumulatedAlpha = 0.0;
 
