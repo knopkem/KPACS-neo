@@ -32,7 +32,7 @@ jobs:
           - os: ubuntu-22.04
             rid: linux-x64
             label: Linux x64
-          - os: macos-13
+          - os: macos-15-intel
             rid: osx-x64
             label: macOS Intel
           - os: macos-14
@@ -201,12 +201,26 @@ jobs:
 
   attach-to-release:
     name: Attach packages to GitHub release
-    if: github.event_name == 'release'
+    if: github.event_name == 'release' || github.event_name == 'workflow_dispatch'
     runs-on: ubuntu-latest
     needs:
       - build
 
     steps:
+      - name: Resolve version label
+        id: version
+        shell: bash
+        run: |
+          if [[ "${GITHUB_EVENT_NAME}" == "release" ]]; then
+            VERSION="${{ github.event.release.tag_name }}"
+          elif [[ -n "${{ github.event.inputs.version }}" ]]; then
+            VERSION="${{ github.event.inputs.version }}"
+          else
+            echo "No release tag available for attach-to-release job." >&2
+            exit 1
+          fi
+          echo "value=${VERSION}" >> "$GITHUB_OUTPUT"
+
       - name: Download packaged artifacts
         uses: actions/download-artifact@v4
         with:
@@ -216,4 +230,6 @@ jobs:
       - name: Upload assets to release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ steps.version.outputs.value }}
           files: artifacts/release/*
+          fail_on_unmatched_files: true
