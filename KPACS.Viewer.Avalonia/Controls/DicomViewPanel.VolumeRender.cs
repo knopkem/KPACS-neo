@@ -117,21 +117,10 @@ public partial class DicomViewPanel
 
         SpatialVector3D cameraPos = _dvrVolumeCenter - forward * _dvrDistance;
 
-        // Fast interaction: low resolution + coarse steps for responsive feedback.
-        // Sharp render: half of display resolution with fine steps.
-        // The layout does NOT shift because RenderDvrViewFast skips ApplyDisplayImageSize.
-        int outputWidth;
-        int outputHeight;
-        if (highQuality)
-        {
-            outputWidth = Math.Clamp((int)(Bounds.Width * 0.5), 128, 640);
-            outputHeight = Math.Clamp((int)(Bounds.Height * 0.5), 128, 640);
-        }
-        else
-        {
-            outputWidth = 256;
-            outputHeight = 256;
-        }
+        // Both fast and sharp renders use the SAME output dimensions to prevent
+        // layout shifts.  Quality difference comes solely from ray-march step size.
+        int outputWidth = Math.Clamp((int)(Bounds.Width * 0.5), 128, 512);
+        int outputHeight = Math.Clamp((int)(Bounds.Height * 0.5), 128, 512);
 
         _dvrRenderState = new VolumeRenderState
         {
