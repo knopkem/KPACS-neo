@@ -1,0 +1,155 @@
+{
+  "packId": "kpacs.cranium.base",
+  "packVersion": "1.0",
+  "displayName": "KPACS Cranium Base",
+  "vendor": "K-PACS",
+  "module": "Cranium",
+  "supportedModalities": ["CT", "MR"],
+  "supportedMrProfiles": ["T1", "T2", "FLAIR"],
+  "frameDefinition": {
+    "axes": ["LeftRight", "AnteriorPosterior", "CranialCaudal"],
+    "anchors": [
+      "Midline",
+      "SkullBasePlane",
+      "CranialVertex",
+      "LeftOrbitCenter",
+      "RightOrbitCenter",
+      "PosteriorFossaCenter"
+    ]
+  },
+  "compartments": [
+    {
+      "id": "intracranial_space",
+      "displayName": "Intracranial Space",
+      "allowedModalities": ["CT", "MR"],
+      "parent": ""
+    },
+    {
+      "id": "posterior_fossa",
+      "displayName": "Posterior Fossa",
+      "allowedModalities": ["CT", "MR"],
+      "parent": "intracranial_space"
+    },
+    {
+      "id": "ventricular_csf",
+      "displayName": "Ventricular CSF",
+      "allowedModalities": ["CT", "MR"],
+      "parent": "intracranial_space"
+    },
+    {
+      "id": "orbits",
+      "displayName": "Orbits",
+      "allowedModalities": ["CT", "MR"],
+      "parent": ""
+    },
+    {
+      "id": "paranasal_sinuses",
+      "displayName": "Paranasal Sinuses",
+      "allowedModalities": ["CT", "MR"],
+      "parent": ""
+    }
+  ],
+  "landmarks": [
+    {
+      "id": "midline",
+      "type": "axis",
+      "stability": "high",
+      "required": true
+    },
+    {
+      "id": "skull_base_plane",
+      "type": "plane",
+      "stability": "high",
+      "required": true
+    },
+    {
+      "id": "cranial_vertex",
+      "type": "point",
+      "stability": "high",
+      "required": true
+    },
+    {
+      "id": "ventricular_axis",
+      "type": "curve_or_axis",
+      "stability": "medium",
+      "required": true
+    }
+  ],
+  "structures": [
+    {
+      "id": "left_lateral_ventricle",
+      "displayName": "Left Lateral Ventricle",
+      "allowedCompartments": ["ventricular_csf", "intracranial_space"],
+      "supportedModalities": ["CT", "MR"],
+      "expectedPosition": {
+        "leftRight": { "min": -0.65, "max": -0.10 },
+        "anteriorPosterior": { "min": -0.25, "max": 0.35 },
+        "cranialCaudal": { "min": 0.45, "max": 0.82 },
+        "distanceToMidline": { "min": 0.05, "max": 0.30 },
+        "distanceToSkullBase": { "min": 0.20, "max": 1.0 },
+        "distanceToVertex": { "min": 0.05, "max": 0.70 }
+      },
+      "expectedMaterial": {
+        "ctClass": ["CSF"],
+        "mrT1": ["low"],
+        "mrT2": ["high"],
+        "mrFlair": ["suppressed_or_low"]
+      },
+      "requiredRelations": [
+        { "type": "left_of", "target": "midline", "strength": "hard" },
+        { "type": "cranial_to", "target": "brainstem", "strength": "hard" }
+      ],
+      "forbiddenRelations": [
+        { "type": "inside", "target": "posterior_fossa", "strength": "hard" },
+        { "type": "touches", "target": "skull_base_plane", "strength": "hard" }
+      ]
+    },
+    {
+      "id": "brainstem",
+      "displayName": "Brainstem",
+      "allowedCompartments": ["posterior_fossa", "intracranial_space"],
+      "supportedModalities": ["CT", "MR"],
+      "expectedPosition": {
+        "leftRight": { "min": -0.15, "max": 0.15 },
+        "anteriorPosterior": { "min": -0.10, "max": 0.40 },
+        "cranialCaudal": { "min": 0.05, "max": 0.45 },
+        "distanceToMidline": { "min": 0.0, "max": 0.12 },
+        "distanceToSkullBase": { "min": 0.0, "max": 0.18 },
+        "distanceToVertex": { "min": 0.35, "max": 1.0 }
+      },
+      "expectedMaterial": {
+        "ctClass": ["BrainParenchyma"],
+        "mrT1": ["intermediate"],
+        "mrT2": ["intermediate"],
+        "mrFlair": ["intermediate"]
+      },
+      "requiredRelations": [
+        { "type": "inside", "target": "posterior_fossa", "strength": "hard" },
+        { "type": "near", "target": "skull_base_plane", "strength": "hard" }
+      ],
+      "forbiddenRelations": [
+        { "type": "inside", "target": "ventricular_csf", "strength": "hard" }
+      ]
+    }
+  ],
+  "classifierWeights": {
+    "compartmentGate": 1.0,
+    "landmarkRelations": 0.9,
+    "structureGraph": 0.85,
+    "materialProfile": 0.8,
+    "localSignature": 0.45,
+    "learnedPrior": 0.35
+  },
+  "validationCases": [
+    {
+      "id": "lv-vs-brainstem",
+      "description": "Left lateral ventricle must not be classified as brainstem.",
+      "expectedStructureId": "left_lateral_ventricle",
+      "forbiddenStructureIds": ["brainstem"]
+    }
+  ],
+  "migration": {
+    "fromVersion": "",
+    "notes": ""
+  }
+}
