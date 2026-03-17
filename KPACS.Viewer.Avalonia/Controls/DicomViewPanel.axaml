@@ -145,7 +145,7 @@
                 Padding="8,4"
                 HorizontalAlignment="Right"
                 IsVisible="False"
-                ToolTip.Tip="Drag with left click: adjust slab thickness&#10;Right click: choose MPR, MipPR, MinPR, or MPVRT">
+                ToolTip.Tip="Drag with left click: adjust slab thickness&#10;Right click: choose MPR, MipPR, MinPR, MPVRT, or DVR">
             <TextBlock x:Name="ProjectionBadgeText"
                    Text=""
                    Foreground="#FFFFDD00"

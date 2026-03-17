@@ -359,6 +359,7 @@ public partial class DicomViewPanel : UserControl
                 CreateProjectionMenuItem("MipPR", VolumeProjectionMode.MipPr),
                 CreateProjectionMenuItem("MinPR", VolumeProjectionMode.MinPr),
                 CreateProjectionMenuItem("MPVRT", VolumeProjectionMode.MpVrt),
+                CreateProjectionMenuItem("DVR", VolumeProjectionMode.Dvr),
             }
         };
     }
@@ -716,13 +717,23 @@ public partial class DicomViewPanel : UserControl
         sliceIndex = Math.Clamp(sliceIndex, 0, maxSlice);
         _volumeSliceIndex = sliceIndex;
 
-        // Extract the 2D slice from the volume
-        ReslicedImage resliced = VolumeReslicer.RenderSlab(
-            _volume,
-            _volumeOrientation,
-            sliceIndex,
-            _projectionThicknessMm,
-            _projectionMode);
+        // DVR with active 3D camera: use the arbitrary-view renderer
+        ReslicedImage resliced;
+        if (IsDvrMode && _dvrRenderState is not null)
+        {
+            resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
+                _volume, _dvrRenderState, _dvrTransferFunction);
+        }
+        else
+        {
+            resliced = VolumeReslicer.RenderSlab(
+                _volume,
+                _volumeOrientation,
+                sliceIndex,
+                _projectionThicknessMm,
+                _projectionMode);
+        }
+
         _volumeSlicePixels = resliced.Pixels;
         _imageWidth = resliced.Width;
         _imageHeight = resliced.Height;
@@ -781,6 +792,14 @@ public partial class DicomViewPanel : UserControl
         }
 
         _projectionMode = mode;
+
+        if (mode == VolumeProjectionMode.Dvr)
+        {
+            // Initialise the 3D camera; first render will go through ShowVolumeSlice
+            // which detects DVR mode and uses the arbitrary-view renderer.
+            InitializeDvrCamera();
+        }
+
         ShowVolumeSlice(_volumeSliceIndex);
         UpdateOverlay();
         NotifyViewStateChanged();
@@ -835,6 +854,7 @@ public partial class DicomViewPanel : UserControl
         VolumeProjectionMode.MipPr => "MipPR",
         VolumeProjectionMode.MinPr => "MinPR",
         VolumeProjectionMode.MpVrt => "MPVRT",
+        VolumeProjectionMode.Dvr => "DVR",
         _ => "MPR",
     };
 
@@ -2028,6 +2048,18 @@ public partial class DicomViewPanel : UserControl
         }
         else if (point.Properties.IsLeftButtonPressed)
         {
+            // DVR mode: left-drag orbits the 3D camera
+            if (HandleDvrPointerPressed(pos, e.Pointer))
+            {
+                _isLeftDragging = true;
+                _mouseDownPos = pos;
+                e.Pointer.Capture(RootGrid);
+                _capturedPointer = e.Pointer;
+                AttachCapturedPointerHandlers();
+                e.Handled = true;
+                return;
+            }
+
             _isLeftDragging = true;
             _mouseDownPos = pos;
 
@@ -2071,6 +2103,7 @@ public partial class DicomViewPanel : UserControl
         }
         else if ((e.InitialPressMouseButton == MouseButton.Left || e.InitialPressMouseButton == MouseButton.Middle) && _isLeftDragging)
         {
+            HandleDvrPointerReleased();  // no-op if not orbiting
             _isLeftDragging = false;
             _isEdgeZoom = false;
             _isStackDragging = false;
@@ -2114,6 +2147,11 @@ public partial class DicomViewPanel : UserControl
             UpdateOverlay();
             WindowChanged?.Invoke();
             NotifyViewStateChanged();
+        }
+        else if (_isLeftDragging && HandleDvrPointerMoved(pos))
+        {
+            // DVR camera orbit handled
+            e.Handled = true;
         }
         else if (_isLeftDragging && _isStackDragging)
         {
@@ -2238,6 +2276,13 @@ public partial class DicomViewPanel : UserControl
         if (WheelMode == MouseWheelMode.StackScroll)
         {
             StackScrollRequested?.Invoke(e.Delta.Y > 0 ? -1 : 1);
+            e.Handled = true;
+            return;
+        }
+
+        // DVR mode: wheel zooms the 3D camera
+        if (HandleDvrWheelZoom(e.Delta.Y))
+        {
             e.Handled = true;
             return;
         }

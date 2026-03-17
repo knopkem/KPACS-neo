@@ -7,6 +7,7 @@
 // Uses trilinear interpolation for sub-voxel accuracy in coronal/sagittal/oblique views.
 // ------------------------------------------------------------------------------------------------
 
+using System.Runtime.CompilerServices;
 using KPACS.Viewer.Models;
 
 namespace KPACS.Viewer.Rendering;
@@ -32,6 +33,7 @@ public enum VolumeProjectionMode
     MipPr,
     MinPr,
     MpVrt,
+    Dvr,
 }
 
 /// <summary>
@@ -63,6 +65,8 @@ public sealed class ReslicedImage
 /// </summary>
 public static class VolumeReslicer
 {
+    private static readonly ConditionalWeakTable<SeriesVolume, VolumeGradientVolume> GradientCache = new();
+
     public static ReslicedImage RenderSlab(
         SeriesVolume volume,
         SliceOrientation orientation,
@@ -88,7 +92,7 @@ public static class VolumeReslicer
         int startSlice = Math.Max(0, centerSliceIndex - halfSpan);
         int endSlice = Math.Min(sliceCount - 1, centerSliceIndex + halfSpan);
 
-        if (startSlice == endSlice)
+        if (startSlice == endSlice && mode != VolumeProjectionMode.Dvr)
         {
             return ExtractSlice(volume, orientation, centerSliceIndex);
         }
@@ -99,6 +103,7 @@ public static class VolumeReslicer
             VolumeProjectionMode.MipPr => ComputeMip(volume, orientation, startSlice, endSlice),
             VolumeProjectionMode.MinPr => ComputeMinIp(volume, orientation, startSlice, endSlice),
             VolumeProjectionMode.MpVrt => ComputeVolumeProjection(volume, orientation, startSlice, endSlice),
+            VolumeProjectionMode.Dvr => ComputeDirectVolumeRendering(volume, orientation, startSlice, endSlice),
             _ => ExtractSlice(volume, orientation, centerSliceIndex),
         };
     }
@@ -509,6 +514,49 @@ public static class VolumeReslicer
             PixelSpacingY = firstSlice.PixelSpacingY,
             SpatialMetadata = midResult.SpatialMetadata,
         };
+    }
+
+    public static ReslicedImage ComputeDirectVolumeRendering(
+        SeriesVolume volume,
+        SliceOrientation orientation,
+        int startSlice,
+        int endSlice)
+    {
+        int sliceCount = GetSliceCount(volume, orientation);
+        startSlice = Math.Clamp(startSlice, 0, sliceCount - 1);
+        endSlice = Math.Clamp(endSlice, startSlice, sliceCount - 1);
+
+        int midSlice = (startSlice + endSlice) / 2;
+        ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        VolumeRenderState state = VolumeRenderState.CreateOrthographicDefaults(
+            orientation,
+            reference.Width,
+            reference.Height);
+        VolumeGradientVolume gradients = GradientCache.GetValue(volume, static source => VolumeGradientVolume.Create(source));
+        VolumeTransferFunction tf = VolumeTransferFunction.CreateDefault(volume.MinValue, volume.MaxValue);
+
+        return VolumeRayCaster.RenderOrthographicSlab(
+            volume,
+            gradients,
+            orientation,
+            startSlice,
+            endSlice,
+            state,
+            tf);
+    }
+
+    /// <summary>
+    /// Renders the full volume from an arbitrary camera using the given render state.
+    /// Called directly by DicomViewPanel when 3D camera orbit is active.
+    /// </summary>
+    public static ReslicedImage ComputeDirectVolumeRenderingView(
+        SeriesVolume volume,
+        VolumeRenderState state,
+        VolumeTransferFunction? transferFunction = null)
+    {
+        VolumeGradientVolume gradients = GradientCache.GetValue(volume, static source => VolumeGradientVolume.Create(source));
+        transferFunction ??= VolumeTransferFunction.CreateDefault(volume.MinValue, volume.MaxValue);
+        return VolumeRayCaster.RenderView(volume, gradients, transferFunction, state);
     }
 
     public static double GetSliceSpacing(SeriesVolume volume, SliceOrientation orientation)
