@@ -142,8 +142,6 @@ public static class VolumeRayCaster
 
         Vector3D boxMin = new(0, 0, 0);
         Vector3D boxMax = new(extentX, extentY, extentZ);
-        Vector3D volumeCenter = new(extentX * 0.5, extentY * 0.5, extentZ * 0.5);
-
         // Camera coordinate frame
         Vector3D forward = (state.CameraTarget - state.CameraPosition).Normalize();
         Vector3D right = forward.Cross(state.CameraUp).Normalize();
@@ -160,17 +158,25 @@ public static class VolumeRayCaster
 
         // Compute view-plane pixel size
         double diagonal = Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
-        double orthoExtent = diagonal * state.OrthographicScale;
-        double pixelSize;
+        double orthoWidthMm = state.OrthographicWidthMm > 0
+            ? state.OrthographicWidthMm
+            : diagonal * state.OrthographicScale;
+        double orthoHeightMm = state.OrthographicHeightMm > 0
+            ? state.OrthographicHeightMm
+            : diagonal * state.OrthographicScale;
+        double pixelSizeX;
+        double pixelSizeY;
         if (state.Projection == VolumeRenderProjection.Orthographic)
         {
-            pixelSize = orthoExtent / Math.Max(width, height);
+            pixelSizeX = width > 1 ? orthoWidthMm / (width - 1) : orthoWidthMm;
+            pixelSizeY = height > 1 ? orthoHeightMm / (height - 1) : orthoHeightMm;
         }
         else
         {
             // Perspective: pixel size at unit distance, actual direction computed per pixel
             double fovRad = state.FieldOfViewDegrees * Math.PI / 180.0;
-            pixelSize = 2.0 * Math.Tan(fovRad * 0.5) / height;
+            pixelSizeX = 2.0 * Math.Tan(fovRad * 0.5) / height;
+            pixelSizeY = pixelSizeX;
         }
 
         Parallel.For(0, height, row =>
@@ -178,8 +184,8 @@ public static class VolumeRayCaster
             for (int column = 0; column < width; column++)
             {
                 // Screen-space offsets from center
-                double sx = (column - width * 0.5 + 0.5) * pixelSize;
-                double sy = (row - height * 0.5 + 0.5) * pixelSize;
+                double sx = (column - width * 0.5 + 0.5) * pixelSizeX;
+                double sy = (row - height * 0.5 + 0.5) * pixelSizeY;
 
                 Vector3D rayOrigin;
                 Vector3D rayDir;
@@ -298,8 +304,8 @@ public static class VolumeRayCaster
             Pixels = pixels,
             Width = width,
             Height = height,
-            PixelSpacingX = pixelSize,
-            PixelSpacingY = pixelSize,
+            PixelSpacingX = pixelSizeX,
+            PixelSpacingY = pixelSizeY,
             SpatialMetadata = null,
         };
     }

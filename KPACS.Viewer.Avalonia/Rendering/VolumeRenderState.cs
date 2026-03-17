@@ -17,6 +17,10 @@ public sealed record VolumeRenderState
 {
     public VolumeRenderProjection Projection { get; init; } = VolumeRenderProjection.Orthographic;
 
+    public double OrthographicWidthMm { get; init; }
+
+    public double OrthographicHeightMm { get; init; }
+
     public Vector3D CameraPosition { get; init; } = new(0, 0, -1);
 
     public Vector3D CameraTarget { get; init; } = new(0, 0, 0);

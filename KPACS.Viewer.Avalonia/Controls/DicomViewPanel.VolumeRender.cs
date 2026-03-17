@@ -82,8 +82,8 @@ public partial class DicomViewPanel
         (_dvrInitialForward, _dvrInitialUp) = _volumeOrientation switch
         {
             SliceOrientation.Coronal => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
-            SliceOrientation.Sagittal => (new SpatialVector3D(-1, 0, 0), new SpatialVector3D(0, 0, -1)),
-            _ /* Axial */ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, -1, 0)),
+            SliceOrientation.Sagittal => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
+            _ /* Axial */ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
         };
 
         _dvrAzimuth = 0;
@@ -116,6 +116,7 @@ public partial class DicomViewPanel
         }
 
         _dvrVolumeCenter = GetDvrSliceCenterMm(_volumeSliceIndex);
+        ReslicedImage referenceSlice = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, _volumeSliceIndex);
 
         // Compute rotated camera vectors via Rodrigues rotation
         SpatialVector3D right = _dvrInitialForward.Cross(_dvrInitialUp).Normalize();
@@ -130,14 +131,17 @@ public partial class DicomViewPanel
 
         SpatialVector3D cameraPos = _dvrVolumeCenter - forward * _dvrDistance;
 
-        // Both fast and sharp renders use the SAME output dimensions to prevent
-        // layout shifts.  Quality difference comes solely from ray-march step size.
-        int outputWidth = Math.Clamp((int)(Bounds.Width * 0.5), 128, 512);
-        int outputHeight = Math.Clamp((int)(Bounds.Height * 0.5), 128, 512);
+        // DVR should match the current orthogonal projection geometry exactly.
+        int outputWidth = Math.Max(1, referenceSlice.Width);
+        int outputHeight = Math.Max(1, referenceSlice.Height);
+        double orthographicWidthMm = Math.Max(0, (outputWidth - 1) * referenceSlice.PixelSpacingX);
+        double orthographicHeightMm = Math.Max(0, (outputHeight - 1) * referenceSlice.PixelSpacingY);
 
         _dvrRenderState = new VolumeRenderState
         {
             Projection = VolumeRenderProjection.Orthographic,
+            OrthographicWidthMm = orthographicWidthMm,
+            OrthographicHeightMm = orthographicHeightMm,
             CameraPosition = cameraPos,
             CameraTarget = _dvrVolumeCenter,
             CameraUp = up,
