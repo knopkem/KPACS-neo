@@ -200,9 +200,11 @@ public partial class DicomViewPanel
         _volumeSlicePixels = resliced.Pixels;
         _imageWidth = resliced.Width;
         _imageHeight = resliced.Height;
-        UpdateDisplayGeometry(resliced.PixelSpacingX, resliced.PixelSpacingY);
 
-        ApplyDisplayImageSize();
+        // Don't call ApplyDisplayImageSize() — the layout was established by
+        // the initial ShowVolumeSlice when DVR mode was activated.  Changing it
+        // here would shift/resize the image because the sharp render uses a
+        // different pixel resolution than the fast preview.
         RenderImage(sharp: true);
         UpdateOverlay();
     }
