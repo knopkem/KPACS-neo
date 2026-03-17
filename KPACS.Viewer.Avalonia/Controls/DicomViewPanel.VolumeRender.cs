@@ -32,6 +32,10 @@ public partial class DicomViewPanel
     private SpatialVector3D _dvrInitialUp;
     private SpatialVector3D _dvrVolumeCenter;  // in mm space
 
+    // Windowing: saved before entering DVR so we can restore on exit
+    private double _preDvrWindowCenter;
+    private double _preDvrWindowWidth;
+
     // Orbit drag tracking
     private bool _isDvrOrbitDragging;
     private Point _dvrOrbitDragStart;
@@ -86,6 +90,13 @@ public partial class DicomViewPanel
         _dvrElevation = 0;
 
         _dvrTransferFunction = VolumeTransferFunction.Create(_dvrPreset, _volume.MinValue, _volume.MaxValue);
+
+        // Save current windowing and apply full-range window for DVR output
+        _preDvrWindowCenter = _windowCenter;
+        _preDvrWindowWidth = _windowWidth;
+        double range = Math.Max(1, _volume.MaxValue - _volume.MinValue);
+        _windowCenter = _volume.MinValue + range * 0.5;
+        _windowWidth = range;
 
         UpdateDvrRenderState(highQuality: false);
     }

@@ -791,6 +791,7 @@ public partial class DicomViewPanel : UserControl
             return false;
         }
 
+        bool wasDvr = _projectionMode == VolumeProjectionMode.Dvr;
         _projectionMode = mode;
 
         if (mode == VolumeProjectionMode.Dvr)
@@ -798,6 +799,12 @@ public partial class DicomViewPanel : UserControl
             // Initialise the 3D camera; first render will go through ShowVolumeSlice
             // which detects DVR mode and uses the arbitrary-view renderer.
             InitializeDvrCamera();
+        }
+        else if (wasDvr)
+        {
+            // Restore the windowing that was active before DVR mode
+            _windowCenter = _preDvrWindowCenter;
+            _windowWidth = Math.Max(1, _preDvrWindowWidth);
         }
 
         ShowVolumeSlice(_volumeSliceIndex);
