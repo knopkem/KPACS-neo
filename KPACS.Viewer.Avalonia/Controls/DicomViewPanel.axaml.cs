@@ -747,7 +747,15 @@ public partial class DicomViewPanel : UserControl
         ApplyDisplayImageSize();
 
         PlaceholderText.IsVisible = false;
-        RenderImageFastThenSharp();
+        if (IsDvrMode)
+        {
+            RenderImage(sharp: false);
+            ScheduleDvrSharpRender();
+        }
+        else
+        {
+            RenderImageFastThenSharp();
+        }
 
         if (_fitToWindow)
             ApplyInitialFitToWindow();
@@ -2094,18 +2102,6 @@ public partial class DicomViewPanel : UserControl
         }
         else if (point.Properties.IsLeftButtonPressed)
         {
-            // DVR mode: left-drag orbits the 3D camera
-            if (HandleDvrPointerPressed(pos, e.Pointer))
-            {
-                _isLeftDragging = true;
-                _mouseDownPos = pos;
-                e.Pointer.Capture(RootGrid);
-                _capturedPointer = e.Pointer;
-                AttachCapturedPointerHandlers();
-                e.Handled = true;
-                return;
-            }
-
             _isLeftDragging = true;
             _mouseDownPos = pos;
 
@@ -2199,11 +2195,6 @@ public partial class DicomViewPanel : UserControl
             UpdateOverlay();
             WindowChanged?.Invoke();
             NotifyViewStateChanged();
-        }
-        else if (_isLeftDragging && HandleDvrPointerMoved(pos))
-        {
-            // DVR camera orbit handled
-            e.Handled = true;
         }
         else if (_isLeftDragging && _isStackDragging)
         {
@@ -2328,13 +2319,6 @@ public partial class DicomViewPanel : UserControl
         if (WheelMode == MouseWheelMode.StackScroll)
         {
             StackScrollRequested?.Invoke(e.Delta.Y > 0 ? -1 : 1);
-            e.Handled = true;
-            return;
-        }
-
-        // DVR mode: wheel zooms the 3D camera
-        if (HandleDvrWheelZoom(e.Delta.Y))
-        {
             e.Handled = true;
             return;
         }
