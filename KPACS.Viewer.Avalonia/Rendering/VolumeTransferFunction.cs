@@ -31,6 +31,18 @@ public enum TransferFunctionPreset
 
     /// <summary>Surface / skin rendering – thin opacity band near tissue boundary.</summary>
     Skin,
+
+    /// <summary>Endoscopic surface rendering with stronger front-surface emphasis.</summary>
+    Endoscopy,
+
+    /// <summary>PET-style intensity rendering intended for hot-iron colour mapping.</summary>
+    PetHotIron,
+
+    /// <summary>PET-style intensity rendering intended for spectrum/rainbow colour mapping.</summary>
+    PetSpectrum,
+
+    /// <summary>Perfusion-style parametric rendering with mid/high-value emphasis.</summary>
+    Perfusion,
 }
 
 /// <summary>
@@ -356,8 +368,86 @@ public sealed class VolumeTransferFunction
                 ],
                 0.015,
                 TransferFunctionPreset.Skin),
+            TransferFunctionPreset.Endoscopy => new PresetDefinition(
+                [
+                    new(minValue, 0.0),
+                    new(-900, 0.0),
+                    new(-350, 0.0),
+                    new(-180, 0.08),
+                    new(-80, 0.40),
+                    new(0, 0.72),
+                    new(90, 0.82),
+                    new(180, 0.45),
+                    new(260, 0.08),
+                    new(320, 0.0),
+                    new(maxValue, 0.0),
+                ],
+                0.02,
+                TransferFunctionPreset.Endoscopy),
+            TransferFunctionPreset.PetHotIron => CreateRelativeDefinition(
+                minValue,
+                maxValue,
+                [
+                    new(0.00, 0.0),
+                    new(0.08, 0.0),
+                    new(0.18, 0.05),
+                    new(0.32, 0.14),
+                    new(0.50, 0.30),
+                    new(0.68, 0.52),
+                    new(0.84, 0.75),
+                    new(1.00, 0.90),
+                ],
+                gradientModulationStrength: 0.0,
+                preset: TransferFunctionPreset.PetHotIron),
+            TransferFunctionPreset.PetSpectrum => CreateRelativeDefinition(
+                minValue,
+                maxValue,
+                [
+                    new(0.00, 0.0),
+                    new(0.10, 0.0),
+                    new(0.22, 0.04),
+                    new(0.38, 0.12),
+                    new(0.56, 0.28),
+                    new(0.74, 0.48),
+                    new(0.88, 0.68),
+                    new(1.00, 0.82),
+                ],
+                gradientModulationStrength: 0.0,
+                preset: TransferFunctionPreset.PetSpectrum),
+            TransferFunctionPreset.Perfusion => CreateRelativeDefinition(
+                minValue,
+                maxValue,
+                [
+                    new(0.00, 0.0),
+                    new(0.14, 0.0),
+                    new(0.26, 0.03),
+                    new(0.42, 0.10),
+                    new(0.58, 0.24),
+                    new(0.72, 0.42),
+                    new(0.86, 0.64),
+                    new(1.00, 0.84),
+                ],
+                gradientModulationStrength: 0.0,
+                preset: TransferFunctionPreset.Perfusion),
             _ => CreateDefaultDefinition(minValue, maxValue),
         };
+    }
+
+    private static PresetDefinition CreateRelativeDefinition(
+        double minValue,
+        double maxValue,
+        IReadOnlyList<OpacityControlPoint> normalizedPoints,
+        double gradientModulationStrength,
+        TransferFunctionPreset preset)
+    {
+        double range = Math.Max(1.0, maxValue - minValue);
+        List<OpacityControlPoint> controlPoints = normalizedPoints
+            .Select(point => new OpacityControlPoint(
+                minValue + Math.Clamp(point.Value, 0.0, 1.0) * range,
+                point.Opacity))
+            .ToList();
+
+        return new PresetDefinition(controlPoints, gradientModulationStrength, preset);
     }
 
     private static PresetDefinition CreateDefaultDefinition(double minValue, double maxValue)

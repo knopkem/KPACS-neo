@@ -67,6 +67,52 @@ public static class VolumeReslicer
 {
     private static readonly ConditionalWeakTable<SeriesVolume, VolumeGradientVolume> GradientCache = new();
 
+    public static VolumeSlicePlane CreateSlicePlane(
+        SeriesVolume volume,
+        SliceOrientation orientation,
+        double tiltAroundColumnRadians,
+        double tiltAroundRowRadians,
+        double offsetMm)
+    {
+        (Vector3D baseRow, Vector3D baseColumn, Vector3D baseNormal, double pixelSpacingX, double pixelSpacingY) =
+            GetPlaneBasis(volume, orientation);
+
+        Vector3D row = RotateAroundAxis(baseRow, baseColumn, tiltAroundColumnRadians).Normalize();
+        Vector3D normal = RotateAroundAxis(baseNormal, baseColumn, tiltAroundColumnRadians).Normalize();
+        Vector3D column = RotateAroundAxis(baseColumn, row, tiltAroundRowRadians).Normalize();
+        normal = RotateAroundAxis(normal, row, tiltAroundRowRadians).Normalize();
+
+        Vector3D volumeCenter = volume.VoxelToPatient((volume.SizeX - 1) * 0.5, (volume.SizeY - 1) * 0.5, (volume.SizeZ - 1) * 0.5);
+        (_, _, double minDepthMm, double maxDepthMm) =
+            ComputeProjectedBounds(volume, volumeCenter, row, column, normal);
+
+        double sliceSpacing = ComputeObliqueSliceSpacing(volume, normal);
+        double depthRange = Math.Max(0, maxDepthMm - minDepthMm);
+        int sliceCount = Math.Max(1, (int)Math.Floor(depthRange / Math.Max(0.1, sliceSpacing)) + 1);
+        double scrollStep = sliceCount > 1 ? depthRange / (sliceCount - 1) : Math.Max(0.1, sliceSpacing);
+        double halfExtentMm = GetVolumeHalfDiagonalMm(volume);
+        int width = Math.Max(1, (int)Math.Ceiling((halfExtentMm * 2.0) / Math.Max(0.1, pixelSpacingX)) + 1);
+        int height = Math.Max(1, (int)Math.Ceiling((halfExtentMm * 2.0) / Math.Max(0.1, pixelSpacingY)) + 1);
+
+        return new VolumeSlicePlane
+        {
+            VolumeCenter = volumeCenter,
+            RowDirection = row,
+            ColumnDirection = column,
+            Normal = normal,
+            PixelSpacingX = Math.Max(0.1, pixelSpacingX),
+            PixelSpacingY = Math.Max(0.1, pixelSpacingY),
+            SliceSpacingMm = Math.Max(0.1, sliceSpacing),
+            ScrollStepMm = Math.Max(0.1, scrollStep),
+            MinOffsetMm = minDepthMm,
+            MaxOffsetMm = maxDepthMm,
+            CurrentOffsetMm = Math.Clamp(offsetMm, minDepthMm, maxDepthMm),
+            SliceCount = sliceCount,
+            Width = width,
+            Height = height,
+        };
+    }
+
     public static ReslicedImage RenderSlab(
         SeriesVolume volume,
         SliceOrientation orientation,
@@ -126,6 +172,9 @@ public static class VolumeReslicer
         };
     }
 
+    public static ReslicedImage ExtractSlice(SeriesVolume volume, VolumeSlicePlane plane) =>
+        RenderObliqueSlab(volume, plane, 0, VolumeProjectionMode.Mpr);
+
     /// <summary>
     /// Returns the number of slices available along the given orientation.
     /// </summary>
@@ -150,6 +199,9 @@ public static class VolumeReslicer
             _ => GetAxialSpatialMetadata(volume, sliceIndex),
         };
     }
+
+    public static DicomSpatialMetadata GetSliceSpatialMetadata(SeriesVolume volume, VolumeSlicePlane plane) =>
+        plane.CreateSpatialMetadata(volume);
 
     private static ReslicedImage ExtractAxial(SeriesVolume volume, int z)
     {
@@ -349,31 +401,36 @@ public static class VolumeReslicer
         startSlice = Math.Clamp(startSlice, 0, sliceCount - 1);
         endSlice = Math.Clamp(endSlice, startSlice, sliceCount - 1);
 
-        // Start with the first slice, then take max over the range
-        ReslicedImage result = ExtractSlice(volume, orientation, startSlice);
-        short[] mipPixels = result.Pixels;
-
-        for (int s = startSlice + 1; s <= endSlice; s++)
-        {
-            ReslicedImage slice = ExtractSlice(volume, orientation, s);
-            for (int i = 0; i < mipPixels.Length && i < slice.Pixels.Length; i++)
-            {
-                if (slice.Pixels[i] > mipPixels[i])
-                    mipPixels[i] = slice.Pixels[i];
-            }
-        }
-
         int midSlice = (startSlice + endSlice) / 2;
-        ReslicedImage midResult = ExtractSlice(volume, orientation, midSlice);
+        ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        short[] mipPixels = new short[reference.Pixels.Length];
+
+        Parallel.For(0, reference.Height, row =>
+        {
+            for (int column = 0; column < reference.Width; column++)
+            {
+                GetOrthographicFixedCoordinates(volume, orientation, column, row, reference.Width, reference.Height,
+                    out double fixedA, out double fixedB);
+
+                double maxValue = double.NegativeInfinity;
+                for (int s = startSlice; s <= endSlice; s++)
+                {
+                    (double x, double y, double z) = GetOrthographicSamplePosition(orientation, fixedA, fixedB, s);
+                    maxValue = Math.Max(maxValue, volume.GetVoxelInterpolated(x, y, z));
+                }
+
+                mipPixels[row * reference.Width + column] = (short)Math.Clamp(maxValue, short.MinValue, short.MaxValue);
+            }
+        });
 
         return new ReslicedImage
         {
             Pixels = mipPixels,
-            Width = result.Width,
-            Height = result.Height,
-            PixelSpacingX = result.PixelSpacingX,
-            PixelSpacingY = result.PixelSpacingY,
-            SpatialMetadata = midResult.SpatialMetadata,
+            Width = reference.Width,
+            Height = reference.Height,
+            PixelSpacingX = reference.PixelSpacingX,
+            PixelSpacingY = reference.PixelSpacingY,
+            SpatialMetadata = reference.SpatialMetadata,
         };
     }
 
@@ -387,32 +444,36 @@ public static class VolumeReslicer
         startSlice = Math.Clamp(startSlice, 0, sliceCount - 1);
         endSlice = Math.Clamp(endSlice, startSlice, sliceCount - 1);
 
-        ReslicedImage result = ExtractSlice(volume, orientation, startSlice);
-        short[] minPixels = result.Pixels;
-
-        for (int s = startSlice + 1; s <= endSlice; s++)
-        {
-            ReslicedImage slice = ExtractSlice(volume, orientation, s);
-            for (int i = 0; i < minPixels.Length && i < slice.Pixels.Length; i++)
-            {
-                if (slice.Pixels[i] < minPixels[i])
-                {
-                    minPixels[i] = slice.Pixels[i];
-                }
-            }
-        }
-
         int midSlice = (startSlice + endSlice) / 2;
-        ReslicedImage midResult = ExtractSlice(volume, orientation, midSlice);
+        ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        short[] minPixels = new short[reference.Pixels.Length];
+
+        Parallel.For(0, reference.Height, row =>
+        {
+            for (int column = 0; column < reference.Width; column++)
+            {
+                GetOrthographicFixedCoordinates(volume, orientation, column, row, reference.Width, reference.Height,
+                    out double fixedA, out double fixedB);
+
+                double minValue = double.PositiveInfinity;
+                for (int s = startSlice; s <= endSlice; s++)
+                {
+                    (double x, double y, double z) = GetOrthographicSamplePosition(orientation, fixedA, fixedB, s);
+                    minValue = Math.Min(minValue, volume.GetVoxelInterpolated(x, y, z));
+                }
+
+                minPixels[row * reference.Width + column] = (short)Math.Clamp(minValue, short.MinValue, short.MaxValue);
+            }
+        });
 
         return new ReslicedImage
         {
             Pixels = minPixels,
-            Width = result.Width,
-            Height = result.Height,
-            PixelSpacingX = result.PixelSpacingX,
-            PixelSpacingY = result.PixelSpacingY,
-            SpatialMetadata = midResult.SpatialMetadata,
+            Width = reference.Width,
+            Height = reference.Height,
+            PixelSpacingX = reference.PixelSpacingX,
+            PixelSpacingY = reference.PixelSpacingY,
+            SpatialMetadata = reference.SpatialMetadata,
         };
     }
 
@@ -426,42 +487,37 @@ public static class VolumeReslicer
         startSlice = Math.Clamp(startSlice, 0, sliceCount - 1);
         endSlice = Math.Clamp(endSlice, startSlice, sliceCount - 1);
 
-        ReslicedImage result = ExtractSlice(volume, orientation, startSlice);
-        int[] sums = new int[result.Pixels.Length];
-        for (int i = 0; i < result.Pixels.Length; i++)
-        {
-            sums[i] = result.Pixels[i];
-        }
-
-        int projectionCount = 1;
-        for (int s = startSlice + 1; s <= endSlice; s++)
-        {
-            ReslicedImage slice = ExtractSlice(volume, orientation, s);
-            for (int i = 0; i < sums.Length && i < slice.Pixels.Length; i++)
-            {
-                sums[i] += slice.Pixels[i];
-            }
-
-            projectionCount++;
-        }
-
-        short[] averaged = new short[sums.Length];
-        for (int i = 0; i < sums.Length; i++)
-        {
-            averaged[i] = (short)Math.Clamp(sums[i] / projectionCount, short.MinValue, short.MaxValue);
-        }
-
         int midSlice = (startSlice + endSlice) / 2;
-        ReslicedImage midResult = ExtractSlice(volume, orientation, midSlice);
+        ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        short[] averaged = new short[reference.Pixels.Length];
+        int projectionCount = Math.Max(1, endSlice - startSlice + 1);
+
+        Parallel.For(0, reference.Height, row =>
+        {
+            for (int column = 0; column < reference.Width; column++)
+            {
+                GetOrthographicFixedCoordinates(volume, orientation, column, row, reference.Width, reference.Height,
+                    out double fixedA, out double fixedB);
+
+                double sum = 0;
+                for (int s = startSlice; s <= endSlice; s++)
+                {
+                    (double x, double y, double z) = GetOrthographicSamplePosition(orientation, fixedA, fixedB, s);
+                    sum += volume.GetVoxelInterpolated(x, y, z);
+                }
+
+                averaged[row * reference.Width + column] = (short)Math.Clamp(sum / projectionCount, short.MinValue, short.MaxValue);
+            }
+        });
 
         return new ReslicedImage
         {
             Pixels = averaged,
-            Width = result.Width,
-            Height = result.Height,
-            PixelSpacingX = result.PixelSpacingX,
-            PixelSpacingY = result.PixelSpacingY,
-            SpatialMetadata = midResult.SpatialMetadata,
+            Width = reference.Width,
+            Height = reference.Height,
+            PixelSpacingX = reference.PixelSpacingX,
+            PixelSpacingY = reference.PixelSpacingY,
+            SpatialMetadata = reference.SpatialMetadata,
         };
     }
 
@@ -475,44 +531,50 @@ public static class VolumeReslicer
         startSlice = Math.Clamp(startSlice, 0, sliceCount - 1);
         endSlice = Math.Clamp(endSlice, startSlice, sliceCount - 1);
 
-        ReslicedImage firstSlice = ExtractSlice(volume, orientation, startSlice);
-        double[] accumulatedValue = new double[firstSlice.Pixels.Length];
-        double[] accumulatedAlpha = new double[firstSlice.Pixels.Length];
+        int midSlice = (startSlice + endSlice) / 2;
+        ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        short[] projected = new short[reference.Pixels.Length];
         double range = Math.Max(1, volume.MaxValue - volume.MinValue);
 
-        for (int s = startSlice; s <= endSlice; s++)
+        Parallel.For(0, reference.Height, row =>
         {
-            ReslicedImage slice = ExtractSlice(volume, orientation, s);
-            for (int i = 0; i < accumulatedValue.Length && i < slice.Pixels.Length; i++)
+            for (int column = 0; column < reference.Width; column++)
             {
-                double normalized = Math.Clamp((slice.Pixels[i] - volume.MinValue) / range, 0.0, 1.0);
-                double opacity = normalized <= 0.05 ? 0.0 : Math.Min(0.85, Math.Pow(normalized, 1.6) * 0.35);
-                double contribution = opacity * (1.0 - accumulatedAlpha[i]);
-                accumulatedValue[i] += slice.Pixels[i] * contribution;
-                accumulatedAlpha[i] += contribution;
+                GetOrthographicFixedCoordinates(volume, orientation, column, row, reference.Width, reference.Height,
+                    out double fixedA, out double fixedB);
+
+                double accumulatedValue = 0.0;
+                double accumulatedAlpha = 0.0;
+                for (int s = startSlice; s <= endSlice; s++)
+                {
+                    (double x, double y, double z) = GetOrthographicSamplePosition(orientation, fixedA, fixedB, s);
+                    double sample = volume.GetVoxelInterpolated(x, y, z);
+                    double normalized = Math.Clamp((sample - volume.MinValue) / range, 0.0, 1.0);
+                    double opacity = normalized <= 0.05 ? 0.0 : Math.Min(0.85, Math.Pow(normalized, 1.6) * 0.35);
+                    double contribution = opacity * (1.0 - accumulatedAlpha);
+                    accumulatedValue += sample * contribution;
+                    accumulatedAlpha += contribution;
+                    if (accumulatedAlpha >= 0.995)
+                    {
+                        break;
+                    }
+                }
+
+                double value = accumulatedAlpha > 0.0001
+                    ? accumulatedValue / accumulatedAlpha
+                    : 0;
+                projected[row * reference.Width + column] = (short)Math.Clamp(value, short.MinValue, short.MaxValue);
             }
-        }
-
-        short[] projected = new short[firstSlice.Pixels.Length];
-        for (int i = 0; i < projected.Length; i++)
-        {
-            double value = accumulatedAlpha[i] > 0.0001
-                ? accumulatedValue[i] / accumulatedAlpha[i]
-                : 0;
-            projected[i] = (short)Math.Clamp(value, short.MinValue, short.MaxValue);
-        }
-
-        int midSlice = (startSlice + endSlice) / 2;
-        ReslicedImage midResult = ExtractSlice(volume, orientation, midSlice);
+        });
 
         return new ReslicedImage
         {
             Pixels = projected,
-            Width = firstSlice.Width,
-            Height = firstSlice.Height,
-            PixelSpacingX = firstSlice.PixelSpacingX,
-            PixelSpacingY = firstSlice.PixelSpacingY,
-            SpatialMetadata = midResult.SpatialMetadata,
+            Width = reference.Width,
+            Height = reference.Height,
+            PixelSpacingX = reference.PixelSpacingX,
+            PixelSpacingY = reference.PixelSpacingY,
+            SpatialMetadata = reference.SpatialMetadata,
         };
     }
 
@@ -568,5 +630,278 @@ public static class VolumeReslicer
             SliceOrientation.Sagittal => volume.SpacingX,
             _ => volume.SpacingZ,
         };
+    }
+
+    public static ReslicedImage RenderSlab(
+        SeriesVolume volume,
+        VolumeSlicePlane plane,
+        double thicknessMm,
+        VolumeProjectionMode mode)
+    {
+        return mode == VolumeProjectionMode.Dvr
+            ? RenderObliqueSlab(volume, plane, Math.Max(plane.SliceSpacingMm, thicknessMm), VolumeProjectionMode.MpVrt)
+            : RenderObliqueSlab(volume, plane, thicknessMm, mode);
+    }
+
+    private static ReslicedImage RenderObliqueSlab(
+        SeriesVolume volume,
+        VolumeSlicePlane plane,
+        double thicknessMm,
+        VolumeProjectionMode mode)
+    {
+        int width = Math.Max(1, plane.Width);
+        int height = Math.Max(1, plane.Height);
+        short[] pixels = new short[width * height];
+        double[] accumulators = mode is VolumeProjectionMode.Mpr or VolumeProjectionMode.MpVrt ? new double[pixels.Length] : [];
+        double[] alphas = mode == VolumeProjectionMode.MpVrt ? new double[pixels.Length] : [];
+        double stepMm = Math.Max(0.1, plane.SliceSpacingMm);
+        double safeThickness = Math.Max(0, thicknessMm);
+        int sampleCount = safeThickness <= stepMm * 0.5
+            ? 1
+            : Math.Max(1, (int)Math.Round(safeThickness / stepMm) + 1);
+
+        if (sampleCount % 2 == 0)
+        {
+            sampleCount++;
+        }
+
+        double range = Math.Max(1, volume.MaxValue - volume.MinValue);
+        double halfWidthMm = (width - 1) * plane.PixelSpacingX * 0.5;
+        double halfHeightMm = (height - 1) * plane.PixelSpacingY * 0.5;
+        double halfThicknessMm = stepMm * (sampleCount - 1) * 0.5;
+
+        Parallel.For(0, height, y =>
+        {
+            double vOffset = y * plane.PixelSpacingY - halfHeightMm;
+            int rowOffset = y * width;
+
+            for (int x = 0; x < width; x++)
+            {
+                double uOffset = x * plane.PixelSpacingX - halfWidthMm;
+                Vector3D basePoint = plane.Center + plane.RowDirection * uOffset + plane.ColumnDirection * vOffset;
+                int pixelIndex = rowOffset + x;
+                double resultValue = mode == VolumeProjectionMode.MinPr ? double.PositiveInfinity : double.NegativeInfinity;
+                int validSampleCount = 0;
+
+                for (int sampleIndex = 0; sampleIndex < sampleCount; sampleIndex++)
+                {
+                    double depthOffset = sampleCount == 1
+                        ? 0
+                        : -halfThicknessMm + sampleIndex * stepMm;
+                    Vector3D patientPoint = basePoint + plane.Normal * depthOffset;
+                    (double vx, double vy, double vz) = volume.PatientToVoxel(patientPoint);
+                    if (!volume.TryGetVoxelInterpolated(vx, vy, vz, out double value))
+                    {
+                        continue;
+                    }
+
+                    validSampleCount++;
+
+                    switch (mode)
+                    {
+                        case VolumeProjectionMode.Mpr:
+                            accumulators[pixelIndex] += value;
+                            break;
+                        case VolumeProjectionMode.MipPr:
+                            resultValue = Math.Max(resultValue, value);
+                            break;
+                        case VolumeProjectionMode.MinPr:
+                            resultValue = Math.Min(resultValue, value);
+                            break;
+                        case VolumeProjectionMode.MpVrt:
+                            double normalized = Math.Clamp((value - volume.MinValue) / range, 0.0, 1.0);
+                            double opacity = normalized <= 0.05 ? 0.0 : Math.Min(0.85, Math.Pow(normalized, 1.6) * 0.35);
+                            double contribution = opacity * (1.0 - alphas[pixelIndex]);
+                            accumulators[pixelIndex] += value * contribution;
+                            alphas[pixelIndex] += contribution;
+                            break;
+                    }
+                }
+
+                if (validSampleCount == 0)
+                {
+                    pixels[pixelIndex] = volume.MinValue;
+                    continue;
+                }
+
+                pixels[pixelIndex] = mode switch
+                {
+                    VolumeProjectionMode.Mpr => (short)Math.Clamp(accumulators[pixelIndex] / validSampleCount, short.MinValue, short.MaxValue),
+                    VolumeProjectionMode.MipPr => (short)Math.Clamp(resultValue, short.MinValue, short.MaxValue),
+                    VolumeProjectionMode.MinPr => (short)Math.Clamp(resultValue, short.MinValue, short.MaxValue),
+                    VolumeProjectionMode.MpVrt => (short)Math.Clamp(
+                        alphas[pixelIndex] > 0.0001 ? accumulators[pixelIndex] / alphas[pixelIndex] : 0,
+                        short.MinValue,
+                        short.MaxValue),
+                    _ => (short)Math.Clamp(resultValue, short.MinValue, short.MaxValue),
+                };
+            }
+        });
+
+        return new ReslicedImage
+        {
+            Pixels = pixels,
+            Width = width,
+            Height = height,
+            PixelSpacingX = plane.PixelSpacingX,
+            PixelSpacingY = plane.PixelSpacingY,
+            SpatialMetadata = plane.CreateSpatialMetadata(volume),
+        };
+    }
+
+    private static (Vector3D Row, Vector3D Column, Vector3D Normal, double PixelSpacingX, double PixelSpacingY) GetPlaneBasis(
+        SeriesVolume volume,
+        SliceOrientation orientation)
+    {
+        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        return orientation switch
+        {
+            SliceOrientation.Coronal => (volume.RowDirection, volume.Normal * -1, volume.ColumnDirection, volume.SpacingX, targetSpacingY),
+            SliceOrientation.Sagittal => (volume.ColumnDirection, volume.Normal * -1, volume.RowDirection, volume.SpacingY, targetSpacingY),
+            _ => (volume.RowDirection, volume.ColumnDirection, volume.Normal, volume.SpacingX, volume.SpacingY),
+        };
+    }
+
+    private static (double HalfWidthMm, double HalfHeightMm, double MinDepthMm, double MaxDepthMm) ComputeProjectedBounds(
+        SeriesVolume volume,
+        Vector3D center,
+        Vector3D row,
+        Vector3D column,
+        Vector3D normal)
+    {
+        double minDepth = double.PositiveInfinity;
+        double maxDepth = double.NegativeInfinity;
+        double maxAbsRow = 0;
+        double maxAbsColumn = 0;
+
+        foreach (Vector3D corner in GetVolumeCorners(volume))
+        {
+            Vector3D relative = corner - center;
+            double u = relative.Dot(row);
+            double v = relative.Dot(column);
+            double w = relative.Dot(normal);
+            maxAbsRow = Math.Max(maxAbsRow, Math.Abs(u));
+            maxAbsColumn = Math.Max(maxAbsColumn, Math.Abs(v));
+            minDepth = Math.Min(minDepth, w);
+            maxDepth = Math.Max(maxDepth, w);
+        }
+
+        if (double.IsInfinity(minDepth) || double.IsInfinity(maxDepth))
+        {
+            minDepth = 0;
+            maxDepth = 0;
+        }
+
+        return (maxAbsRow, maxAbsColumn, minDepth, maxDepth);
+    }
+
+    private static IEnumerable<Vector3D> GetVolumeCorners(SeriesVolume volume)
+    {
+        double[] xs = [0, Math.Max(0, volume.SizeX - 1)];
+        double[] ys = [0, Math.Max(0, volume.SizeY - 1)];
+        double[] zs = [0, Math.Max(0, volume.SizeZ - 1)];
+
+        foreach (double z in zs)
+        {
+            foreach (double y in ys)
+            {
+                foreach (double x in xs)
+                {
+                    yield return volume.VoxelToPatient(x, y, z);
+                }
+            }
+        }
+    }
+
+    private static double GetVolumeHalfDiagonalMm(SeriesVolume volume)
+    {
+        double spacingX = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
+        double spacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double spacingZ = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
+        double extentX = Math.Max(0, (volume.SizeX - 1) * spacingX);
+        double extentY = Math.Max(0, (volume.SizeY - 1) * spacingY);
+        double extentZ = Math.Max(0, (volume.SizeZ - 1) * spacingZ);
+        return Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ) * 0.5;
+    }
+
+    private static double ComputeObliqueSliceSpacing(SeriesVolume volume, Vector3D normal)
+    {
+        double spacingX = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
+        double spacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double spacingZ = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
+
+        double voxelX = normal.Dot(volume.RowDirection) / spacingX;
+        double voxelY = normal.Dot(volume.ColumnDirection) / spacingY;
+        double voxelZ = normal.Dot(volume.Normal) / spacingZ;
+        double voxelMagnitude = Math.Sqrt((voxelX * voxelX) + (voxelY * voxelY) + (voxelZ * voxelZ));
+        return voxelMagnitude > 1e-6 ? 1.0 / voxelMagnitude : Math.Max(spacingX, Math.Max(spacingY, spacingZ));
+    }
+
+    private static void GetOrthographicFixedCoordinates(
+        SeriesVolume volume,
+        SliceOrientation orientation,
+        int column,
+        int row,
+        int outputWidth,
+        int outputHeight,
+        out double fixedA,
+        out double fixedB)
+    {
+        switch (orientation)
+        {
+            case SliceOrientation.Axial:
+                fixedA = MapOutputIndexToSource(column, outputWidth, volume.SizeX);
+                fixedB = MapOutputIndexToSource(row, outputHeight, volume.SizeY);
+                break;
+            case SliceOrientation.Coronal:
+                fixedA = MapOutputIndexToSource(column, outputWidth, volume.SizeX);
+                fixedB = MapOutputRowToSourceZ(row, outputHeight, volume.SizeZ);
+                break;
+            case SliceOrientation.Sagittal:
+                fixedA = MapOutputIndexToSource(column, outputWidth, volume.SizeY);
+                fixedB = MapOutputRowToSourceZ(row, outputHeight, volume.SizeZ);
+                break;
+            default:
+                fixedA = MapOutputIndexToSource(column, outputWidth, volume.SizeX);
+                fixedB = MapOutputIndexToSource(row, outputHeight, volume.SizeY);
+                break;
+        }
+    }
+
+    private static (double X, double Y, double Z) GetOrthographicSamplePosition(
+        SliceOrientation orientation,
+        double fixedA,
+        double fixedB,
+        double rayPosition) => orientation switch
+    {
+        SliceOrientation.Axial => (fixedA, fixedB, rayPosition),
+        SliceOrientation.Coronal => (fixedA, rayPosition, fixedB),
+        SliceOrientation.Sagittal => (rayPosition, fixedA, fixedB),
+        _ => (fixedA, fixedB, rayPosition),
+    };
+
+    private static double MapOutputIndexToSource(int index, int outputSize, int sourceSize)
+    {
+        if (outputSize <= 1 || sourceSize <= 1)
+        {
+            return 0;
+        }
+
+        return index / (double)(outputSize - 1) * (sourceSize - 1);
+    }
+
+    private static Vector3D RotateAroundAxis(Vector3D value, Vector3D axis, double angleRadians)
+    {
+        Vector3D unitAxis = axis.Normalize();
+        if (unitAxis.Length <= 1e-6 || Math.Abs(angleRadians) <= 1e-8)
+        {
+            return value;
+        }
+
+        double cos = Math.Cos(angleRadians);
+        double sin = Math.Sin(angleRadians);
+        return (value * cos)
+            + (unitAxis.Cross(value) * sin)
+            + (unitAxis * (unitAxis.Dot(value) * (1.0 - cos)));
     }
 }

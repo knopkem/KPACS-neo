@@ -33,15 +33,15 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
 ├── App.axaml / App.axaml.cs      — Application entry point, imagebox bootstrap, Semi.Avalonia light theme
 ├── Program.cs                    — Avalonia desktop entry point
 ├── MainWindow.axaml / .cs        — K-PACS-style study browser with Database / Network / Filesystem modes
-├── StudyViewerWindow.axaml / .cs — Multi-viewport study viewer with thumbnails, custom layouts, linked synchronization, progressive remote loading, and volume-aware slab navigation
-├── ViewerTypes.cs                — ColorScheme, ViewerTool, MouseWheelMode enumerations
+├── StudyViewerWindow.axaml / .cs — Multi-viewport study viewer with thumbnails, custom layouts, linked synchronization, progressive remote loading, volume-aware slab navigation, toolbox workflows, and a floating 3D rendering workspace
+├── ViewerTypes.cs                — ColorScheme, ViewerTool, MouseWheelMode, and navigation/tool enumerations
 ├── Models/
 │   ├── BackgroundJobModels.cs    — Background import/send job states and metadata
 │   ├── ImageboxModels.cs         — Browser, study, import, filesystem tree, and query models
 │   ├── NetworkModels.cs          — Remote archive and network settings models
 │   └── ToastNotificationItem.cs  — Transient in-window notification models
 ├── Controls/
-│   └── DicomViewPanel.axaml / .cs— Core viewer control: zoom, pan, window/level, stack scrolling, DICOM bitmap overlays, color photometric handling, and in-panel volume controls
+│   └── DicomViewPanel.axaml / .cs— Core viewer control: zoom, pan, window/level, stack scrolling, DICOM bitmap overlays, color photometric handling, DVR/orbit support, tilt-plane interaction, and in-panel volume controls
 ├── Services/
 │   ├── BackgroundJobService.cs   — Central job tracking and per-job log files for import/send
 │   ├── ImageboxBootstrap.cs      — Local imagebox path setup under LocalApplicationData
@@ -64,8 +64,13 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
 └── Rendering/
     ├── DicomPixelRenderer.cs     — Pixel rendering engine (platform-independent)
     ├── ColorLut.cs               — Color lookup tables (platform-independent)
-    ├── SeriesVolume.cs           — In-memory voxel volume model with patient-space geometry
-    └── VolumeReslicer.cs         — Orthogonal reslice and slab projection engine (MPR, MipPR, MinPR, MPVRT)
+    ├── SeriesVolume.cs           — In-memory voxel volume model with patient-space geometry and trilinear sampling
+    ├── VolumeRenderState.cs      — DVR camera, shading, and light-state model
+    ├── VolumeReslicer.cs         — Orthogonal and oblique reslice/slab projection engine (MPR, MipPR, MinPR, MPVRT)
+    ├── VolumeSlicePlane.cs       — Shared oblique plane geometry for tilted volume navigation
+    └── VolumeTransferFunction.cs — DVR transfer-function presets for CT/PET-style rendering
+
+VolumeRenderingPresetCatalog.cs  — Catalog for DVR presets, shading presets, light directions, and recommended color maps
 ```
 
 ## Current Status
@@ -102,6 +107,10 @@ The Avalonia application has moved beyond a single-file viewer and now includes 
 - **Research measurement workflow** with viewport-accessible `Suggest RECIST follow-up`, patient-space lesion tracking metadata, slice radiomics extraction for ROI measurements, and archiveable research SR export with scene-state payload support
 - **Volume-aware series viewing** for real volumetric CT/MR stacks with cached in-memory voxel volumes, axial/coronal/sagittal reslicing, and slab projection modes
 - **In-panel volume interaction badges** shown only for true volume datasets: orientation switching, projection-mode switching, and drag-adjustable slab thickness in mm
+- **Floating 3D rendering workspace** with per-viewport projection mode selection, DVR transfer presets, shading presets, light-direction presets, and viewer-wide medical color maps
+- **Direct volume rendering (DVR)** with CPU ray casting, progressive fast/sharp rerendering, orbit interaction, and preset-driven shading/light behavior
+- **Oblique tilt-plane navigation** via a dedicated toolbox tool that tilts the current slice/slab plane in all volume modes, including DVR, while wheel and middle-drag continue front-to-back scrolling through the volume
+- **Parallelized volume reslicing/projection** for oblique slabs and thick orthogonal slabs to improve interactive performance on multi-core CPUs
 - **Linked slice synchronization** for same-space series plus lightweight prior-study / CT-MR fallback registration based on cached voxel volumes
 - **Key-image workflow** with K-PACS-root Secondary Capture generation, volume-mode key-image toggling, and preview-strip marking only for K-PACS-managed key-image series
 - **DICOM rendering coverage** including bitmap overlay planes (60xx), embedded overlay bits, RGB Secondary Capture, and multiple YBR photometric interpretations
@@ -252,8 +261,12 @@ Additional runtime configuration files are stored alongside the imagebox root:
 - Volume controls are shown only when a series could be promoted to a true in-memory volume; 2D datasets such as plain radiography, angiography, or ultrasound continue to use the legacy single-slice viewer path.
 - The viewer loads the initial series through the existing file-based path first and upgrades matching series to cached voxel volumes in the background.
 - The orientation badge inside the view panel switches between Axial, Coronal, and Sagittal.
-- The projection badge inside the view panel switches between MPR, MipPR, MinPR, and MPVRT.
+- The projection badge inside the view panel switches between MPR, MipPR, MinPR, MPVRT, and DVR.
 - Dragging on the projection badge changes slab thickness in millimeters; holding Shift while dragging enables finer adjustment.
+- The viewport toolbox now includes a `Tilt plane` tool for oblique slice/slab navigation; left drag tilts the plane, while mouse wheel and middle-drag still move the tilted plane front-to-back through the dataset.
+- Oblique plane rendering shares the same patient-space slice model across MPR, MIP, MinIP, MPVRT, and DVR, so tilted navigation stays spatially consistent across all volume modes.
+- The 3D Rendering workspace exposes transfer-function presets such as Bone, Soft Tissue, Lung, Vascular Red, Skin Surface, Endoscopy, PET Hot Iron, PET Spectrum, and Perfusion, plus matching shading and light-direction presets.
+- Available medical color maps now include Grayscale, Inverted, Hot Iron, PET, Rainbow, Spectrum, Gold, Bone, Jet, BlackBody, and Flow.
 - Linked navigation continues to use exact patient-space matching for compatible series and can fall back to a lightweight translation-only volume registration for prior studies or cross-modality comparisons when both sides have volumes.
 - Open viewer windows for the same patient can broadcast linked navigation and Shift-based 3D cursor updates across monitors.
 

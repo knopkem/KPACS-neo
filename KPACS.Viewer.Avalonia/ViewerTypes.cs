@@ -16,6 +16,11 @@ public enum ColorScheme
     Rainbow = 3,
     Gold = 5,
     Bone = 10,
+    Jet = 11,
+    BlackBody = 12,
+    Spectrum = 13,
+    Flow = 14,
+    Pet = 15,
 }
 
 /// <summary>
@@ -38,6 +43,12 @@ public enum MouseWheelMode
 {
     Zoom,
     StackScroll,
+}
+
+public enum NavigationTool
+{
+    Navigate,
+    TiltPlane,
 }
 
 /// <summary>

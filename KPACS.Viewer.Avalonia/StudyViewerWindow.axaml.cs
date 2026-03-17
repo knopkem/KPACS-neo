@@ -651,10 +651,26 @@ public partial class StudyViewerWindow : Window
 
     private void OnNavigateToolClick(object? sender, RoutedEventArgs e)
     {
-        SetMeasurementTool(MeasurementTool.None);
+        SetNavigationTool(NavigationTool.Navigate);
         CloseViewportToolbox();
         UpdateStatus();
         e.Handled = true;
+    }
+
+    private void OnTiltPlaneToolClick(object? sender, RoutedEventArgs e)
+    {
+        SetNavigationTool(NavigationTool.TiltPlane);
+        CloseViewportToolbox();
+        UpdateStatus();
+        e.Handled = true;
+    }
+
+    private void SetNavigationTool(NavigationTool tool)
+    {
+        _navigationTool = tool;
+        _measurementTool = MeasurementTool.None;
+        RefreshMeasurementPanels();
+        UpdateMeasurementToolButtons();
     }
 
     private void OnToolboxOverlayToggleClick(object? sender, RoutedEventArgs e)
@@ -1121,6 +1137,8 @@ public partial class StudyViewerWindow : Window
             Orientation = SliceOrientation.Axial,
             ProjectionMode = VolumeProjectionMode.Mpr,
             ProjectionThicknessMm = defaultThickness,
+            PlaneTiltAroundColumnRadians = 0,
+            PlaneTiltAroundRowRadians = 0,
         };
     }
 
@@ -3362,6 +3380,7 @@ public partial class StudyViewerWindow : Window
         {
             slot.Panel.WheelMode = mode;
             slot.Panel.ActionMode = _actionToolbarMode;
+            slot.Panel.NavigationTool = _navigationTool;
             slot.Panel.ShowOverlay = _overlayEnabled;
         }
     }

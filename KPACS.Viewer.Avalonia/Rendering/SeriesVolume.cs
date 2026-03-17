@@ -139,13 +139,37 @@ public sealed class SeriesVolume
     /// </summary>
     public double GetVoxelInterpolated(double x, double y, double z)
     {
-        if (x < 0 || y < 0 || z < 0 || x >= SizeX - 1 || y >= SizeY - 1 || z >= SizeZ - 1)
+        if (TryGetVoxelInterpolated(x, y, z, out double value))
         {
-            // Clamp to nearest edge voxel
-            return GetVoxel(
+            return value;
+        }
+
+        return GetVoxel(
+            Math.Clamp((int)Math.Round(x), 0, SizeX - 1),
+            Math.Clamp((int)Math.Round(y), 0, SizeY - 1),
+            Math.Clamp((int)Math.Round(z), 0, SizeZ - 1));
+    }
+
+    /// <summary>
+    /// Gets an interpolated voxel value only if the sample position lies inside the volume.
+    /// Returns false for positions outside the acquired volume, avoiding edge extrapolation.
+    /// </summary>
+    public bool TryGetVoxelInterpolated(double x, double y, double z, out double value)
+    {
+        value = 0;
+
+        if (x < 0 || y < 0 || z < 0 || x > SizeX - 1 || y > SizeY - 1 || z > SizeZ - 1)
+        {
+            return false;
+        }
+
+        if (SizeX <= 1 || SizeY <= 1 || SizeZ <= 1 || x >= SizeX - 1 || y >= SizeY - 1 || z >= SizeZ - 1)
+        {
+            value = GetVoxel(
                 Math.Clamp((int)Math.Round(x), 0, SizeX - 1),
                 Math.Clamp((int)Math.Round(y), 0, SizeY - 1),
                 Math.Clamp((int)Math.Round(z), 0, SizeZ - 1));
+            return true;
         }
 
         int x0 = (int)x, y0 = (int)y, z0 = (int)z;
@@ -169,7 +193,8 @@ public sealed class SeriesVolume
         double c0 = c00 * (1 - fy) + c10 * fy;
         double c1 = c01 * (1 - fy) + c11 * fy;
 
-        return c0 * (1 - fz) + c1 * fz;
+        value = c0 * (1 - fz) + c1 * fz;
+        return true;
     }
 
     /// <summary>

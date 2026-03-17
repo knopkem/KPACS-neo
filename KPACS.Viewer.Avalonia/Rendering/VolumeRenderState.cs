@@ -2,6 +2,34 @@ using KPACS.Viewer.Models;
 
 namespace KPACS.Viewer.Rendering;
 
+public enum VolumeShadingPreset
+{
+    Default,
+    SoftTissue,
+    GlossyBone,
+    GlossyVascular,
+    Endoscopy,
+}
+
+public enum VolumeLightDirectionPreset
+{
+    Headlight,
+    LeftFront,
+    RightFront,
+    TopFront,
+    RakingLeft,
+}
+
+public readonly record struct VolumeShadingDefinition(
+    double AmbientIntensity,
+    double DiffuseIntensity,
+    double SpecularIntensity,
+    double Shininess);
+
+public readonly record struct VolumeLightDirectionDefinition(
+    double AzimuthDegrees,
+    double ElevationDegrees);
+
 public enum VolumeRenderProjection
 {
     Orthographic,

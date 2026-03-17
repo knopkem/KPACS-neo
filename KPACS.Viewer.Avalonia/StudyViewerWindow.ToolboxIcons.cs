@@ -21,6 +21,7 @@ public partial class StudyViewerWindow
         ConfigureLabeledIconButton(WorkspaceRenderingButton, CreateRenderingWorkspaceIcon(), "3D Rendering", "Open the 3D rendering workspace for projection, DVR preset, and color-map settings.");
         ToolTip.SetTip(WorkspaceReportButton, "Open the floating report panel with created findings, provenance, and anatomy hints.");
         ConfigureIconButton(ToolboxNavigateButton, CreateNavigateIcon(), "Navigate: left drag zoom/pan, wheel scroll, middle drag fast stack, right drag window/level.");
+        ConfigureIconButton(ToolboxTiltPlaneButton, CreateTiltPlaneIcon(), "Tilt plane: left drag tilts the current volume plane in any volume mode, while wheel and middle drag still move front-to-back through the slab.");
         ConfigureIconButton(ToolboxPixelLensButton, CreatePixelLensIcon(), "Pixel lens.");
         ConfigureIconButton(ToolboxLineButton, CreateLineMeasureIcon(), "Line measurement.");
         ConfigureIconButton(ToolboxAngleButton, CreateAngleMeasureIcon(), "Angle measurement.");
@@ -70,6 +71,12 @@ public partial class StudyViewerWindow
     private static Control CreateNavigateIcon() => CreateIconHost(
         StrokePath("M12 3 L12 21 M3 12 L21 12 M12 3 L9.5 5.5 M12 3 L14.5 5.5 M21 12 L18.5 9.5 M21 12 L18.5 14.5 M12 21 L9.5 18.5 M12 21 L14.5 18.5 M3 12 L5.5 9.5 M3 12 L5.5 14.5"),
         FilledEllipse(10, 10, 4, 4));
+
+    private static Control CreateTiltPlaneIcon() => CreateIconHost(
+        StrokePath("M4 17 L20 17 M7 9 L17 7 M8 6 L16 6 M12 4 L12 20"),
+        LineShape(5, 17, 9, 9),
+        LineShape(19, 17, 15, 7),
+        FilledEllipse(10.6, 3.2, 2.8, 2.8));
 
     private static Control CreatePixelLensIcon() => CreateIconHost(
         OutlineEllipse(4.5, 4.5, 9, 9),

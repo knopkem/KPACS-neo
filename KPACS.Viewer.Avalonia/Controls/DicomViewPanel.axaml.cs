@@ -54,7 +54,9 @@ public partial class DicomViewPanel : UserControl
         int ColorScheme,
         SliceOrientation Orientation,
         VolumeProjectionMode ProjectionMode,
-        double ProjectionThicknessMm);
+        double ProjectionThicknessMm,
+        double PlaneTiltAroundColumnRadians,
+        double PlaneTiltAroundRowRadians);
 
     public sealed record NavigationState(
         double ZoomFactor,
@@ -103,6 +105,7 @@ public partial class DicomViewPanel : UserControl
     private int _colorScheme = 1;
     private double _displayScaleX = 1.0;
     private double _displayScaleY = 1.0;
+    private bool _pendingInitialFitToWindow = true;
 
     // ==============================================================================================
     // Volume rendering state
@@ -114,6 +117,9 @@ public partial class DicomViewPanel : UserControl
     private short[]? _volumeSlicePixels;
     private VolumeProjectionMode _projectionMode = VolumeProjectionMode.Mpr;
     private double _projectionThicknessMm = 1.0;
+    private double _planeTiltAroundColumn;
+    private double _planeTiltAroundRow;
+    private double _planeOffsetMm;
     private bool _isProjectionThicknessDragging;
     private double _projectionDragStartThicknessMm;
     private double _projectionDragStartY;
@@ -130,11 +136,12 @@ public partial class DicomViewPanel : UserControl
 
     /// <summary>The current slice index when volume-bound.</summary>
     public int VolumeSliceIndex => _volumeSliceIndex;
-    public int VolumeSliceCount => _volume is null ? 0 : VolumeReslicer.GetSliceCount(_volume, _volumeOrientation);
+    public int VolumeSliceCount => GetCurrentSliceCount();
     public VolumeProjectionMode ProjectionMode => _projectionMode;
     public double ProjectionThicknessMm => _projectionThicknessMm;
     public string ProjectionModeLabel => GetProjectionModeLabel(_projectionMode);
-    public string OrientationLabel => GetOrientationLabel(_volumeOrientation);
+    public string OrientationLabel => HasTiltedPlane ? $"{GetOrientationLabel(_volumeOrientation)} oblique" : GetOrientationLabel(_volumeOrientation);
+    public bool HasTiltedPlane => Math.Abs(_planeTiltAroundColumn) > 1e-4 || Math.Abs(_planeTiltAroundRow) > 1e-4;
 
     // ==============================================================================================
     // Rendering
@@ -183,6 +190,12 @@ public partial class DicomViewPanel : UserControl
     private Point? _referenceLineStartImagePoint;
     private Point? _referenceLineEndImagePoint;
     private ActionToolbarMode _actionMode = ActionToolbarMode.ZoomPan;
+    private NavigationTool _navigationTool;
+    private bool _isPlaneTiltDragging;
+    private Point _planeTiltDragStart;
+    private double _planeTiltStartAroundColumn;
+    private double _planeTiltStartAroundRow;
+    private bool _preserveTiltOffsetDuringNextShow;
 
     // Pointer capture tracking
     private IPointer? _capturedPointer;
@@ -282,6 +295,15 @@ public partial class DicomViewPanel : UserControl
         set
         {
             _actionMode = value;
+            UpdateInteractiveCursor(_lastPointerPos);
+        }
+    }
+    public NavigationTool NavigationTool
+    {
+        get => _navigationTool;
+        set
+        {
+            _navigationTool = value;
             UpdateInteractiveCursor(_lastPointerPos);
         }
     }
@@ -392,6 +414,12 @@ public partial class DicomViewPanel : UserControl
             Cursor = _measurementTool == MeasurementTool.Modify
                 ? new Cursor(StandardCursorType.DragMove)
                 : new Cursor(StandardCursorType.Cross);
+            return;
+        }
+
+        if (IsPlaneTiltToolActive())
+        {
+            Cursor = new Cursor(StandardCursorType.SizeAll);
             return;
         }
 
@@ -521,6 +549,7 @@ public partial class DicomViewPanel : UserControl
 
             // Fit to window and center
             _fitToWindow = true;
+            _pendingInitialFitToWindow = true;
             ApplyInitialFitToWindow();
             Set3DCursorOverlay(null);
             SetReferenceLineOverlay(null, null);
@@ -639,6 +668,9 @@ public partial class DicomViewPanel : UserControl
         _rawPixelData = null;
         _volume = null;
         _volumeSlicePixels = null;
+        _planeTiltAroundColumn = 0;
+        _planeTiltAroundRow = 0;
+        _planeOffsetMm = 0;
         _isProjectionThicknessDragging = false;
         _projectionPointer = null;
         _bitmapOverlays.Clear();
@@ -678,6 +710,10 @@ public partial class DicomViewPanel : UserControl
         _rawPixelData = null; // detach from legacy file path
         _volume = volume;
         _volumeOrientation = orientation;
+        _planeTiltAroundColumn = 0;
+        _planeTiltAroundRow = 0;
+        _planeOffsetMm = 0;
+        _pendingInitialFitToWindow = true;
         _projectionThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), VolumeReslicer.GetSliceSpacing(volume, orientation));
         _isMonochrome1 = volume.IsMonochrome1;
         _samplesPerPixel = 1;
@@ -713,9 +749,26 @@ public partial class DicomViewPanel : UserControl
         if (_volume is null)
             return false;
 
-        int maxSlice = VolumeReslicer.GetSliceCount(_volume, _volumeOrientation) - 1;
+        double previousDisplayWidth = GetDisplayWidth();
+        double previousDisplayHeight = GetDisplayHeight();
+        int previousImageWidth = _imageWidth;
+        int previousImageHeight = _imageHeight;
+
+        int maxSlice = GetCurrentSliceCount() - 1;
         sliceIndex = Math.Clamp(sliceIndex, 0, maxSlice);
-        _volumeSliceIndex = sliceIndex;
+        VolumeSlicePlane? requestedPlane = _preserveTiltOffsetDuringNextShow
+            ? GetCurrentSlicePlane()
+            : GetCurrentSlicePlaneForSliceIndex(sliceIndex);
+
+        if (requestedPlane is not null)
+        {
+            _planeOffsetMm = requestedPlane.CurrentOffsetMm;
+            _volumeSliceIndex = requestedPlane.GetSliceIndexForOffset(_planeOffsetMm);
+        }
+        else
+        {
+            _volumeSliceIndex = sliceIndex;
+        }
 
         // DVR with active 3D camera: use the arbitrary-view renderer
         ReslicedImage resliced;
@@ -727,24 +780,42 @@ public partial class DicomViewPanel : UserControl
         }
         else
         {
-            resliced = VolumeReslicer.RenderSlab(
-                _volume,
-                _volumeOrientation,
-                sliceIndex,
-                _projectionThicknessMm,
-                _projectionMode);
+            resliced = requestedPlane is not null
+                ? VolumeReslicer.RenderSlab(
+                    _volume,
+                    requestedPlane,
+                    _projectionThicknessMm,
+                    _projectionMode)
+                : VolumeReslicer.RenderSlab(
+                    _volume,
+                    _volumeOrientation,
+                    sliceIndex,
+                    _projectionThicknessMm,
+                    _projectionMode);
         }
+
+                _preserveTiltOffsetDuringNextShow = false;
 
         _volumeSlicePixels = resliced.Pixels;
         _imageWidth = resliced.Width;
         _imageHeight = resliced.Height;
-        _frameCount = VolumeReslicer.GetSliceCount(_volume, _volumeOrientation);
+        _frameCount = GetCurrentSliceCount();
         StackItemCount = _frameCount;
         UpdateDisplayGeometry(resliced.PixelSpacingX, resliced.PixelSpacingY);
 
         SpatialMetadata = resliced.SpatialMetadata;
         _fileName = SpatialMetadata?.FilePath ?? "";
         ApplyDisplayImageSize();
+
+        bool geometryChanged = previousImageWidth != _imageWidth
+            || previousImageHeight != _imageHeight
+            || Math.Abs(previousDisplayWidth - GetDisplayWidth()) > 0.01
+            || Math.Abs(previousDisplayHeight - GetDisplayHeight()) > 0.01;
+
+        if (_fitToWindow && !_pendingInitialFitToWindow && geometryChanged)
+        {
+            ApplyFitToWindowLayoutWithoutRender();
+        }
 
         PlaceholderText.IsVisible = false;
         if (IsDvrMode)
@@ -757,8 +828,10 @@ public partial class DicomViewPanel : UserControl
             RenderImageFastThenSharp();
         }
 
-        if (_fitToWindow)
+        if (_fitToWindow && _pendingInitialFitToWindow)
+        {
             ApplyInitialFitToWindow();
+        }
 
         Set3DCursorOverlay(null);
         SetReferenceLineOverlay(null, null);
@@ -781,8 +854,11 @@ public partial class DicomViewPanel : UserControl
             return false;
 
         _volumeOrientation = orientation;
+        _planeTiltAroundColumn = 0;
+        _planeTiltAroundRow = 0;
+        _planeOffsetMm = 0;
         _projectionThicknessMm = Math.Max(_projectionThicknessMm, GetMinimumProjectionThicknessMm());
-        int midSlice = VolumeReslicer.GetSliceCount(_volume, orientation) / 2;
+        int midSlice = GetCurrentSliceCount() / 2;
         if (IsDvrMode)
         {
             InitializeDvrCamera();
@@ -854,7 +930,10 @@ public partial class DicomViewPanel : UserControl
             return 1.0;
         }
 
-        return Math.Max(0.1, VolumeReslicer.GetSliceSpacing(_volume, _volumeOrientation));
+        VolumeSlicePlane? plane = GetCurrentSlicePlane();
+        return plane is not null
+            ? Math.Max(0.1, plane.SliceSpacingMm)
+            : Math.Max(0.1, VolumeReslicer.GetSliceSpacing(_volume, _volumeOrientation));
     }
 
     private double GetMaximumProjectionThicknessMm()
@@ -876,9 +955,140 @@ public partial class DicomViewPanel : UserControl
             return Math.Max(GetMinimumProjectionThicknessMm(), diagonal);
         }
 
+        VolumeSlicePlane? plane = GetCurrentSlicePlane();
+        if (plane is not null)
+        {
+            return Math.Max(GetMinimumProjectionThicknessMm(), plane.DepthRangeMm + plane.SliceSpacingMm);
+        }
+
         return Math.Max(
             GetMinimumProjectionThicknessMm(),
             VolumeReslicer.GetSliceSpacing(_volume, _volumeOrientation) * Math.Max(1, VolumeReslicer.GetSliceCount(_volume, _volumeOrientation)));
+    }
+
+    private int GetCurrentSliceCount()
+    {
+        if (_volume is null)
+        {
+            return 0;
+        }
+
+        VolumeSlicePlane? plane = GetCurrentSlicePlane();
+        return plane?.SliceCount ?? VolumeReslicer.GetSliceCount(_volume, _volumeOrientation);
+    }
+
+    private VolumeSlicePlane? GetCurrentSlicePlane(int? sliceIndex = null)
+    {
+        if (_volume is null || !HasTiltedPlane)
+        {
+            return null;
+        }
+
+        VolumeSlicePlane plane = VolumeReslicer.CreateSlicePlane(
+            _volume,
+            _volumeOrientation,
+            _planeTiltAroundColumn,
+            _planeTiltAroundRow,
+            _planeOffsetMm);
+
+        if (sliceIndex is int explicitIndex)
+        {
+            return plane.WithSliceIndex(explicitIndex);
+        }
+
+        return plane.ClampOffset();
+    }
+
+    private VolumeSlicePlane? GetCurrentSlicePlaneForSliceIndex(int sliceIndex)
+    {
+        if (_volume is null || !HasTiltedPlane)
+        {
+            return null;
+        }
+
+        VolumeSlicePlane plane = VolumeReslicer.CreateSlicePlane(
+            _volume,
+            _volumeOrientation,
+            _planeTiltAroundColumn,
+            _planeTiltAroundRow,
+            _planeOffsetMm);
+
+        return plane.WithSliceIndex(sliceIndex);
+    }
+
+    private double GetCurrentPlaneOffsetMm()
+    {
+        return HasTiltedPlane ? _planeOffsetMm : 0;
+    }
+
+    private bool IsPlaneTiltToolActive() => _navigationTool == NavigationTool.TiltPlane && _volume is not null;
+
+    private bool BeginPlaneTiltDrag(Point pos, IPointer pointer)
+    {
+        if (!IsPlaneTiltToolActive())
+        {
+            return false;
+        }
+
+        _isPlaneTiltDragging = true;
+        _planeTiltDragStart = pos;
+        _planeTiltStartAroundColumn = _planeTiltAroundColumn;
+        _planeTiltStartAroundRow = _planeTiltAroundRow;
+        _planeOffsetMm = HasTiltedPlane
+            ? GetCurrentPlaneOffsetMm()
+            : VolumeReslicer.CreateSlicePlane(_volume!, _volumeOrientation, 0, 0, 0).WithSliceIndex(_volumeSliceIndex).CurrentOffsetMm;
+        _isLeftDragging = true;
+        _mouseDownPos = pos;
+        pointer.Capture(RootGrid);
+        _capturedPointer = pointer;
+        AttachCapturedPointerHandlers();
+        Cursor = new Cursor(StandardCursorType.SizeAll);
+        return true;
+    }
+
+    private bool UpdatePlaneTiltDrag(Point pos)
+    {
+        if (!_isPlaneTiltDragging || _volume is null)
+        {
+            return false;
+        }
+
+        const double sensitivity = Math.PI / 300.0;
+        double dx = pos.X - _planeTiltDragStart.X;
+        double dy = pos.Y - _planeTiltDragStart.Y;
+        double nextAroundColumn = Math.Clamp(_planeTiltStartAroundColumn + dx * sensitivity, -Math.PI * 0.45, Math.PI * 0.45);
+        double nextAroundRow = Math.Clamp(_planeTiltStartAroundRow - dy * sensitivity, -Math.PI * 0.45, Math.PI * 0.45);
+        if (Math.Abs(nextAroundColumn - _planeTiltAroundColumn) < 1e-5 && Math.Abs(nextAroundRow - _planeTiltAroundRow) < 1e-5)
+        {
+            return true;
+        }
+
+        _planeTiltAroundColumn = nextAroundColumn;
+        _planeTiltAroundRow = nextAroundRow;
+
+        VolumeSlicePlane? plane = GetCurrentSlicePlane();
+        if (plane is not null)
+        {
+            _planeOffsetMm = Math.Clamp(_planeOffsetMm, plane.MinOffsetMm, plane.MaxOffsetMm);
+            _volumeSliceIndex = plane.GetSliceIndexForOffset(_planeOffsetMm);
+        }
+
+        _preserveTiltOffsetDuringNextShow = true;
+        ShowVolumeSlice(_volumeSliceIndex);
+        UpdateOverlay();
+        NotifyViewStateChanged();
+        return true;
+    }
+
+    private bool EndPlaneTiltDrag()
+    {
+        if (!_isPlaneTiltDragging)
+        {
+            return false;
+        }
+
+        _isPlaneTiltDragging = false;
+        return true;
     }
 
     private static string GetProjectionModeLabel(VolumeProjectionMode mode) => mode switch
@@ -1317,8 +1527,23 @@ public partial class DicomViewPanel : UserControl
             }
 
             ApplyFitToWindow();
+            _pendingInitialFitToWindow = false;
             UpdateOverlay();
         }, DispatcherPriority.Loaded);
+    }
+
+    private void ApplyFitToWindowLayoutWithoutRender()
+    {
+        double fitZoomFactor = GetFitToWindowZoomFactor();
+        if (fitZoomFactor <= 0)
+        {
+            return;
+        }
+
+        _zoomFactor = fitZoomFactor;
+        _fitToWindow = true;
+        ApplyZoomTransform();
+        CenterImage();
     }
 
     /// <summary>
@@ -1394,7 +1619,9 @@ public partial class DicomViewPanel : UserControl
             _colorScheme,
             _volumeOrientation,
             _projectionMode,
-            _projectionThicknessMm);
+            _projectionThicknessMm,
+            _planeTiltAroundColumn,
+            _planeTiltAroundRow);
     }
 
     public bool TryCaptureNavigationState(out NavigationState state)
@@ -1439,6 +1666,8 @@ public partial class DicomViewPanel : UserControl
 
         _volumeOrientation = state.Orientation;
         _projectionMode = state.ProjectionMode;
+        _planeTiltAroundColumn = state.PlaneTiltAroundColumnRadians;
+        _planeTiltAroundRow = state.PlaneTiltAroundRowRadians;
         _projectionThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), state.ProjectionThicknessMm);
 
         if (state.FitToWindow)
@@ -1653,7 +1882,7 @@ public partial class DicomViewPanel : UserControl
 
         if (_volume is not null)
         {
-            int sliceCount = VolumeReslicer.GetSliceCount(_volume, _volumeOrientation);
+            int sliceCount = GetCurrentSliceCount();
             string orientLabel = _volumeOrientation switch
             {
                 SliceOrientation.Axial => "Axial",
@@ -1661,7 +1890,7 @@ public partial class DicomViewPanel : UserControl
                 SliceOrientation.Sagittal => "Sagittal",
                 _ => ""
             };
-            info += $"\n{orientLabel} {_volumeSliceIndex + 1}/{sliceCount}  [Volume]";
+            info += $"\n{orientLabel}{(HasTiltedPlane ? " oblique" : string.Empty)} {_volumeSliceIndex + 1}/{sliceCount}  [Volume]";
         }
         else if (_frameCount > 1)
         {
@@ -2070,6 +2299,12 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
+        if (point.Properties.IsLeftButtonPressed && BeginPlaneTiltDrag(pos, e.Pointer))
+        {
+            e.Handled = true;
+            return;
+        }
+
         // Double-click left: let the host window decide how to handle layout focus.
         if (point.Properties.IsLeftButtonPressed && e.ClickCount == 2)
         {
@@ -2145,6 +2380,7 @@ public partial class DicomViewPanel : UserControl
         }
         else if ((e.InitialPressMouseButton == MouseButton.Left || e.InitialPressMouseButton == MouseButton.Middle) && _isLeftDragging)
         {
+            EndPlaneTiltDrag();
             HandleDvrPointerReleased();  // no-op if not orbiting
             _isLeftDragging = false;
             _isEdgeZoom = false;
@@ -2171,6 +2407,12 @@ public partial class DicomViewPanel : UserControl
             HoveredImagePointChanged?.Invoke(TryGetImagePoint(pos, out Point imagePoint)
                 ? new DicomHoverInfo(imagePoint, e.KeyModifiers)
                 : null);
+            return;
+        }
+
+        if (_isLeftDragging && UpdatePlaneTiltDrag(pos))
+        {
+            e.Handled = true;
             return;
         }
 

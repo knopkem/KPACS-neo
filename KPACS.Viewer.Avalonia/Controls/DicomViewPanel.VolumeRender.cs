@@ -23,6 +23,8 @@ public partial class DicomViewPanel
     private VolumeRenderState? _dvrRenderState;
     private VolumeTransferFunction? _dvrTransferFunction;
     private TransferFunctionPreset _dvrPreset = TransferFunctionPreset.Default;
+    private VolumeShadingPreset _dvrShadingPreset = VolumeShadingPreset.Default;
+    private VolumeLightDirectionPreset _dvrLightDirectionPreset = VolumeLightDirectionPreset.Headlight;
 
     // Camera orbit (spherical offsets from initial orientation)
     private double _dvrAzimuth;          // horizontal rotation (radians)
@@ -55,6 +57,12 @@ public partial class DicomViewPanel
     /// <summary>Current DVR transfer function preset.</summary>
     public TransferFunctionPreset DvrPreset => _dvrPreset;
 
+    /// <summary>Current DVR shading preset.</summary>
+    public VolumeShadingPreset DvrShadingPreset => _dvrShadingPreset;
+
+    /// <summary>Current DVR light direction preset.</summary>
+    public VolumeLightDirectionPreset DvrLightDirectionPreset => _dvrLightDirectionPreset;
+
     // ==============================================================================================
     //  DVR camera initialisation
     // ==============================================================================================
@@ -78,17 +86,28 @@ public partial class DicomViewPanel
         double extentY = (_volume.SizeY - 1) * spacingY;
         double extentZ = (_volume.SizeZ - 1) * spacingZ;
 
-        _dvrVolumeCenter = GetDvrSliceCenterMm(_volumeSliceIndex);
+        VolumeSlicePlane? plane = GetCurrentSlicePlane(_volumeSliceIndex);
+        _dvrVolumeCenter = plane is not null
+            ? ToVolumeLocalPoint(plane.Center)
+            : GetDvrSliceCenterMm(_volumeSliceIndex);
         double diagonal = Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
         _dvrDistance = diagonal * 1.5;
 
         // Initial view direction matches the current orientation
-        (_dvrInitialForward, _dvrInitialUp) = _volumeOrientation switch
+        if (plane is not null)
         {
-            SliceOrientation.Coronal => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
-            SliceOrientation.Sagittal => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
-            _ /* Axial */ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
-        };
+            _dvrInitialForward = ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize();
+            _dvrInitialUp = ToVolumeLocalDirection(plane.ColumnDirection).Normalize();
+        }
+        else
+        {
+            (_dvrInitialForward, _dvrInitialUp) = _volumeOrientation switch
+            {
+                SliceOrientation.Coronal => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
+                SliceOrientation.Sagittal => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
+                _ /* Axial */ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
+            };
+        }
 
         _dvrAzimuth = 0;
         _dvrElevation = 0;
@@ -119,19 +138,36 @@ public partial class DicomViewPanel
             return;
         }
 
-        _dvrVolumeCenter = GetDvrSliceCenterMm(_volumeSliceIndex);
-        ReslicedImage referenceSlice = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, _volumeSliceIndex);
+        VolumeSlicePlane? plane = GetCurrentSlicePlane(_volumeSliceIndex);
+        ReslicedImage referenceSlice;
+        SpatialVector3D baseForward;
+        SpatialVector3D baseUp;
+
+        if (plane is not null)
+        {
+            _dvrVolumeCenter = ToVolumeLocalPoint(plane.Center);
+            referenceSlice = VolumeReslicer.ExtractSlice(_volume, plane);
+            baseForward = ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize();
+            baseUp = ToVolumeLocalDirection(plane.ColumnDirection).Normalize();
+        }
+        else
+        {
+            _dvrVolumeCenter = GetDvrSliceCenterMm(_volumeSliceIndex);
+            referenceSlice = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, _volumeSliceIndex);
+            baseForward = _dvrInitialForward;
+            baseUp = _dvrInitialUp;
+        }
 
         // Compute rotated camera vectors via Rodrigues rotation
-        SpatialVector3D right = _dvrInitialForward.Cross(_dvrInitialUp).Normalize();
+        SpatialVector3D right = baseForward.Cross(baseUp).Normalize();
 
         // 1. Rotate around the initial up vector (azimuth)
-        SpatialVector3D forward = RotateAroundAxis(_dvrInitialForward, _dvrInitialUp, _dvrAzimuth);
-        right = forward.Cross(_dvrInitialUp).Normalize();
+        SpatialVector3D forward = RotateAroundAxis(baseForward, baseUp, _dvrAzimuth);
+        right = forward.Cross(baseUp).Normalize();
 
         // 2. Rotate around the right vector (elevation)
         forward = RotateAroundAxis(forward, right, _dvrElevation);
-        SpatialVector3D up = RotateAroundAxis(_dvrInitialUp, right, _dvrElevation);
+        SpatialVector3D up = RotateAroundAxis(baseUp, right, _dvrElevation);
 
         SpatialVector3D cameraPos = _dvrVolumeCenter - forward * _dvrDistance;
 
@@ -140,6 +176,8 @@ public partial class DicomViewPanel
         int outputHeight = Math.Max(1, referenceSlice.Height);
         double orthographicWidthMm = Math.Max(0, (outputWidth - 1) * referenceSlice.PixelSpacingX);
         double orthographicHeightMm = Math.Max(0, (outputHeight - 1) * referenceSlice.PixelSpacingY);
+        VolumeShadingDefinition shading = VolumeRenderingPresetCatalog.GetShadingDefinition(_dvrShadingPreset);
+        SpatialVector3D lightDirection = GetDvrLightDirection(forward, right, up);
 
         _dvrRenderState = new VolumeRenderState
         {
@@ -149,7 +187,11 @@ public partial class DicomViewPanel
             CameraPosition = cameraPos,
             CameraTarget = _dvrVolumeCenter,
             CameraUp = up,
-            LightDirection = forward,   // headlight: light follows camera
+            LightDirection = lightDirection,
+            AmbientIntensity = shading.AmbientIntensity,
+            DiffuseIntensity = shading.DiffuseIntensity,
+            SpecularIntensity = shading.SpecularIntensity,
+            Shininess = shading.Shininess,
             OrthographicScale = 1.0,
             SlabThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), _projectionThicknessMm),
             OutputWidth = outputWidth,
@@ -163,6 +205,12 @@ public partial class DicomViewPanel
         if (_volume is null)
         {
             return _dvrVolumeCenter;
+        }
+
+        VolumeSlicePlane? plane = GetCurrentSlicePlane(sliceIndex);
+        if (plane is not null)
+        {
+            return ToVolumeLocalPoint(plane.Center);
         }
 
         double spacingX = _volume.SpacingX > 0 ? _volume.SpacingX : 1.0;
@@ -179,6 +227,33 @@ public partial class DicomViewPanel
             SliceOrientation.Sagittal => new SpatialVector3D(sliceIndex * spacingX, extentY * 0.5, extentZ * 0.5),
             _ => new SpatialVector3D(extentX * 0.5, extentY * 0.5, sliceIndex * spacingZ),
         };
+    }
+
+    private SpatialVector3D ToVolumeLocalPoint(SpatialVector3D patientPoint)
+    {
+        if (_volume is null)
+        {
+            return patientPoint;
+        }
+
+        SpatialVector3D relative = patientPoint - _volume.Origin;
+        return new SpatialVector3D(
+            relative.Dot(_volume.RowDirection),
+            relative.Dot(_volume.ColumnDirection),
+            relative.Dot(_volume.Normal));
+    }
+
+    private SpatialVector3D ToVolumeLocalDirection(SpatialVector3D patientDirection)
+    {
+        if (_volume is null)
+        {
+            return patientDirection;
+        }
+
+        return new SpatialVector3D(
+            patientDirection.Dot(_volume.RowDirection),
+            patientDirection.Dot(_volume.ColumnDirection),
+            patientDirection.Dot(_volume.Normal));
     }
 
     // ==============================================================================================
@@ -385,6 +460,28 @@ public partial class DicomViewPanel
         }
     }
 
+    public void SetDvrShadingPreset(VolumeShadingPreset preset)
+    {
+        _dvrShadingPreset = preset;
+
+        if (IsDvrMode)
+        {
+            RenderDvrViewFast();
+            ScheduleDvrSharpRender();
+        }
+    }
+
+    public void SetDvrLightDirectionPreset(VolumeLightDirectionPreset preset)
+    {
+        _dvrLightDirectionPreset = preset;
+
+        if (IsDvrMode)
+        {
+            RenderDvrViewFast();
+            ScheduleDvrSharpRender();
+        }
+    }
+
     public void ResetDvrTransferWindow()
     {
         if (_volume is null)
@@ -459,6 +556,17 @@ public partial class DicomViewPanel
             _volume.MaxValue,
             _dvrTransferCenter,
             _dvrTransferWidth);
+    }
+
+    private SpatialVector3D GetDvrLightDirection(SpatialVector3D forward, SpatialVector3D right, SpatialVector3D up)
+    {
+        VolumeLightDirectionDefinition definition = VolumeRenderingPresetCatalog.GetLightDirectionDefinition(_dvrLightDirectionPreset);
+        double azimuthRadians = definition.AzimuthDegrees * Math.PI / 180.0;
+        double elevationRadians = definition.ElevationDegrees * Math.PI / 180.0;
+
+        SpatialVector3D light = RotateAroundAxis(forward, up, azimuthRadians);
+        light = RotateAroundAxis(light, right, -elevationRadians);
+        return light.Normalize();
     }
 
     // ==============================================================================================

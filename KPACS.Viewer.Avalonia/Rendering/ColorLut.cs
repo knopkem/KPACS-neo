@@ -20,6 +20,11 @@ public static class ColorLut
             3  => Rainbow(),
             5  => Gold(),
             10 => Bone(),
+            11 => Jet(),
+            12 => BlackBody(),
+            13 => Spectrum(),
+            14 => Flow(),
+            15 => Pet(),
             _  => Grayscale()
         };
     }
@@ -34,6 +39,11 @@ public static class ColorLut
             3  => "Rainbow",
             5  => "Gold",
             10 => "Bone",
+            11 => "Jet",
+            12 => "BlackBody",
+            13 => "Spectrum",
+            14 => "Flow",
+            15 => "PET",
             _  => "Grayscale"
         };
     }
@@ -110,6 +120,86 @@ public static class ColorLut
                 r[i] = (byte)Math.Min(255, i * 0.75 + (i - 170) * 0.28);
                 g[i] = (byte)Math.Min(255, i * 0.75 + 85 * 0.28);
                 b[i] = (byte)Math.Min(255, i * 0.75 + 85 * 0.28);
+            }
+        }
+        return (r, g, b);
+    }
+
+    public static (byte[] R, byte[] G, byte[] B) Jet()
+    {
+        byte[] r = new byte[256], g = new byte[256], b = new byte[256];
+        for (int i = 0; i < 256; i++)
+        {
+            double x = i / 255.0;
+            r[i] = (byte)Math.Clamp(255 * Math.Min(Math.Max(1.5 - Math.Abs(4.0 * x - 3.0), 0.0), 1.0), 0, 255);
+            g[i] = (byte)Math.Clamp(255 * Math.Min(Math.Max(1.5 - Math.Abs(4.0 * x - 2.0), 0.0), 1.0), 0, 255);
+            b[i] = (byte)Math.Clamp(255 * Math.Min(Math.Max(1.5 - Math.Abs(4.0 * x - 1.0), 0.0), 1.0), 0, 255);
+        }
+        return (r, g, b);
+    }
+
+    public static (byte[] R, byte[] G, byte[] B) BlackBody()
+    {
+        byte[] r = new byte[256], g = new byte[256], b = new byte[256];
+        for (int i = 0; i < 256; i++)
+        {
+            double x = i / 255.0;
+            r[i] = (byte)Math.Clamp(255 * Math.Min(1.0, x * 1.8), 0, 255);
+            g[i] = (byte)Math.Clamp(255 * Math.Max(0.0, Math.Min(1.0, (x - 0.25) * 1.45)), 0, 255);
+            b[i] = (byte)Math.Clamp(255 * Math.Max(0.0, Math.Min(1.0, (x - 0.60) * 2.2)), 0, 255);
+        }
+        return (r, g, b);
+    }
+
+    public static (byte[] R, byte[] G, byte[] B) Spectrum()
+    {
+        byte[] r = new byte[256], g = new byte[256], b = new byte[256];
+        for (int i = 0; i < 256; i++)
+        {
+            double hue = 240.0 - (240.0 * i / 255.0);
+            HsvToRgb(hue, 1.0, 1.0, out r[i], out g[i], out b[i]);
+        }
+        return (r, g, b);
+    }
+
+    public static (byte[] R, byte[] G, byte[] B) Flow()
+    {
+        byte[] r = new byte[256], g = new byte[256], b = new byte[256];
+        for (int i = 0; i < 256; i++)
+        {
+            double x = i / 255.0;
+            r[i] = (byte)Math.Clamp(255 * Math.Max(0.0, Math.Min(1.0, (x - 0.35) * 1.4)), 0, 255);
+            g[i] = (byte)Math.Clamp(255 * (0.15 + 0.75 * x), 0, 255);
+            b[i] = (byte)Math.Clamp(255 * (0.25 + 0.65 * (1.0 - Math.Abs(x - 0.35))), 0, 255);
+        }
+        return (r, g, b);
+    }
+
+    public static (byte[] R, byte[] G, byte[] B) Pet()
+    {
+        byte[] r = new byte[256], g = new byte[256], b = new byte[256];
+        for (int i = 0; i < 256; i++)
+        {
+            if (i < 128)
+            {
+                double t = i / 127.0;
+                r[i] = (byte)Math.Clamp(255 * t, 0, 255);
+                g[i] = 0;
+                b[i] = 0;
+            }
+            else if (i < 192)
+            {
+                double t = (i - 128) / 63.0;
+                r[i] = 255;
+                g[i] = (byte)Math.Clamp(255 * t, 0, 255);
+                b[i] = 0;
+            }
+            else
+            {
+                double t = (i - 192) / 63.0;
+                r[i] = 255;
+                g[i] = 255;
+                b[i] = (byte)Math.Clamp(255 * t, 0, 255);
             }
         }
         return (r, g, b);

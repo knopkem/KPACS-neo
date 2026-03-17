@@ -21,12 +21,34 @@ public partial class StudyViewerWindow
 
     private static readonly WorkspaceChoice<TransferFunctionPreset>[] s_renderingPresetOptions =
     [
-        new("Default", TransferFunctionPreset.Default),
-        new("Bone", TransferFunctionPreset.Bone),
-        new("Soft Tissue", TransferFunctionPreset.SoftTissue),
-        new("Lung", TransferFunctionPreset.Lung),
-        new("Angio", TransferFunctionPreset.Angio),
-        new("Skin", TransferFunctionPreset.Skin),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.Default), TransferFunctionPreset.Default),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.Bone), TransferFunctionPreset.Bone),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.SoftTissue), TransferFunctionPreset.SoftTissue),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.Lung), TransferFunctionPreset.Lung),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.Angio), TransferFunctionPreset.Angio),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.Skin), TransferFunctionPreset.Skin),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.Endoscopy), TransferFunctionPreset.Endoscopy),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.PetHotIron), TransferFunctionPreset.PetHotIron),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.PetSpectrum), TransferFunctionPreset.PetSpectrum),
+        new(VolumeRenderingPresetCatalog.GetLabel(TransferFunctionPreset.Perfusion), TransferFunctionPreset.Perfusion),
+    ];
+
+    private static readonly WorkspaceChoice<VolumeShadingPreset>[] s_renderingShadingOptions =
+    [
+        new(VolumeRenderingPresetCatalog.GetShadingLabel(VolumeShadingPreset.Default), VolumeShadingPreset.Default),
+        new(VolumeRenderingPresetCatalog.GetShadingLabel(VolumeShadingPreset.SoftTissue), VolumeShadingPreset.SoftTissue),
+        new(VolumeRenderingPresetCatalog.GetShadingLabel(VolumeShadingPreset.GlossyBone), VolumeShadingPreset.GlossyBone),
+        new(VolumeRenderingPresetCatalog.GetShadingLabel(VolumeShadingPreset.GlossyVascular), VolumeShadingPreset.GlossyVascular),
+        new(VolumeRenderingPresetCatalog.GetShadingLabel(VolumeShadingPreset.Endoscopy), VolumeShadingPreset.Endoscopy),
+    ];
+
+    private static readonly WorkspaceChoice<VolumeLightDirectionPreset>[] s_renderingLightDirectionOptions =
+    [
+        new(VolumeRenderingPresetCatalog.GetLightDirectionLabel(VolumeLightDirectionPreset.Headlight), VolumeLightDirectionPreset.Headlight),
+        new(VolumeRenderingPresetCatalog.GetLightDirectionLabel(VolumeLightDirectionPreset.LeftFront), VolumeLightDirectionPreset.LeftFront),
+        new(VolumeRenderingPresetCatalog.GetLightDirectionLabel(VolumeLightDirectionPreset.RightFront), VolumeLightDirectionPreset.RightFront),
+        new(VolumeRenderingPresetCatalog.GetLightDirectionLabel(VolumeLightDirectionPreset.TopFront), VolumeLightDirectionPreset.TopFront),
+        new(VolumeRenderingPresetCatalog.GetLightDirectionLabel(VolumeLightDirectionPreset.RakingLeft), VolumeLightDirectionPreset.RakingLeft),
     ];
 
     private static readonly WorkspaceChoice<int>[] s_renderingColorMapOptions =
@@ -34,9 +56,14 @@ public partial class StudyViewerWindow
         new("Grayscale", (int)ColorScheme.Grayscale),
         new("Grayscale Inverted", (int)ColorScheme.GrayscaleInverted),
         new("Hot Iron", (int)ColorScheme.HotIron),
+        new("PET", (int)ColorScheme.Pet),
         new("Rainbow", (int)ColorScheme.Rainbow),
+        new("Spectrum", (int)ColorScheme.Spectrum),
         new("Gold", (int)ColorScheme.Gold),
         new("Bone", (int)ColorScheme.Bone),
+        new("Jet", (int)ColorScheme.Jet),
+        new("BlackBody", (int)ColorScheme.BlackBody),
+        new("Flow", (int)ColorScheme.Flow),
     ];
 
     private Point _renderingPanelOffset;
@@ -72,7 +99,7 @@ public partial class StudyViewerWindow
 
         RenderingPanelSummaryText.Text = BuildRenderingWorkspaceSummary(slot, panel, hasVolume);
         RenderingPanelHintText.Text = hasVolume
-            ? "Projection and DVR preset apply to the active viewport. The color map currently applies to all viewports in this viewer."
+            ? $"Projection, DVR preset, shading, and light direction apply to the active viewport. Selecting a DVR preset also applies its recommended shading, light, and viewer-wide color map. Current preset note: {VolumeRenderingPresetCatalog.GetDescription(panel!.DvrPreset)}"
             : hasImage
                 ? "This viewport is loaded, but no 3D volume is available yet. Select a CT/MR volume viewport to use DVR controls."
                 : "Select a viewport with a loaded volume to configure 3D rendering.";
@@ -83,6 +110,8 @@ public partial class StudyViewerWindow
         {
             RenderingWorkspaceProjectionCombo.IsEnabled = hasVolume;
             RenderingWorkspaceDvrPresetCombo.IsEnabled = hasVolume;
+            RenderingWorkspaceShadingCombo.IsEnabled = hasVolume;
+            RenderingWorkspaceLightDirectionCombo.IsEnabled = hasVolume;
             RenderingWorkspaceColorMapCombo.IsEnabled = _slots.Count > 0;
 
             RenderingWorkspaceProjectionCombo.SelectedItem = hasVolume
@@ -90,6 +119,12 @@ public partial class StudyViewerWindow
                 : null;
             RenderingWorkspaceDvrPresetCombo.SelectedItem = hasVolume
                 ? s_renderingPresetOptions.FirstOrDefault(option => option.Value == panel!.DvrPreset)
+                : null;
+            RenderingWorkspaceShadingCombo.SelectedItem = hasVolume
+                ? s_renderingShadingOptions.FirstOrDefault(option => option.Value == panel!.DvrShadingPreset)
+                : null;
+            RenderingWorkspaceLightDirectionCombo.SelectedItem = hasVolume
+                ? s_renderingLightDirectionOptions.FirstOrDefault(option => option.Value == panel!.DvrLightDirectionPreset)
                 : null;
             RenderingWorkspaceColorMapCombo.SelectedItem = s_renderingColorMapOptions.FirstOrDefault(option => option.Value == _selectedColorScheme);
         }
@@ -124,6 +159,16 @@ public partial class StudyViewerWindow
             RenderingWorkspaceDvrPresetCombo.ItemsSource = s_renderingPresetOptions;
         }
 
+        if (RenderingWorkspaceShadingCombo.ItemsSource is null)
+        {
+            RenderingWorkspaceShadingCombo.ItemsSource = s_renderingShadingOptions;
+        }
+
+        if (RenderingWorkspaceLightDirectionCombo.ItemsSource is null)
+        {
+            RenderingWorkspaceLightDirectionCombo.ItemsSource = s_renderingLightDirectionOptions;
+        }
+
         if (RenderingWorkspaceColorMapCombo.ItemsSource is null)
         {
             RenderingWorkspaceColorMapCombo.ItemsSource = s_renderingColorMapOptions;
@@ -147,7 +192,9 @@ public partial class StudyViewerWindow
             return "2D image loaded · 3D controls unavailable";
         }
 
-        string dvrSuffix = panel.IsDvrMode ? $" · TF {GetDvrPresetLabel(panel.DvrPreset)}" : string.Empty;
+        string dvrSuffix = panel.IsDvrMode
+            ? $" · TF {GetDvrPresetLabel(panel.DvrPreset)} · Shade {GetDvrShadingLabel(panel.DvrShadingPreset)} · Light {GetDvrLightDirectionLabel(panel.DvrLightDirectionPreset)}"
+            : string.Empty;
         return $"Active viewport · {panel.ProjectionModeLabel}{dvrSuffix}";
     }
 
@@ -177,11 +224,11 @@ public partial class StudyViewerWindow
         return $"Target viewport: {seriesLabel}{modality} · {dataKind}";
     }
 
-    private static string GetDvrPresetLabel(TransferFunctionPreset preset) => preset switch
-    {
-        TransferFunctionPreset.SoftTissue => "Soft Tissue",
-        _ => preset.ToString(),
-    };
+    private static string GetDvrPresetLabel(TransferFunctionPreset preset) => VolumeRenderingPresetCatalog.GetLabel(preset);
+
+    private static string GetDvrShadingLabel(VolumeShadingPreset preset) => VolumeRenderingPresetCatalog.GetShadingLabel(preset);
+
+    private static string GetDvrLightDirectionLabel(VolumeLightDirectionPreset preset) => VolumeRenderingPresetCatalog.GetLightDirectionLabel(preset);
 
     private void OnWorkspaceRenderingClick(object? sender, RoutedEventArgs e)
     {
@@ -230,7 +277,53 @@ public partial class StudyViewerWindow
         }
 
         panel.SetDvrPreset(choice.Value);
+        panel.SetDvrShadingPreset(VolumeRenderingPresetCatalog.GetRecommendedShadingPreset(choice.Value));
+        panel.SetDvrLightDirectionPreset(VolumeRenderingPresetCatalog.GetRecommendedLightDirectionPreset(choice.Value));
+        int recommendedColorScheme = VolumeRenderingPresetCatalog.GetRecommendedColorScheme(choice.Value);
+        if (_selectedColorScheme != recommendedColorScheme)
+        {
+            ApplyColorScheme(recommendedColorScheme);
+        }
+        else
+        {
+            RefreshRenderingWorkspacePanel(forceVisible: true);
+        }
+
+        SaveViewerSettings();
+    }
+
+    private void OnRenderingWorkspaceShadingSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_isRefreshingRenderingWorkspaceUi || _activeSlot?.Panel is not DicomViewPanel panel || !panel.IsVolumeBound)
+        {
+            return;
+        }
+
+        if (RenderingWorkspaceShadingCombo.SelectedItem is not WorkspaceChoice<VolumeShadingPreset> choice)
+        {
+            return;
+        }
+
+        panel.SetDvrShadingPreset(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: true);
+        SaveViewerSettings();
+    }
+
+    private void OnRenderingWorkspaceLightDirectionSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_isRefreshingRenderingWorkspaceUi || _activeSlot?.Panel is not DicomViewPanel panel || !panel.IsVolumeBound)
+        {
+            return;
+        }
+
+        if (RenderingWorkspaceLightDirectionCombo.SelectedItem is not WorkspaceChoice<VolumeLightDirectionPreset> choice)
+        {
+            return;
+        }
+
+        panel.SetDvrLightDirectionPreset(choice.Value);
+        RefreshRenderingWorkspacePanel(forceVisible: true);
+        SaveViewerSettings();
     }
 
     private void OnRenderingWorkspaceColorMapSelectionChanged(object? sender, SelectionChangedEventArgs e)
@@ -247,6 +340,7 @@ public partial class StudyViewerWindow
 
         ApplyColorScheme(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: _renderingPanelVisible || _renderingPanelPinned);
+        SaveViewerSettings();
     }
 
     private void OnRenderingPanelPinClick(object? sender, RoutedEventArgs e)

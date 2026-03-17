@@ -12,6 +12,7 @@ public partial class StudyViewerWindow
     private readonly List<StudyMeasurement> _studyMeasurements = [];
     private readonly Dictionary<Guid, PolygonAutoOutlineState> _polygonAutoOutlineStates = [];
     private MeasurementTool _measurementTool = MeasurementTool.None;
+    private NavigationTool _navigationTool = NavigationTool.Navigate;
     private Guid? _selectedMeasurementId;
     private bool _isApplyingPolygonAutoOutlineCorrection;
 
@@ -26,6 +27,7 @@ public partial class StudyViewerWindow
     private void ConfigureMeasurementPanel(ViewportSlot slot, DicomViewPanel panel)
     {
         panel.SetMeasurementTool(GetEffectiveMeasurementTool());
+        panel.NavigationTool = _navigationTool;
         panel.SetMeasurementNudgeMode(false);
         panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
@@ -42,6 +44,7 @@ public partial class StudyViewerWindow
     private void ApplyMeasurementContext(ViewportSlot slot)
     {
         slot.Panel.SetMeasurementTool(GetEffectiveMeasurementTool());
+        slot.Panel.NavigationTool = _navigationTool;
         slot.Panel.SetMeasurementNudgeMode(false);
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
         slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
@@ -60,6 +63,7 @@ public partial class StudyViewerWindow
         foreach (ViewportSlot slot in _slots)
         {
             slot.Panel.SetMeasurementTool(effectiveTool);
+            slot.Panel.NavigationTool = _navigationTool;
             slot.Panel.SetMeasurementNudgeMode(false);
             slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
             slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
@@ -99,6 +103,11 @@ public partial class StudyViewerWindow
         _measurementTool = tool;
         if (tool != MeasurementTool.None)
         {
+            _navigationTool = NavigationTool.Navigate;
+        }
+
+        if (tool != MeasurementTool.None)
+        {
             _is3DCursorToolArmed = false;
             Update3DCursorToolButton();
         }
@@ -114,7 +123,8 @@ public partial class StudyViewerWindow
             return;
         }
 
-        ToolboxNavigateButton.IsChecked = _measurementTool == MeasurementTool.None;
+        ToolboxNavigateButton.IsChecked = _measurementTool == MeasurementTool.None && _navigationTool == NavigationTool.Navigate;
+        ToolboxTiltPlaneButton.IsChecked = _measurementTool == MeasurementTool.None && _navigationTool == NavigationTool.TiltPlane;
         ToolboxPixelLensButton.IsChecked = _measurementTool == MeasurementTool.PixelLens;
         ToolboxLineButton.IsChecked = _measurementTool == MeasurementTool.Line;
         ToolboxAngleButton.IsChecked = _measurementTool == MeasurementTool.Angle;

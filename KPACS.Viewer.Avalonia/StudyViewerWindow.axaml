@@ -834,13 +834,41 @@
                             </StackPanel>
 
                             <StackPanel Spacing="4">
-                                <TextBlock Text="DVR transfer preset"
+                                <TextBlock Text="DVR preset"
                                            Foreground="#FFF0F6FC"
                                            FontWeight="SemiBold"
                                            FontSize="11" />
                                 <ComboBox x:Name="RenderingWorkspaceDvrPresetCombo"
                                           MinWidth="220"
                                           SelectionChanged="OnRenderingWorkspaceDvrPresetSelectionChanged" />
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Shading"
+                                           Foreground="#FFF0F6FC"
+                                           FontWeight="SemiBold"
+                                           FontSize="11" />
+                                <ComboBox x:Name="RenderingWorkspaceShadingCombo"
+                                          MinWidth="220"
+                                          SelectionChanged="OnRenderingWorkspaceShadingSelectionChanged" />
+                                <TextBlock Text="Use Glossy Bone, Glossy Vascular, or Endoscopy lighting when you want more shape cues than the default headlight model provides."
+                                           Foreground="#FF9DB3C7"
+                                           FontSize="10"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Light direction"
+                                           Foreground="#FFF0F6FC"
+                                           FontWeight="SemiBold"
+                                           FontSize="11" />
+                                <ComboBox x:Name="RenderingWorkspaceLightDirectionCombo"
+                                          MinWidth="220"
+                                          SelectionChanged="OnRenderingWorkspaceLightDirectionSelectionChanged" />
+                                <TextBlock Text="Off-axis light directions make specular highlights visible. Headlight is flatter; Left/Right/Top Front give much stronger glossy cues."
+                                           Foreground="#FF9DB3C7"
+                                           FontSize="10"
+                                           TextWrapping="Wrap" />
                             </StackPanel>
 
                             <StackPanel Spacing="4">
@@ -851,7 +879,7 @@
                                 <ComboBox x:Name="RenderingWorkspaceColorMapCombo"
                                           MinWidth="220"
                                           SelectionChanged="OnRenderingWorkspaceColorMapSelectionChanged" />
-                                <TextBlock Text="Color map is currently applied viewer-wide to keep existing slot synchronization intact."
+                                <TextBlock Text="DVR preset selection auto-applies its recommended viewer-wide color map. You can still override the color map manually here."
                                            Foreground="#FF9DB3C7"
                                            FontSize="10"
                                            TextWrapping="Wrap" />
@@ -882,6 +910,7 @@
 
                         <WrapPanel ItemWidth="50" Orientation="Horizontal">
                             <ToggleButton x:Name="ToolboxNavigateButton" Classes="toolboxChip" Content="Navigate" Click="OnNavigateToolClick" />
+                            <ToggleButton x:Name="ToolboxTiltPlaneButton" Classes="toolboxChip" Content="Tilt plane" Click="OnTiltPlaneToolClick" ToolTip.Tip="Tilt the current volume plane with left drag while keeping wheel and middle drag available for front-to-back scrolling." />
                             <ToggleButton x:Name="ToolboxPixelLensButton" Classes="toolboxChip" Content="Pixel lens" Tag="PixelLens" Click="OnMeasurementToolPopupClick" />
                             <ToggleButton x:Name="ToolboxLineButton" Classes="toolboxChip" Content="Line" Tag="Line" Click="OnMeasurementToolPopupClick" />
                             <ToggleButton x:Name="ToolboxAngleButton" Classes="toolboxChip" Content="Angle" Tag="Angle" Click="OnMeasurementToolPopupClick" />
