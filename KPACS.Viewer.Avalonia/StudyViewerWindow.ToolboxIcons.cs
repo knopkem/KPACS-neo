@@ -21,7 +21,7 @@ public partial class StudyViewerWindow
         ConfigureLabeledIconButton(WorkspaceRenderingButton, CreateRenderingWorkspaceIcon(), "3D Rendering", "Open the 3D rendering workspace for projection, DVR preset, and color-map settings.");
         ToolTip.SetTip(WorkspaceReportButton, "Open the floating report panel with created findings, provenance, and anatomy hints.");
         ConfigureIconButton(ToolboxNavigateButton, CreateNavigateIcon(), "Navigate: left drag zoom/pan, wheel scroll, middle drag fast stack, right drag window/level.");
-        ConfigureIconButton(ToolboxTiltPlaneButton, CreateTiltPlaneIcon(), "Tilt plane: left drag tilts the current volume plane in any volume mode, while wheel and middle drag still move front-to-back through the slab.");
+        ConfigureIconButton(ToolboxTiltPlaneButton, CreateTiltPlaneIcon(), "Tilt plane: left drag tilts the current volume plane in any volume mode. Hold Ctrl while dragging to lock rotation to the horizontal or vertical axis for a full 360° turn; wheel and middle drag still move front-to-back through the slab.");
         ConfigureIconButton(ToolboxPixelLensButton, CreatePixelLensIcon(), "Pixel lens.");
         ConfigureIconButton(ToolboxLineButton, CreateLineMeasureIcon(), "Line measurement.");
         ConfigureIconButton(ToolboxAngleButton, CreateAngleMeasureIcon(), "Angle measurement.");
@@ -34,6 +34,9 @@ public partial class StudyViewerWindow
         ConfigureIconButton(ToolboxModifyButton, CreateModifyIcon(), "Modify selected measurement.");
         ConfigureIconButton(ToolboxEraseButton, CreateEraseIcon(), "Erase selected measurement.");
         ConfigureIconButton(ToolboxOverlayToggleButton, CreateOverlayIcon(), "Toggle image overlay.");
+        ConfigureIconButton(ToolboxFlipHorizontalButton, CreateFlipHorizontalIcon(), "Flip the active viewport horizontally.");
+        ConfigureIconButton(ToolboxFlipVerticalButton, CreateFlipVerticalIcon(), "Flip the active viewport vertically.");
+        ConfigureIconButton(ToolboxRotateClockwiseButton, CreateRotateClockwiseIcon(), "Rotate the active viewport 90° clockwise.");
         ConfigureIconButton(Toolbox3DCursorButton, Create3DCursorIcon(), "3D cursor: hold SHIFT while clicking in a viewport. Click here to arm or clear the current 3D cursor.");
         ConfigureIconButton(ToolboxLinkedSyncToggleButton, CreateLinkedSyncIcon(), "Toggle linked sync between compatible viewports.");
         ConfigureIconButton(MeasurementInsightPinButton, CreatePinPanelIcon(), "Pin the ROI panel and retain the last measurement details.");
@@ -168,6 +171,24 @@ public partial class StudyViewerWindow
         LineShape(7.5, 9, 16.5, 9),
         LineShape(7.5, 12, 16.5, 12),
         LineShape(7.5, 15, 13.5, 15));
+
+    private static Control CreateFlipHorizontalIcon() => CreateIconHost(
+        LineShape(12, 4.5, 12, 19.5, 1.4),
+        StrokePath("M7 7 L4.5 9.5 L7 12"),
+        StrokePath("M17 17 L19.5 14.5 L17 12"),
+        OutlineRectangle(6.5, 7.5, 11, 9));
+
+    private static Control CreateFlipVerticalIcon() => CreateIconHost(
+        LineShape(4.5, 12, 19.5, 12, 1.4),
+        StrokePath("M7 7 L9.5 4.5 L12 7"),
+        StrokePath("M12 17 L14.5 19.5 L17 17"),
+        OutlineRectangle(7.5, 6.5, 9, 11));
+
+    private static Control CreateRotateClockwiseIcon() => CreateIconHost(
+        StrokePath("M8 8 C10.2 5.8 13.4 5.2 16 6.4 C18.6 7.6 20 10.1 20 12.9"),
+        StrokePath("M20 12.9 L17 11.3 M20 12.9 L18.2 15.8"),
+        FilledRectangle(7, 12, 6.4, 4.2),
+        LineShape(13.4, 14.1, 16.8, 14.1, 1.4));
 
     private static Control CreateLinkedSyncIcon() => CreateIconHost(
         StrokePath("M8.5 15 C6.2 15 5 13.7 5 11.6 C5 9.5 6.2 8.2 8.5 8.2 L11 8.2"),

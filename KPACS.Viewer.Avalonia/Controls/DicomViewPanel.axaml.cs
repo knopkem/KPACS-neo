@@ -56,7 +56,10 @@ public partial class DicomViewPanel : UserControl
         VolumeProjectionMode ProjectionMode,
         double ProjectionThicknessMm,
         double PlaneTiltAroundColumnRadians,
-        double PlaneTiltAroundRowRadians);
+        double PlaneTiltAroundRowRadians,
+        int ViewRotationQuarterTurns,
+        bool ViewFlipHorizontal,
+        bool ViewFlipVertical);
 
     public sealed record NavigationState(
         double ZoomFactor,
@@ -106,6 +109,9 @@ public partial class DicomViewPanel : UserControl
     private double _displayScaleX = 1.0;
     private double _displayScaleY = 1.0;
     private bool _pendingInitialFitToWindow = true;
+    private int _viewRotationQuarterTurns;
+    private bool _viewFlipHorizontal;
+    private bool _viewFlipVertical;
 
     // ==============================================================================================
     // Volume rendering state
@@ -125,6 +131,9 @@ public partial class DicomViewPanel : UserControl
     private double _projectionDragStartY;
     private IPointer? _projectionPointer;
     private string _lastRenderBackendLabel = "CPU";
+    private PlaneTiltConstraintAxis _planeTiltConstraintAxis;
+    private bool _planeTiltConstraintModeActive;
+    private bool _planeTiltControlPressed;
 
     /// <summary>True when this panel is displaying a slice from a bound volume.</summary>
     public bool IsVolumeBound => _volume is not null;
@@ -143,6 +152,9 @@ public partial class DicomViewPanel : UserControl
     public string ProjectionModeLabel => GetProjectionModeLabel(_projectionMode);
     public string OrientationLabel => HasTiltedPlane ? $"{GetOrientationLabel(_volumeOrientation)} oblique" : GetOrientationLabel(_volumeOrientation);
     public bool HasTiltedPlane => Math.Abs(_planeTiltAroundColumn) > 1e-4 || Math.Abs(_planeTiltAroundRow) > 1e-4;
+    public bool IsHorizontallyFlipped => _viewFlipHorizontal;
+    public bool IsVerticallyFlipped => _viewFlipVertical;
+    public int ViewRotationQuarterTurns => NormalizeQuarterTurns(_viewRotationQuarterTurns);
     public string LastRenderBackendLabel => _lastRenderBackendLabel;
 
     // ==============================================================================================
@@ -154,6 +166,7 @@ public partial class DicomViewPanel : UserControl
     private byte[] _lutG = new byte[256];
     private byte[] _lutB = new byte[256];
     private byte[]? _renderBuffer;
+    private byte[]? _viewTransformBuffer;
 
     // Progressive rendering: render fast at native resolution during interaction,
     // then re-render at display resolution after a short idle delay.
@@ -333,6 +346,8 @@ public partial class DicomViewPanel : UserControl
         RootGrid.PointerMoved += OnPointerMoved;
         RootGrid.PointerWheelChanged += OnPointerWheelChanged;
         RootGrid.PointerExited += OnPointerExited;
+        KeyDown += OnPanelKeyDown;
+        KeyUp += OnPanelKeyUp;
         OrientationBadge.PointerPressed += OnOrientationBadgePointerPressed;
         ProjectionBadge.PointerPressed += OnProjectionBadgePointerPressed;
         ProjectionBadge.PointerMoved += OnProjectionBadgePointerMoved;
@@ -808,6 +823,12 @@ public partial class DicomViewPanel : UserControl
         UpdateDisplayGeometry(resliced.PixelSpacingX, resliced.PixelSpacingY);
 
         SpatialMetadata = resliced.SpatialMetadata;
+        if (SpatialMetadata is null && IsDvrMode)
+        {
+            SpatialMetadata = requestedPlane is not null
+                ? requestedPlane.CreateSpatialMetadata(_volume)
+                : VolumeReslicer.GetSliceSpatialMetadata(_volume, _volumeOrientation, _volumeSliceIndex);
+        }
         _fileName = SpatialMetadata?.FilePath ?? "";
         ApplyDisplayImageSize();
 
@@ -1039,14 +1060,18 @@ public partial class DicomViewPanel : UserControl
         }
 
         _isPlaneTiltDragging = true;
+        _planeTiltConstraintAxis = PlaneTiltConstraintAxis.None;
+        _planeTiltConstraintModeActive = false;
         _planeTiltDragStart = pos;
         _planeTiltStartAroundColumn = _planeTiltAroundColumn;
         _planeTiltStartAroundRow = _planeTiltAroundRow;
+        _planeTiltControlPressed = false;
         _planeOffsetMm = HasTiltedPlane
             ? GetCurrentPlaneOffsetMm()
             : VolumeReslicer.CreateSlicePlane(_volume!, _volumeOrientation, 0, 0, 0).WithSliceIndex(_volumeSliceIndex).CurrentOffsetMm;
         _isLeftDragging = true;
         _mouseDownPos = pos;
+        Focus();
         pointer.Capture(RootGrid);
         _capturedPointer = pointer;
         AttachCapturedPointerHandlers();
@@ -1054,7 +1079,7 @@ public partial class DicomViewPanel : UserControl
         return true;
     }
 
-    private bool UpdatePlaneTiltDrag(Point pos)
+    private bool UpdatePlaneTiltDrag(Point pos, KeyModifiers modifiers)
     {
         if (!_isPlaneTiltDragging || _volume is null)
         {
@@ -1064,8 +1089,55 @@ public partial class DicomViewPanel : UserControl
         const double sensitivity = Math.PI / 300.0;
         double dx = pos.X - _planeTiltDragStart.X;
         double dy = pos.Y - _planeTiltDragStart.Y;
-        double nextAroundColumn = Math.Clamp(_planeTiltStartAroundColumn + dx * sensitivity, -Math.PI * 0.45, Math.PI * 0.45);
-        double nextAroundRow = Math.Clamp(_planeTiltStartAroundRow - dy * sensitivity, -Math.PI * 0.45, Math.PI * 0.45);
+        bool constrainAxis = _planeTiltConstraintModeActive || _planeTiltControlPressed || modifiers.HasFlag(KeyModifiers.Control);
+
+        if (constrainAxis && !_planeTiltConstraintModeActive)
+        {
+            _planeTiltConstraintModeActive = true;
+            _planeTiltConstraintAxis = PlaneTiltConstraintAxis.None;
+            _planeTiltDragStart = pos;
+            _planeTiltStartAroundColumn = _planeTiltAroundColumn;
+            _planeTiltStartAroundRow = _planeTiltAroundRow;
+            dx = 0;
+            dy = 0;
+        }
+
+        double nextAroundColumn;
+        double nextAroundRow;
+
+        if (constrainAxis)
+        {
+            if (_planeTiltConstraintAxis == PlaneTiltConstraintAxis.None)
+            {
+                if (Math.Abs(dx) >= Math.Abs(dy) && Math.Abs(dx) > 1e-3)
+                {
+                    _planeTiltConstraintAxis = PlaneTiltConstraintAxis.Horizontal;
+                }
+                else if (Math.Abs(dy) > 1e-3)
+                {
+                    _planeTiltConstraintAxis = PlaneTiltConstraintAxis.Vertical;
+                }
+            }
+
+            nextAroundColumn = _planeTiltStartAroundColumn;
+            nextAroundRow = _planeTiltStartAroundRow;
+            switch (_planeTiltConstraintAxis)
+            {
+                case PlaneTiltConstraintAxis.Horizontal:
+                    nextAroundColumn = _planeTiltStartAroundColumn + dx * sensitivity;
+                    break;
+                case PlaneTiltConstraintAxis.Vertical:
+                    nextAroundRow = _planeTiltStartAroundRow - dy * sensitivity;
+                    break;
+            }
+        }
+        else
+        {
+            _planeTiltConstraintAxis = PlaneTiltConstraintAxis.None;
+            nextAroundColumn = Math.Clamp(_planeTiltStartAroundColumn + dx * sensitivity, -Math.PI * 0.45, Math.PI * 0.45);
+            nextAroundRow = Math.Clamp(_planeTiltStartAroundRow - dy * sensitivity, -Math.PI * 0.45, Math.PI * 0.45);
+        }
+
         if (Math.Abs(nextAroundColumn - _planeTiltAroundColumn) < 1e-5 && Math.Abs(nextAroundRow - _planeTiltAroundRow) < 1e-5)
         {
             return true;
@@ -1096,7 +1168,31 @@ public partial class DicomViewPanel : UserControl
         }
 
         _isPlaneTiltDragging = false;
+        _planeTiltConstraintAxis = PlaneTiltConstraintAxis.None;
+        _planeTiltConstraintModeActive = false;
+        _planeTiltControlPressed = false;
         return true;
+    }
+
+    private void OnPanelKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (!_isPlaneTiltDragging)
+        {
+            return;
+        }
+
+        if (e.Key is Key.LeftCtrl or Key.RightCtrl)
+        {
+            _planeTiltControlPressed = true;
+        }
+    }
+
+    private void OnPanelKeyUp(object? sender, KeyEventArgs e)
+    {
+        if (e.Key is Key.LeftCtrl or Key.RightCtrl)
+        {
+            _planeTiltControlPressed = false;
+        }
     }
 
     private bool ShowVolumeSlicePreservingNavigation(int sliceIndex)
@@ -1150,8 +1246,9 @@ public partial class DicomViewPanel : UserControl
 
         double cx = RootGrid.Bounds.Width / 2.0;
         double cy = RootGrid.Bounds.Height / 2.0;
-        _panX = cx - (ImageToDisplayX(clampedCenterImagePoint.X) * _zoomFactor);
-        _panY = cy - (ImageToDisplayY(clampedCenterImagePoint.Y) * _zoomFactor);
+        Point displayPoint = ImageToDisplayPoint(clampedCenterImagePoint);
+        _panX = cx - (displayPoint.X * _zoomFactor);
+        _panY = cy - (displayPoint.Y * _zoomFactor);
         _panTransform.X = _panX;
         _panTransform.Y = _panY;
         Update3DCursorOverlay();
@@ -1212,6 +1309,8 @@ public partial class DicomViewPanel : UserControl
     private void RenderImage(bool sharp)
     {
         _isSharpRender = sharp;
+        int sourceRenderWidth = GetSourceRenderPixelWidth();
+        int sourceRenderHeight = GetSourceRenderPixelHeight();
         int renderWidth = GetRenderPixelWidth();
         int renderHeight = GetRenderPixelHeight();
         if (!EnsureDisplayBitmap(renderWidth, renderHeight))
@@ -1222,9 +1321,11 @@ public partial class DicomViewPanel : UserControl
         // Volume-based rendering path
         if (_volumeSlicePixels is not null && _displayBitmap is not null)
         {
-            int pixelCount = renderWidth * renderHeight;
-            int requiredBytes = pixelCount * 4;
-            byte[] outputBgra = EnsureRenderBuffer(requiredBytes);
+            int sourcePixelCount = sourceRenderWidth * sourceRenderHeight;
+            int sourceRequiredBytes = sourcePixelCount * 4;
+            byte[] sourceBgra = HasViewTransform()
+                ? EnsureViewTransformBuffer(sourceRequiredBytes)
+                : EnsureRenderBuffer(sourceRequiredBytes);
 
             DicomPixelRenderer.RenderRescaled16BitScaled(
                 _volumeSlicePixels,
@@ -1232,11 +1333,21 @@ public partial class DicomViewPanel : UserControl
                 _windowCenter, _windowWidth,
                 _lutR, _lutG, _lutB,
                 _isMonochrome1,
-                renderWidth,
-                renderHeight,
-                outputBgra);
+                sourceRenderWidth,
+                sourceRenderHeight,
+                sourceBgra);
 
-            CopyToDisplayBitmap(outputBgra, requiredBytes, renderWidth, renderHeight);
+            byte[] outputBgra = sourceBgra;
+            int usedLength = sourceRequiredBytes;
+            if (HasViewTransform())
+            {
+                int requiredBytes = renderWidth * renderHeight * 4;
+                outputBgra = EnsureRenderBuffer(requiredBytes);
+                TransformBgraBuffer(sourceBgra, sourceRenderWidth, sourceRenderHeight, outputBgra);
+                usedLength = requiredBytes;
+            }
+
+            CopyToDisplayBitmap(outputBgra, usedLength, renderWidth, renderHeight);
             return;
         }
 
@@ -1244,9 +1355,11 @@ public partial class DicomViewPanel : UserControl
         if (_rawPixelData == null || _displayBitmap == null) return;
 
         {
-            int pixelCount = renderWidth * renderHeight;
-            int requiredBytes = pixelCount * 4;
-            byte[] outputBgra = EnsureRenderBuffer(requiredBytes);
+            int sourcePixelCount = sourceRenderWidth * sourceRenderHeight;
+            int sourceRequiredBytes = sourcePixelCount * 4;
+            byte[] sourceBgra = HasViewTransform()
+                ? EnsureViewTransformBuffer(sourceRequiredBytes)
+                : EnsureRenderBuffer(sourceRequiredBytes);
 
             DicomPixelRenderer.RenderScaled(
                 _rawPixelData,
@@ -1259,13 +1372,23 @@ public partial class DicomViewPanel : UserControl
                 _isMonochrome1,
                 _photometricInterpretation,
                 _planarConfiguration,
-                renderWidth,
-                renderHeight,
-                outputBgra);
+                sourceRenderWidth,
+                sourceRenderHeight,
+                sourceBgra);
 
-            ApplyBitmapOverlays(outputBgra, renderWidth, renderHeight);
+            ApplyBitmapOverlays(sourceBgra, sourceRenderWidth, sourceRenderHeight);
 
-            CopyToDisplayBitmap(outputBgra, requiredBytes, renderWidth, renderHeight);
+            byte[] outputBgra = sourceBgra;
+            int usedLength = sourceRequiredBytes;
+            if (HasViewTransform())
+            {
+                int requiredBytes = renderWidth * renderHeight * 4;
+                outputBgra = EnsureRenderBuffer(requiredBytes);
+                TransformBgraBuffer(sourceBgra, sourceRenderWidth, sourceRenderHeight, outputBgra);
+                usedLength = requiredBytes;
+            }
+
+            CopyToDisplayBitmap(outputBgra, usedLength, renderWidth, renderHeight);
         }
     }
 
@@ -1343,6 +1466,16 @@ public partial class DicomViewPanel : UserControl
         }
 
         return _renderBuffer;
+    }
+
+    private byte[] EnsureViewTransformBuffer(int requiredBytes)
+    {
+        if (_viewTransformBuffer is null || _viewTransformBuffer.Length < requiredBytes)
+        {
+            _viewTransformBuffer = new byte[requiredBytes];
+        }
+
+        return _viewTransformBuffer;
     }
 
     private void CopyToDisplayBitmap(byte[] outputBgra, int usedLength, int bitmapWidth, int bitmapHeight)
@@ -1724,7 +1857,10 @@ public partial class DicomViewPanel : UserControl
             _projectionMode,
             _projectionThicknessMm,
             _planeTiltAroundColumn,
-            _planeTiltAroundRow);
+                _planeTiltAroundRow,
+                _viewRotationQuarterTurns,
+                _viewFlipHorizontal,
+                _viewFlipVertical);
     }
 
     public bool TryCaptureNavigationState(out NavigationState state)
@@ -1739,9 +1875,9 @@ public partial class DicomViewPanel : UserControl
                 return false;
             }
 
-            double x = DisplayToImageX((controlCenter.X - _panX) / _zoomFactor);
-            double y = DisplayToImageY((controlCenter.Y - _panY) / _zoomFactor);
-            centerImagePoint = new Point(x, y);
+            centerImagePoint = DisplayToImagePoint(new Point(
+                (controlCenter.X - _panX) / _zoomFactor,
+                (controlCenter.Y - _panY) / _zoomFactor));
         }
 
         double fitZoomFactor = GetFitToWindowZoomFactor();
@@ -1772,6 +1908,9 @@ public partial class DicomViewPanel : UserControl
         _planeTiltAroundColumn = state.PlaneTiltAroundColumnRadians;
         _planeTiltAroundRow = state.PlaneTiltAroundRowRadians;
         _projectionThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), state.ProjectionThicknessMm);
+        _viewRotationQuarterTurns = NormalizeQuarterTurns(state.ViewRotationQuarterTurns);
+        _viewFlipHorizontal = state.ViewFlipHorizontal;
+        _viewFlipVertical = state.ViewFlipVertical;
 
         if (state.FitToWindow)
         {
@@ -1826,8 +1965,9 @@ public partial class DicomViewPanel : UserControl
 
         double cx = RootGrid.Bounds.Width / 2.0;
         double cy = RootGrid.Bounds.Height / 2.0;
-        _panX = cx - (ImageToDisplayX(state.CenterImagePoint.X) * _zoomFactor);
-        _panY = cy - (ImageToDisplayY(state.CenterImagePoint.Y) * _zoomFactor);
+        Point displayPoint = ImageToDisplayPoint(state.CenterImagePoint);
+        _panX = cx - (displayPoint.X * _zoomFactor);
+        _panY = cy - (displayPoint.Y * _zoomFactor);
         _panTransform.X = _panX;
         _panTransform.Y = _panY;
         Update3DCursorOverlay();
@@ -1950,8 +2090,10 @@ public partial class DicomViewPanel : UserControl
         {
             OverlayTopLeft.Text = "";
             OverlayTopRight.Text = "";
+            OverlayTopCenter.Text = "";
             OverlayCenterLeft.Text = "";
             OverlayCenterRight.Text = "";
+            OverlayBottomCenter.Text = "";
             OverlayBottomLeft.Text = "";
             OverlayBottomRight.Text = "";
             ApplyOverlayVisibility();
@@ -1974,6 +2116,8 @@ public partial class DicomViewPanel : UserControl
 
         OverlayCenterRight.Text = GetHorizontalOrientationLabel(isRightEdge: true);
         OverlayCenterLeft.Text = GetHorizontalOrientationLabel(isRightEdge: false);
+    OverlayTopCenter.Text = GetVerticalOrientationLabel(isBottomEdge: false);
+    OverlayBottomCenter.Text = string.Empty;
 
         OverlayBottomLeft.Text = IsDvrMode
             ? $"TF W: {DvrTransferWidth:F0}  TF C: {DvrTransferCenter:F0}"
@@ -2011,8 +2155,10 @@ public partial class DicomViewPanel : UserControl
         OverlayTopRight.IsVisible = visible;
         OrientationBadge.IsVisible = visible && _volume is not null;
         ProjectionBadge.IsVisible = visible && _volume is not null;
+        OverlayTopCenter.IsVisible = visible && !string.IsNullOrEmpty(OverlayTopCenter.Text);
         OverlayCenterLeft.IsVisible = visible && !string.IsNullOrEmpty(OverlayCenterLeft.Text);
         OverlayCenterRight.IsVisible = visible && !string.IsNullOrEmpty(OverlayCenterRight.Text);
+        OverlayBottomCenter.IsVisible = false;
         OverlayBottomLeft.IsVisible = visible;
         OverlayBottomRight.IsVisible = visible;
         ToolboxButton.IsVisible = _showToolboxButton && IsImageLoaded;
@@ -2026,16 +2172,71 @@ public partial class DicomViewPanel : UserControl
 
     private string GetHorizontalOrientationLabel(bool isRightEdge)
     {
-        if (SpatialMetadata is null)
+        if (!TryGetScreenAxisDirections(out SpatialVector3D rightDirection, out _))
         {
             return string.Empty;
         }
 
-        SpatialVector3D direction = isRightEdge
-            ? SpatialMetadata.RowDirection
-            : SpatialMetadata.RowDirection * -1;
-
+        SpatialVector3D direction = isRightEdge ? rightDirection : rightDirection * -1;
         return FormatPatientOrientation(direction);
+    }
+
+    private string GetVerticalOrientationLabel(bool isBottomEdge)
+    {
+        if (!TryGetScreenAxisDirections(out _, out SpatialVector3D downDirection))
+        {
+            return string.Empty;
+        }
+
+        SpatialVector3D direction = isBottomEdge ? downDirection : downDirection * -1;
+        return FormatPatientOrientation(direction);
+    }
+
+    private bool TryGetScreenAxisDirections(out SpatialVector3D rightDirection, out SpatialVector3D downDirection)
+    {
+        rightDirection = default;
+        downDirection = default;
+        if (SpatialMetadata is null)
+        {
+            return false;
+        }
+
+        rightDirection = SpatialMetadata.RowDirection;
+        downDirection = SpatialMetadata.ColumnDirection;
+
+        if (_viewFlipHorizontal)
+        {
+            rightDirection *= -1;
+        }
+
+        if (_viewFlipVertical)
+        {
+            downDirection *= -1;
+        }
+
+        switch (NormalizeQuarterTurns(_viewRotationQuarterTurns))
+        {
+            case 1:
+            {
+                SpatialVector3D previousRight = rightDirection;
+                rightDirection = downDirection * -1;
+                downDirection = previousRight;
+                break;
+            }
+            case 2:
+                rightDirection *= -1;
+                downDirection *= -1;
+                break;
+            case 3:
+            {
+                SpatialVector3D previousRight = rightDirection;
+                rightDirection = downDirection;
+                downDirection = previousRight * -1;
+                break;
+            }
+        }
+
+        return true;
     }
 
     private static string FormatPatientOrientation(SpatialVector3D direction)
@@ -2078,10 +2279,10 @@ public partial class DicomViewPanel : UserControl
             return false;
         }
 
-        double x = DisplayToImageX((controlPoint.X - _panX) / _zoomFactor);
-        double y = DisplayToImageY((controlPoint.Y - _panY) / _zoomFactor);
-        imagePoint = new Point(x, y);
-        return x >= 0 && y >= 0 && x < _imageWidth && y < _imageHeight;
+        imagePoint = DisplayToImagePoint(new Point(
+            (controlPoint.X - _panX) / _zoomFactor,
+            (controlPoint.Y - _panY) / _zoomFactor));
+        return imagePoint.X >= 0 && imagePoint.Y >= 0 && imagePoint.X < _imageWidth && imagePoint.Y < _imageHeight;
     }
 
     private void Update3DCursorOverlay()
@@ -2095,8 +2296,9 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
-        double displayX = _panX + (ImageToDisplayX(_cursor3DImagePoint.Value.X) * _zoomFactor);
-        double displayY = _panY + (ImageToDisplayY(_cursor3DImagePoint.Value.Y) * _zoomFactor);
+        Point displayPoint = ImageToDisplayPoint(_cursor3DImagePoint.Value);
+        double displayX = _panX + (displayPoint.X * _zoomFactor);
+        double displayY = _panY + (displayPoint.Y * _zoomFactor);
 
         Cursor3DHorizontal.StartPoint = new Point(0, displayY);
         Cursor3DHorizontal.EndPoint = new Point(RootGrid.Bounds.Width, displayY);
@@ -2127,10 +2329,12 @@ public partial class DicomViewPanel : UserControl
 
         Point start = _referenceLineStartImagePoint.Value;
         Point end = _referenceLineEndImagePoint.Value;
-        double startX = _panX + (ImageToDisplayX(start.X) * _zoomFactor);
-        double startY = _panY + (ImageToDisplayY(start.Y) * _zoomFactor);
-        double endX = _panX + (ImageToDisplayX(end.X) * _zoomFactor);
-        double endY = _panY + (ImageToDisplayY(end.Y) * _zoomFactor);
+        Point startDisplay = ImageToDisplayPoint(start);
+        Point endDisplay = ImageToDisplayPoint(end);
+        double startX = _panX + (startDisplay.X * _zoomFactor);
+        double startY = _panY + (startDisplay.Y * _zoomFactor);
+        double endX = _panX + (endDisplay.X * _zoomFactor);
+        double endY = _panY + (endDisplay.Y * _zoomFactor);
 
         ReferenceLinePrimary.StartPoint = new Point(startX, startY);
         ReferenceLinePrimary.EndPoint = new Point(endX, endY);
@@ -2513,7 +2717,7 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
-        if (_isLeftDragging && UpdatePlaneTiltDrag(pos))
+        if (_isLeftDragging && UpdatePlaneTiltDrag(pos, e.KeyModifiers))
         {
             e.Handled = true;
             return;
@@ -2733,6 +2937,13 @@ public partial class DicomViewPanel : UserControl
 
     private int GetRenderPixelWidth()
     {
+        return (NormalizeQuarterTurns(_viewRotationQuarterTurns) & 1) == 0
+            ? GetSourceRenderPixelWidth()
+            : GetSourceRenderPixelHeight();
+    }
+
+    private int GetSourceRenderPixelWidth()
+    {
         if (_imageWidth <= 0)
         {
             return 0;
@@ -2752,6 +2963,13 @@ public partial class DicomViewPanel : UserControl
 
     private int GetRenderPixelHeight()
     {
+        return (NormalizeQuarterTurns(_viewRotationQuarterTurns) & 1) == 0
+            ? GetSourceRenderPixelHeight()
+            : GetSourceRenderPixelWidth();
+    }
+
+    private int GetSourceRenderPixelHeight()
+    {
         if (_imageHeight <= 0)
         {
             return 0;
@@ -2766,17 +2984,186 @@ public partial class DicomViewPanel : UserControl
         return Math.Max(1, (int)Math.Ceiling(_imageHeight * scale));
     }
 
-    private double GetDisplayWidth() => _imageWidth * _displayScaleX;
+    private double GetDisplayWidth() => GetViewPixelWidth() * GetViewDisplayScaleX();
 
-    private double GetDisplayHeight() => _imageHeight * _displayScaleY;
+    private double GetDisplayHeight() => GetViewPixelHeight() * GetViewDisplayScaleY();
 
-    private double ImageToDisplayX(double imageX) => imageX * _displayScaleX;
+    private int GetViewPixelWidth() => (NormalizeQuarterTurns(_viewRotationQuarterTurns) & 1) == 0 ? _imageWidth : _imageHeight;
 
-    private double ImageToDisplayY(double imageY) => imageY * _displayScaleY;
+    private int GetViewPixelHeight() => (NormalizeQuarterTurns(_viewRotationQuarterTurns) & 1) == 0 ? _imageHeight : _imageWidth;
 
-    private double DisplayToImageX(double displayX) => _displayScaleX <= 0 ? displayX : displayX / _displayScaleX;
+    private double GetViewDisplayScaleX() => (NormalizeQuarterTurns(_viewRotationQuarterTurns) & 1) == 0 ? _displayScaleX : _displayScaleY;
 
-    private double DisplayToImageY(double displayY) => _displayScaleY <= 0 ? displayY : displayY / _displayScaleY;
+    private double GetViewDisplayScaleY() => (NormalizeQuarterTurns(_viewRotationQuarterTurns) & 1) == 0 ? _displayScaleY : _displayScaleX;
+
+    private Point ImageToDisplayPoint(Point imagePoint)
+    {
+        Point viewPoint = TransformImagePointToView(imagePoint);
+        return new Point(viewPoint.X * GetViewDisplayScaleX(), viewPoint.Y * GetViewDisplayScaleY());
+    }
+
+    private Point DisplayToImagePoint(Point displayPoint)
+    {
+        double viewX = GetViewDisplayScaleX() <= 0 ? displayPoint.X : displayPoint.X / GetViewDisplayScaleX();
+        double viewY = GetViewDisplayScaleY() <= 0 ? displayPoint.Y : displayPoint.Y / GetViewDisplayScaleY();
+        return TransformViewPointToImage(new Point(viewX, viewY));
+    }
+
+    private Point TransformImagePointToView(Point imagePoint)
+    {
+        double x = imagePoint.X;
+        double y = imagePoint.Y;
+        int width = _imageWidth;
+        int height = _imageHeight;
+
+        Point rotated = NormalizeQuarterTurns(_viewRotationQuarterTurns) switch
+        {
+            1 => new Point((height - 1) - y, x),
+            2 => new Point((width - 1) - x, (height - 1) - y),
+            3 => new Point(y, (width - 1) - x),
+            _ => new Point(x, y),
+        };
+
+        double viewX = _viewFlipHorizontal ? (GetViewPixelWidth() - 1) - rotated.X : rotated.X;
+        double viewY = _viewFlipVertical ? (GetViewPixelHeight() - 1) - rotated.Y : rotated.Y;
+        return new Point(viewX, viewY);
+    }
+
+    private Point TransformViewPointToImage(Point viewPoint)
+    {
+        double viewX = _viewFlipHorizontal ? (GetViewPixelWidth() - 1) - viewPoint.X : viewPoint.X;
+        double viewY = _viewFlipVertical ? (GetViewPixelHeight() - 1) - viewPoint.Y : viewPoint.Y;
+        int width = _imageWidth;
+        int height = _imageHeight;
+
+        return NormalizeQuarterTurns(_viewRotationQuarterTurns) switch
+        {
+            1 => new Point(viewY, (height - 1) - viewX),
+            2 => new Point((width - 1) - viewX, (height - 1) - viewY),
+            3 => new Point((width - 1) - viewY, viewX),
+            _ => new Point(viewX, viewY),
+        };
+    }
+
+    private bool HasViewTransform() => NormalizeQuarterTurns(_viewRotationQuarterTurns) != 0 || _viewFlipHorizontal || _viewFlipVertical;
+
+    private void TransformBgraBuffer(byte[] sourceBgra, int sourceWidth, int sourceHeight, byte[] destinationBgra)
+    {
+        int rotation = NormalizeQuarterTurns(_viewRotationQuarterTurns);
+        int destinationWidth = (rotation & 1) == 0 ? sourceWidth : sourceHeight;
+        int destinationHeight = (rotation & 1) == 0 ? sourceHeight : sourceWidth;
+        Span<uint> source = MemoryMarshal.Cast<byte, uint>(sourceBgra.AsSpan(0, sourceWidth * sourceHeight * 4));
+        Span<uint> destination = MemoryMarshal.Cast<byte, uint>(destinationBgra.AsSpan(0, destinationWidth * destinationHeight * 4));
+
+        for (int y = 0; y < sourceHeight; y++)
+        {
+            int sourceOffset = y * sourceWidth;
+            for (int x = 0; x < sourceWidth; x++)
+            {
+                int rotatedX;
+                int rotatedY;
+                switch (rotation)
+                {
+                    case 1:
+                        rotatedX = sourceHeight - 1 - y;
+                        rotatedY = x;
+                        break;
+                    case 2:
+                        rotatedX = sourceWidth - 1 - x;
+                        rotatedY = sourceHeight - 1 - y;
+                        break;
+                    case 3:
+                        rotatedX = y;
+                        rotatedY = sourceWidth - 1 - x;
+                        break;
+                    default:
+                        rotatedX = x;
+                        rotatedY = y;
+                        break;
+                }
+
+                if (_viewFlipHorizontal)
+                {
+                    rotatedX = destinationWidth - 1 - rotatedX;
+                }
+
+                if (_viewFlipVertical)
+                {
+                    rotatedY = destinationHeight - 1 - rotatedY;
+                }
+
+                destination[(rotatedY * destinationWidth) + rotatedX] = source[sourceOffset + x];
+            }
+        }
+    }
+
+    private static int NormalizeQuarterTurns(int quarterTurns)
+    {
+        int normalized = quarterTurns % 4;
+        return normalized < 0 ? normalized + 4 : normalized;
+    }
+
+    private static double NormalizeAngle(double angleRadians)
+    {
+        double wrapped = angleRadians % (Math.PI * 2.0);
+        return wrapped <= -Math.PI
+            ? wrapped + (Math.PI * 2.0)
+            : wrapped > Math.PI
+                ? wrapped - (Math.PI * 2.0)
+                : wrapped;
+    }
+
+    public bool ToggleHorizontalFlip()
+    {
+        if (!IsImageLoaded)
+        {
+            return false;
+        }
+
+        _ = TryCaptureNavigationState(out NavigationState navigationState);
+        _viewFlipHorizontal = !_viewFlipHorizontal;
+        OnViewportTransformChanged(navigationState);
+        return true;
+    }
+
+    public bool ToggleVerticalFlip()
+    {
+        if (!IsImageLoaded)
+        {
+            return false;
+        }
+
+        _ = TryCaptureNavigationState(out NavigationState navigationState);
+        _viewFlipVertical = !_viewFlipVertical;
+        OnViewportTransformChanged(navigationState);
+        return true;
+    }
+
+    public bool RotateClockwise90()
+    {
+        if (!IsImageLoaded)
+        {
+            return false;
+        }
+
+        _ = TryCaptureNavigationState(out NavigationState navigationState);
+        _viewRotationQuarterTurns = NormalizeQuarterTurns(_viewRotationQuarterTurns + 1);
+        OnViewportTransformChanged(navigationState);
+        return true;
+    }
+
+    private void OnViewportTransformChanged(NavigationState navigationState)
+    {
+        ApplyDisplayImageSize();
+        if (_fitToWindow)
+        {
+            ApplyFitToWindow();
+            return;
+        }
+
+        ApplyAbsoluteNavigationState(navigationState with { FitToWindow = false, ZoomFactor = _zoomFactor });
+        NotifyViewStateChanged();
+    }
 
     // ==============================================================================================
     // Resize handler
@@ -2800,14 +3187,15 @@ public partial class DicomViewPanel : UserControl
         else if (_zoomFactor > 0 && e.PreviousSize.Width > 0 && e.PreviousSize.Height > 0)
         {
             Point previousCenter = new(e.PreviousSize.Width / 2.0, e.PreviousSize.Height / 2.0);
-            Point centerImagePoint = new(
-                DisplayToImageX((previousCenter.X - _panX) / _zoomFactor),
-                DisplayToImageY((previousCenter.Y - _panY) / _zoomFactor));
+            Point centerImagePoint = DisplayToImagePoint(new Point(
+                (previousCenter.X - _panX) / _zoomFactor,
+                (previousCenter.Y - _panY) / _zoomFactor));
 
             double newCenterX = e.NewSize.Width / 2.0;
             double newCenterY = e.NewSize.Height / 2.0;
-            _panX = newCenterX - (ImageToDisplayX(centerImagePoint.X) * _zoomFactor);
-            _panY = newCenterY - (ImageToDisplayY(centerImagePoint.Y) * _zoomFactor);
+            Point displayPoint = ImageToDisplayPoint(centerImagePoint);
+            _panX = newCenterX - (displayPoint.X * _zoomFactor);
+            _panY = newCenterY - (displayPoint.Y * _zoomFactor);
             _panTransform.X = _panX;
             _panTransform.Y = _panY;
         }
@@ -2815,5 +3203,12 @@ public partial class DicomViewPanel : UserControl
         Update3DCursorOverlay();
         UpdateMeasurementPresentation();
         UpdateOverlay();
+    }
+
+    private enum PlaneTiltConstraintAxis
+    {
+        None,
+        Horizontal,
+        Vertical,
     }
 }

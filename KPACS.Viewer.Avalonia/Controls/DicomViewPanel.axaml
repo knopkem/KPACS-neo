@@ -166,6 +166,16 @@
                VerticalAlignment="Center" HorizontalAlignment="Right"
                Margin="0,0,10,0" IsHitTestVisible="False" TextAlignment="Right" />
 
+         <TextBlock x:Name="OverlayTopCenter"
+             Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="22" FontWeight="Bold"
+             VerticalAlignment="Top" HorizontalAlignment="Center"
+             Margin="0,42,0,0" IsHitTestVisible="False" TextAlignment="Center" />
+
+         <TextBlock x:Name="OverlayBottomCenter"
+             Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="22" FontWeight="Bold"
+             VerticalAlignment="Bottom" HorizontalAlignment="Center"
+             Margin="0,0,0,28" IsHitTestVisible="False" TextAlignment="Center" />
+
         <TextBlock x:Name="OverlayBottomLeft"
                    Text="" Foreground="#FFFFDD00" FontFamily="Consolas" FontSize="13"
                    VerticalAlignment="Bottom" HorizontalAlignment="Left"

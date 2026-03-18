@@ -703,6 +703,27 @@ public partial class StudyViewerWindow : Window
         e.Handled = true;
     }
 
+    private void OnToolboxFlipHorizontalClick(object? sender, RoutedEventArgs e)
+    {
+        GetToolboxTargetPanel()?.ToggleHorizontalFlip();
+        SyncViewportToolboxState();
+        e.Handled = true;
+    }
+
+    private void OnToolboxFlipVerticalClick(object? sender, RoutedEventArgs e)
+    {
+        GetToolboxTargetPanel()?.ToggleVerticalFlip();
+        SyncViewportToolboxState();
+        e.Handled = true;
+    }
+
+    private void OnToolboxRotateClockwiseClick(object? sender, RoutedEventArgs e)
+    {
+        GetToolboxTargetPanel()?.RotateClockwise90();
+        SyncViewportToolboxState();
+        e.Handled = true;
+    }
+
     private void OnToolboxLinkedSyncToggleClick(object? sender, RoutedEventArgs e)
     {
         _linkedViewSyncEnabled = ToolboxLinkedSyncToggleButton.IsChecked != false;
@@ -745,10 +766,16 @@ public partial class StudyViewerWindow : Window
 
     private void SyncViewportToolboxState()
     {
+        DicomViewPanel? panel = GetToolboxTargetPanel();
         UpdateMeasurementToolButtons();
         UpdateActionModeButtons();
         Update3DCursorToolButton();
+        ToolboxFlipHorizontalButton.IsChecked = panel?.IsHorizontallyFlipped == true;
+        ToolboxFlipVerticalButton.IsChecked = panel?.IsVerticallyFlipped == true;
+        ToolboxRotateClockwiseButton.IsChecked = false;
     }
+
+    private DicomViewPanel? GetToolboxTargetPanel() => _openToolboxSlot?.Panel ?? _activeSlot?.Panel;
 
     private void CloseViewportToolbox()
     {

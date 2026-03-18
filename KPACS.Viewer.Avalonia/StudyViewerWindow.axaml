@@ -936,7 +936,7 @@
 
                         <WrapPanel ItemWidth="50" Orientation="Horizontal">
                             <ToggleButton x:Name="ToolboxNavigateButton" Classes="toolboxChip" Content="Navigate" Click="OnNavigateToolClick" />
-                            <ToggleButton x:Name="ToolboxTiltPlaneButton" Classes="toolboxChip" Content="Tilt plane" Click="OnTiltPlaneToolClick" ToolTip.Tip="Tilt the current volume plane with left drag while keeping wheel and middle drag available for front-to-back scrolling." />
+                            <ToggleButton x:Name="ToolboxTiltPlaneButton" Classes="toolboxChip" Content="Tilt plane" Click="OnTiltPlaneToolClick" ToolTip.Tip="Tilt the current volume plane with left drag. Hold Ctrl while dragging to lock to a strict horizontal or vertical 360° rotation; wheel and middle drag remain available for front-to-back scrolling." />
                             <ToggleButton x:Name="ToolboxPixelLensButton" Classes="toolboxChip" Content="Pixel lens" Tag="PixelLens" Click="OnMeasurementToolPopupClick" />
                             <ToggleButton x:Name="ToolboxLineButton" Classes="toolboxChip" Content="Line" Tag="Line" Click="OnMeasurementToolPopupClick" />
                             <ToggleButton x:Name="ToolboxAngleButton" Classes="toolboxChip" Content="Angle" Tag="Angle" Click="OnMeasurementToolPopupClick" />
@@ -973,6 +973,9 @@
                                        FontWeight="SemiBold" />
                             <WrapPanel ItemWidth="56" Orientation="Horizontal">
                                 <ToggleButton x:Name="ToolboxOverlayToggleButton" Classes="toolboxChip" Content="Overlay" Click="OnToolboxOverlayToggleClick" />
+                                <ToggleButton x:Name="ToolboxFlipHorizontalButton" Classes="toolboxChip" Content="Flip H" Click="OnToolboxFlipHorizontalClick" ToolTip.Tip="Flip the active viewport horizontally." />
+                                <ToggleButton x:Name="ToolboxFlipVerticalButton" Classes="toolboxChip" Content="Flip V" Click="OnToolboxFlipVerticalClick" ToolTip.Tip="Flip the active viewport vertically." />
+                                <ToggleButton x:Name="ToolboxRotateClockwiseButton" Classes="toolboxChip" Content="Rot 90°" Click="OnToolboxRotateClockwiseClick" ToolTip.Tip="Rotate the active viewport 90° clockwise." />
                             </WrapPanel>
                         </StackPanel>
 

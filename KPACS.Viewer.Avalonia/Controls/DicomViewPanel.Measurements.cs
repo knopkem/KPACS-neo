@@ -1840,7 +1840,11 @@ public partial class DicomViewPanel
         return true;
     }
 
-    private Point ImageToControlPoint(Point imagePoint) => new(_panX + (ImageToDisplayX(imagePoint.X) * _zoomFactor), _panY + (ImageToDisplayY(imagePoint.Y) * _zoomFactor));
+    private Point ImageToControlPoint(Point imagePoint)
+    {
+        Point displayPoint = ImageToDisplayPoint(imagePoint);
+        return new(_panX + (displayPoint.X * _zoomFactor), _panY + (displayPoint.Y * _zoomFactor));
+    }
 
     private Point ClampImagePoint(Point imagePoint) =>
         new(
@@ -2083,9 +2087,10 @@ public partial class DicomViewPanel
         return sortedValues[lower] + ((sortedValues[upper] - sortedValues[lower]) * fraction);
     }
 
-    private Point GetImagePointFromControl(Point controlPoint) => new(
-        DisplayToImageX((controlPoint.X - _panX) / _zoomFactor),
-        DisplayToImageY((controlPoint.Y - _panY) / _zoomFactor));
+    private Point GetImagePointFromControl(Point controlPoint) =>
+        DisplayToImagePoint(new Point(
+            (controlPoint.X - _panX) / _zoomFactor,
+            (controlPoint.Y - _panY) / _zoomFactor));
 
     private bool IsImagePointWithinBounds(Point imagePoint) =>
         imagePoint.X >= 0 && imagePoint.Y >= 0 && imagePoint.X < _imageWidth && imagePoint.Y < _imageHeight;
