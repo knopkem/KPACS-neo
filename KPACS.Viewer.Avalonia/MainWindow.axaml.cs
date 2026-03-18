@@ -1,6 +1,8 @@
 using System.Collections.ObjectModel;
 using System.Net.Sockets;
+using System.Runtime.InteropServices;
 using System.Text.Json;
+using Avalonia;
 using Avalonia.Media;
 using Avalonia.Controls;
 using Avalonia.Input;
@@ -60,6 +62,11 @@ public partial class MainWindow : Window
     private int _viewerWindowCount = 1;
     private readonly List<StudyViewerWindow> _managedViewerWindows = [];
 
+    public MainWindow()
+        : this(ResolveCurrentApp())
+    {
+    }
+
     public MainWindow(App app)
     {
         _app = app;
@@ -73,6 +80,7 @@ public partial class MainWindow : Window
         SeriesGrid.ItemsSource = _seriesRows;
         BackgroundJobsGrid.ItemsSource = _backgroundJobs;
         FilesystemTreeView.ItemsSource = _filesystemRoots;
+        FilesystemTreeView.AddHandler(InputElement.PointerPressedEvent, OnFilesystemTreePointerPressed, RoutingStrategies.Tunnel | RoutingStrategies.Bubble, handledEventsToo: true);
         RelayInboxGrid.ItemsSource = _relayInboxItems;
         ToastItemsControl.ItemsSource = _toastNotifications;
         _uiReady = true;
@@ -81,6 +89,12 @@ public partial class MainWindow : Window
         _app.NetworkSettingsService.SettingsChanged += OnNetworkSettingsChanged;
         Closed += OnMainWindowClosed;
         Opened += async (_, _) => await InitializeAsync();
+    }
+
+    private static App ResolveCurrentApp()
+    {
+        return Application.Current as App
+            ?? throw new InvalidOperationException("KPACS.Viewer App must be initialized before creating MainWindow.");
     }
 
     private async Task InitializeAsync()
@@ -1401,12 +1415,12 @@ public partial class MainWindow : Window
 
     private void OnFilesystemTreePointerPressed(object? sender, PointerPressedEventArgs e)
     {
-        if (e.Source is not Control sourceControl)
+        if (e.Source is not Visual sourceVisual)
         {
             return;
         }
 
-        TreeViewItem? item = sourceControl.FindAncestorOfType<TreeViewItem>();
+        TreeViewItem? item = sourceVisual.FindAncestorOfType<TreeViewItem>();
         if (item?.DataContext is FilesystemFolderNode node)
         {
             EnsureFilesystemNodeChildrenLoaded(node);
@@ -2843,11 +2857,11 @@ public partial class MainWindow : Window
         return false;
     }
 
-    private static FilesystemFolderNode BuildFilesystemFolderNode(string path)
+    private static FilesystemFolderNode BuildFilesystemFolderNode(string path, string? displayName = null)
     {
         var node = new FilesystemFolderNode
         {
-            DisplayName = Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar)) is { Length: > 0 } name ? name : path,
+            DisplayName = displayName ?? (Path.GetFileName(path.TrimEnd(Path.DirectorySeparatorChar)) is { Length: > 0 } name ? name : path),
             FullPath = path,
             ChildrenLoaded = false,
         };
@@ -2868,6 +2882,16 @@ public partial class MainWindow : Window
             FullPath = string.Empty,
             ChildrenLoaded = true,
         };
+
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.OSX))
+        {
+            foreach (FilesystemFolderNode child in GetMacComputerRootNodes())
+            {
+                node.Children.Add(child);
+            }
+
+            return node;
+        }
 
         foreach (DriveInfo drive in DriveInfo.GetDrives().OrderBy(drive => drive.Name))
         {
@@ -2903,6 +2927,50 @@ public partial class MainWindow : Window
         }
 
         return node;
+    }
+
+    private static IEnumerable<FilesystemFolderNode> GetMacComputerRootNodes()
+    {
+        var results = new List<FilesystemFolderNode>();
+        var seenPaths = new HashSet<string>(StringComparer.Ordinal);
+
+        AddMacRootNode(results, seenPaths, "/Volumes", "Volumes");
+
+        if (Directory.Exists("/Volumes"))
+        {
+            try
+            {
+                foreach (string volumePath in Directory.EnumerateDirectories("/Volumes")
+                    .Where(path => !Path.GetFileName(path).StartsWith(".", StringComparison.Ordinal))
+                    .OrderBy(path => path, StringComparer.OrdinalIgnoreCase))
+                {
+                    string volumeName = Path.GetFileName(volumePath.TrimEnd(Path.DirectorySeparatorChar));
+                    AddMacRootNode(results, seenPaths, volumePath, volumeName);
+                }
+            }
+            catch
+            {
+            }
+        }
+
+        string homePath = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+        if (!string.IsNullOrWhiteSpace(homePath))
+        {
+            AddMacRootNode(results, seenPaths, homePath, $"Home ({homePath})");
+        }
+
+        AddMacRootNode(results, seenPaths, "/", "/");
+        return results;
+    }
+
+    private static void AddMacRootNode(List<FilesystemFolderNode> results, HashSet<string> seenPaths, string path, string displayName)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !Directory.Exists(path) || !seenPaths.Add(path))
+        {
+            return;
+        }
+
+        results.Add(BuildFilesystemFolderNode(path, displayName));
     }
 
     private static FilesystemFolderNode CreatePlaceholderNode()

@@ -7,8 +7,24 @@ obj/
 *.log
 *.vs/
 
+# IDE / editor
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Environment
+.env
+.env.*
+
+# OS
+Thumbs.db
+
 # Retired local-only project
 KPACS.Viewer/
+KPACS.sln
 
 # Local published release output
 release/
