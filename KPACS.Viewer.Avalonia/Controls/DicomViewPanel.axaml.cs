@@ -1270,18 +1270,32 @@ public partial class DicomViewPanel : UserControl
     }
 
     /// <summary>
-    /// Renders at fast native resolution for immediate feedback, then schedules
-    /// a deferred high-quality re-render after a short idle delay.
-    /// Use during continuous interactions (scroll, window drag, zoom drag).
+    /// Renders the image during continuous interactions (scroll, tilt, window drag, zoom).
+    /// When OpenCL is available (powerful workstation), renders at sharp display resolution
+    /// immediately — the hardware is fast enough. Otherwise falls back to rendering at native
+    /// resolution first with a deferred sharp re-render after an idle delay.
     /// </summary>
     private void RenderImageFastThenSharp()
     {
+        if (VolumeComputeBackend.IsOpenClAvailable)
+        {
+            // Powerful hardware: render sharp immediately — no deferred pass needed.
+            RenderImage(sharp: true);
+            return;
+        }
+
         RenderImage(sharp: false);
         ScheduleSharpRender();
     }
 
     private void ScheduleSharpRender()
     {
+        // GPU workstation already renders sharp during interaction — no deferred pass needed.
+        if (VolumeComputeBackend.IsOpenClAvailable)
+        {
+            return;
+        }
+
         if (_sharpRenderTimer is null)
         {
             _sharpRenderTimer = new DispatcherTimer { Interval = TimeSpan.FromMilliseconds(150) };

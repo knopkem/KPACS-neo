@@ -692,6 +692,12 @@ public static class VolumeReslicer
         double thicknessMm,
         VolumeProjectionMode mode)
     {
+        // Try GPU-accelerated oblique rendering first.
+        if (VolumeComputeBackend.TryRenderObliqueProjection(volume, plane, thicknessMm, mode, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
         int width = Math.Max(1, plane.Width);
         int height = Math.Max(1, plane.Height);
         short[] pixels = new short[width * height];

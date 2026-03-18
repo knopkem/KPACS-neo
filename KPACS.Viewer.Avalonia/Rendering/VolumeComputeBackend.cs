@@ -195,6 +195,29 @@ public static class VolumeComputeBackend
         return false;
     }
 
+    public static bool TryRenderObliqueProjection(
+        SeriesVolume volume,
+        VolumeSlicePlane plane,
+        double thicknessMm,
+        VolumeProjectionMode mode,
+        out ReslicedImage image)
+    {
+        if (Preference == VolumeComputePreference.CpuOnly)
+        {
+            image = new ReslicedImage();
+            return false;
+        }
+
+        OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
+        if (renderer is not null && renderer.TryRenderObliqueProjection(volume, plane, thicknessMm, mode, out image))
+        {
+            return true;
+        }
+
+        image = new ReslicedImage();
+        return false;
+    }
+
     private static RuntimeState CreateRuntime()
     {
         try
@@ -741,6 +764,145 @@ __kernel void RenderDvr(
     float finalValue = minValue + finalNormalized * range;
     output[row * outputWidth + column] = (short)clamp((int)round(finalValue), -32768, 32767);
 }
+
+// ===========================================================================================
+// Oblique slab projection kernel — arbitrary plane orientation with trilinear interpolation.
+// Supports MPR (avg=0), MIP (max=1), MinIP (min=2), MpVrt (compositing=3).
+//
+// The plane is defined in patient space by center, row, column, and normal vectors.
+// Patient-to-voxel conversion uses the precomputed inverse transform:
+//   voxel = invOrigin + invRow * px + invCol * py + invNormal * pz
+// where px/py/pz are the patient-space coordinates of the sample point.
+// ===========================================================================================
+__kernel void RenderObliqueSlab(
+    __global const short* volume,
+    int sizeX,
+    int sizeY,
+    int sizeZ,
+    float minValue,
+    float maxValue,
+    // Plane geometry (patient space)
+    float centerX, float centerY, float centerZ,
+    float rowDirX, float rowDirY, float rowDirZ,
+    float colDirX, float colDirY, float colDirZ,
+    float normalX, float normalY, float normalZ,
+    float pixelSpacingX,
+    float pixelSpacingY,
+    // Slab depth sampling
+    float stepMm,
+    float halfThicknessMm,
+    int sampleCount,
+    // Patient-to-voxel affine transform components
+    // For a patient point P, voxel = (dot(P - origin, rowDir) / spacingX,
+    //                                  dot(P - origin, colDir) / spacingY,
+    //                                  dot(P - origin, normal) / spacingZ)
+    // We pass: p2v_originX/Y/Z (= volume.Origin),
+    //          p2v_rowX/Y/Z / spacingX, p2v_colX/Y/Z / spacingY, p2v_normX/Y/Z / spacingZ
+    float p2vOriginX, float p2vOriginY, float p2vOriginZ,
+    float p2vRowDivSX, float p2vRowDivSY, float p2vRowDivSZ,
+    float p2vColDivSX, float p2vColDivSY, float p2vColDivSZ,
+    float p2vNrmDivSX, float p2vNrmDivSY, float p2vNrmDivSZ,
+    int mode,
+    int outputWidth,
+    int outputHeight,
+    __global short* output)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    if (x >= outputWidth || y >= outputHeight)
+    {
+        return;
+    }
+
+    float halfWidthMm = (float)(outputWidth - 1) * pixelSpacingX * 0.5f;
+    float halfHeightMm = (float)(outputHeight - 1) * pixelSpacingY * 0.5f;
+    float uOffset = (float)x * pixelSpacingX - halfWidthMm;
+    float vOffset = (float)y * pixelSpacingY - halfHeightMm;
+
+    float3 center = (float3)(centerX, centerY, centerZ);
+    float3 rowDir = (float3)(rowDirX, rowDirY, rowDirZ);
+    float3 colDir = (float3)(colDirX, colDirY, colDirZ);
+    float3 nrmDir = (float3)(normalX, normalY, normalZ);
+    float3 p2vOrigin = (float3)(p2vOriginX, p2vOriginY, p2vOriginZ);
+    float3 p2vRow = (float3)(p2vRowDivSX, p2vRowDivSY, p2vRowDivSZ);
+    float3 p2vCol = (float3)(p2vColDivSX, p2vColDivSY, p2vColDivSZ);
+    float3 p2vNrm = (float3)(p2vNrmDivSX, p2vNrmDivSY, p2vNrmDivSZ);
+
+    float3 basePoint = center + rowDir * uOffset + colDir * vOffset;
+    float range = fmax(maxValue - minValue, 1.0f);
+
+    float resultValue = (mode == 2) ? MAXFLOAT : -MAXFLOAT;
+    float accumulator = 0.0f;
+    float alpha = 0.0f;
+    int validCount = 0;
+
+    for (int si = 0; si < sampleCount; si++)
+    {
+        float depthOffset = (sampleCount == 1)
+            ? 0.0f
+            : -halfThicknessMm + (float)si * stepMm;
+        float3 patientPoint = basePoint + nrmDir * depthOffset;
+
+        // Patient-to-voxel transform
+        float3 rel = patientPoint - p2vOrigin;
+        float vx = dot(rel, p2vRow);
+        float vy = dot(rel, p2vCol);
+        float vz = dot(rel, p2vNrm);
+
+        int valid = 0;
+        float value = sample_trilinear(volume, sizeX, sizeY, sizeZ, vx, vy, vz, &valid);
+        if (valid == 0)
+        {
+            continue;
+        }
+
+        validCount++;
+        if (mode == 0)
+        {
+            accumulator += value;
+        }
+        else if (mode == 1)
+        {
+            resultValue = fmax(resultValue, value);
+        }
+        else if (mode == 2)
+        {
+            resultValue = fmin(resultValue, value);
+        }
+        else
+        {
+            float normalized = clamp_float((value - minValue) / range, 0.0f, 1.0f);
+            float opacity = normalized <= 0.05f ? 0.0f : fmin(0.85f, native_powr(fmax(normalized, 1.0e-6f), 1.6f) * 0.35f);
+            float contribution = opacity * (1.0f - alpha);
+            accumulator += value * contribution;
+            alpha += contribution;
+            if (alpha >= 0.995f)
+            {
+                break;
+            }
+        }
+    }
+
+    float finalValue;
+    if (validCount == 0)
+    {
+        finalValue = minValue;
+    }
+    else if (mode == 0)
+    {
+        finalValue = accumulator / (float)validCount;
+    }
+    else if (mode == 1 || mode == 2)
+    {
+        finalValue = resultValue;
+    }
+    else
+    {
+        finalValue = alpha > 1.0e-4f ? accumulator / alpha : 0.0f;
+    }
+
+    output[y * outputWidth + x] = (short)clamp((int)round(finalValue), -32768, 32767);
+}
 ";
 
     private readonly object _sync = new();
@@ -749,6 +911,7 @@ __kernel void RenderDvr(
     private readonly OpenClProgram _program;
     private readonly OpenClKernel _projectionKernel;
     private readonly OpenClKernel _dvrKernel;
+    private readonly OpenClKernel _obliqueKernel;
     private readonly OpenClDevice _device;
     private readonly int _localSizeX;
     private readonly int _localSizeY;
@@ -772,6 +935,7 @@ __kernel void RenderDvr(
         OpenClProgram program,
         OpenClKernel projectionKernel,
         OpenClKernel dvrKernel,
+        OpenClKernel obliqueKernel,
         OpenClDevice device,
         VolumeComputeBackendStatus status,
         uint computeUnits,
@@ -782,6 +946,7 @@ __kernel void RenderDvr(
         _program = program;
         _projectionKernel = projectionKernel;
         _dvrKernel = dvrKernel;
+        _obliqueKernel = obliqueKernel;
         _device = device;
         Status = status;
         _computeUnits = computeUnits;
@@ -852,6 +1017,9 @@ __kernel void RenderDvr(
                         OpenClKernel dvrKernel = Cl.CreateKernel(program, "RenderDvr", out error);
                         ThrowOnError(error, "Failed to create OpenCL DVR kernel.");
 
+                        OpenClKernel obliqueKernel = Cl.CreateKernel(program, "RenderObliqueSlab", out error);
+                        ThrowOnError(error, "Failed to create OpenCL oblique slab kernel.");
+
                         uint computeUnits = SafeCast<uint>(Cl.GetDeviceInfo(device, DeviceInfo.MaxComputeUnits, out _));
                         ulong maxWorkGroupSize = SafeCast<ulong>(Cl.GetDeviceInfo(device, DeviceInfo.MaxWorkGroupSize, out _));
                         ulong globalMem = SafeCast<ulong>(Cl.GetDeviceInfo(device, DeviceInfo.GlobalMemSize, out _));
@@ -863,6 +1031,7 @@ __kernel void RenderDvr(
                             program,
                             projectionKernel,
                             dvrKernel,
+                            obliqueKernel,
                             device,
                             new VolumeComputeBackendStatus(
                                 VolumeComputeBackendKind.OpenCl,
@@ -966,6 +1135,130 @@ __kernel void RenderDvr(
         }
     }
 
+    public bool TryRenderObliqueProjection(
+        SeriesVolume volume,
+        VolumeSlicePlane plane,
+        double thicknessMm,
+        VolumeProjectionMode mode,
+        out ReslicedImage image)
+    {
+        image = new ReslicedImage();
+        if (mode == VolumeProjectionMode.Dvr)
+        {
+            return false;
+        }
+
+        lock (_sync)
+        {
+            try
+            {
+                EnsureVolumeBuffer(volume);
+                if (_cachedVolumeBuffer is null)
+                {
+                    _lastError = "Volume buffer allocation returned null.";
+                    return false;
+                }
+
+                int width = Math.Max(1, plane.Width);
+                int height = Math.Max(1, plane.Height);
+                int outputLength = width * height;
+                IMem<short> outputBuffer = EnsureProjectionOutputBuffer(outputLength);
+
+                // Compute slab sampling parameters (matches CPU RenderObliqueSlab logic)
+                double stepMm = Math.Max(0.1, plane.SliceSpacingMm);
+                double safeThickness = Math.Max(0, thicknessMm);
+                int sampleCount = safeThickness <= stepMm * 0.5
+                    ? 1
+                    : Math.Max(1, (int)Math.Round(safeThickness / stepMm) + 1);
+                if (sampleCount % 2 == 0)
+                {
+                    sampleCount++;
+                }
+                double halfThicknessMm = stepMm * (sampleCount - 1) * 0.5;
+
+                // Patient-to-voxel transform: voxel = (dot(P - origin, rowDir) / spacingX, ...)
+                // Pre-divide direction vectors by spacing so the kernel just does dot products.
+                double invSX = volume.SpacingX > 0 ? 1.0 / volume.SpacingX : 1.0;
+                double invSY = volume.SpacingY > 0 ? 1.0 / volume.SpacingY : 1.0;
+                double invSZ = volume.SpacingZ > 0 ? 1.0 / volume.SpacingZ : 1.0;
+                Models.Vector3D volRow = volume.RowDirection;
+                Models.Vector3D volCol = volume.ColumnDirection;
+                Models.Vector3D volNrm = volume.Normal;
+                Models.Vector3D volOrigin = volume.Origin;
+                Models.Vector3D planeCenter = plane.Center;
+                Models.Vector3D planeRow = plane.RowDirection;
+                Models.Vector3D planeCol = plane.ColumnDirection;
+                Models.Vector3D planeNormal = plane.Normal;
+
+                uint argIdx = 0;
+                SetKernelArgBuffer(_obliqueKernel, argIdx++, _cachedVolumeBuffer);
+                SetKernelArgValue(_obliqueKernel, argIdx++, volume.SizeX);
+                SetKernelArgValue(_obliqueKernel, argIdx++, volume.SizeY);
+                SetKernelArgValue(_obliqueKernel, argIdx++, volume.SizeZ);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)volume.MinValue);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)volume.MaxValue);
+                // Plane geometry
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeCenter.X);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeCenter.Y);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeCenter.Z);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeRow.X);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeRow.Y);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeRow.Z);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeCol.X);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeCol.Y);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeCol.Z);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeNormal.X);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeNormal.Y);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)planeNormal.Z);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)plane.PixelSpacingX);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)plane.PixelSpacingY);
+                // Depth sampling
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)stepMm);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)halfThicknessMm);
+                SetKernelArgValue(_obliqueKernel, argIdx++, sampleCount);
+                // Patient-to-voxel transform
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)volOrigin.X);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)volOrigin.Y);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)volOrigin.Z);
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volRow.X * invSX));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volRow.Y * invSX));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volRow.Z * invSX));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volCol.X * invSY));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volCol.Y * invSY));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volCol.Z * invSY));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volNrm.X * invSZ));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volNrm.Y * invSZ));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (float)(volNrm.Z * invSZ));
+                SetKernelArgValue(_obliqueKernel, argIdx++, (int)mode);
+                SetKernelArgValue(_obliqueKernel, argIdx++, width);
+                SetKernelArgValue(_obliqueKernel, argIdx++, height);
+                SetKernelArgBuffer(_obliqueKernel, argIdx++, outputBuffer);
+
+                Execute2D(_obliqueKernel, width, height);
+                short[] pixels = ReadBuffer(outputBuffer, outputLength);
+                UpdateKernelProfilingTime();
+                image = new ReslicedImage
+                {
+                    Pixels = pixels,
+                    Width = width,
+                    Height = height,
+                    PixelSpacingX = plane.PixelSpacingX,
+                    PixelSpacingY = plane.PixelSpacingY,
+                    SpatialMetadata = plane.CreateSpatialMetadata(volume),
+                    RenderBackendLabel = Status.DisplayName,
+                };
+                _lastError = null;
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _lastError = $"OpenCL oblique projection failed: {ex.Message}";
+                image = new ReslicedImage();
+                return false;
+            }
+        }
+    }
+
     public bool TryRenderDvrView(
         SeriesVolume volume,
         VolumeRenderState state,
@@ -1059,6 +1352,7 @@ __kernel void RenderDvr(
         ReleaseMem(_cachedDvrOutputBuffer);
         ReleaseMem(_cachedProjectionOutputBuffer);
         ReleaseMem(_cachedVolumeBuffer);
+        Cl.ReleaseKernel(_obliqueKernel);
         Cl.ReleaseKernel(_dvrKernel);
         Cl.ReleaseKernel(_projectionKernel);
         Cl.ReleaseProgram(_program);

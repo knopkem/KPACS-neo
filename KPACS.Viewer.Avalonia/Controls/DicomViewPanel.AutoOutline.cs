@@ -161,9 +161,12 @@ public partial class DicomViewPanel
             AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, $"Auto 3D ROI created {contours.Length} contour slice(s)."));
             return true;
         }
-        catch (Exception)
+        catch (Exception ex)
         {
-            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, ClampImagePoint(imagePoint), sensitivityLevel, false, "Auto 3D ROI failed due to an internal error."));
+            Exception root = ex is AggregateException agg ? agg.Flatten().InnerExceptions.FirstOrDefault() ?? ex : ex;
+            string detail = $"{root.GetType().Name}: {root.Message}";
+            System.Diagnostics.Debug.WriteLine($"[AutoOutline] {detail}\n{root.StackTrace}");
+            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, ClampImagePoint(imagePoint), sensitivityLevel, false, $"Auto 3D ROI failed ({detail})"));
             return false;
         }
         finally
@@ -3006,7 +3009,7 @@ public partial class DicomViewPanel
 
     private readonly record struct SlicePropagationCandidateResult(Point[] Polygon, AutoOutlineIntensitySignature Signature, double Score)
     {
-        public bool IsValid => Polygon.Length >= 3 && Signature.IsValid;
+        public bool IsValid => Polygon is { Length: >= 3 } && Signature.IsValid;
     }
 
     private readonly record struct VolumeSliceContourCandidate(AutoOutlineMask Mask, Point[] ImagePoints, Point Centroid);
