@@ -132,6 +132,17 @@ public sealed class VolumeTransferFunction
         return opacity * modulation;
     }
 
+    public float[] CreateOpacityLutSnapshot()
+    {
+        float[] lut = new float[_opacityLut.Length];
+        for (int i = 0; i < _opacityLut.Length; i++)
+        {
+            lut[i] = (float)_opacityLut[i];
+        }
+
+        return lut;
+    }
+
     // ------------------------------------------------------------------
     //  Factory methods — CT Presets
     // ------------------------------------------------------------------

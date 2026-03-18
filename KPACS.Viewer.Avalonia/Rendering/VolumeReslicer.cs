@@ -58,6 +58,9 @@ public sealed class ReslicedImage
 
     /// <summary>Spatial metadata for this slice (for linked-view synchronization).</summary>
     public DicomSpatialMetadata? SpatialMetadata { get; init; }
+
+    /// <summary>Rendering backend that produced this image.</summary>
+    public string RenderBackendLabel { get; init; } = "CPU";
 }
 
 /// <summary>
@@ -87,9 +90,10 @@ public static class VolumeReslicer
             ComputeProjectedBounds(volume, volumeCenter, row, column, normal);
 
         double sliceSpacing = ComputeObliqueSliceSpacing(volume, normal);
+        double scrollStep = Math.Max(0.1, Math.Min(sliceSpacing, GetMinimumVolumeSpacing(volume)));
         double depthRange = Math.Max(0, maxDepthMm - minDepthMm);
-        int sliceCount = Math.Max(1, (int)Math.Floor(depthRange / Math.Max(0.1, sliceSpacing)) + 1);
-        double scrollStep = sliceCount > 1 ? depthRange / (sliceCount - 1) : Math.Max(0.1, sliceSpacing);
+        int sliceCount = Math.Max(1, (int)Math.Floor(depthRange / scrollStep) + 1);
+        scrollStep = sliceCount > 1 ? depthRange / (sliceCount - 1) : scrollStep;
         double halfExtentMm = GetVolumeHalfDiagonalMm(volume);
         int width = Math.Max(1, (int)Math.Ceiling((halfExtentMm * 2.0) / Math.Max(0.1, pixelSpacingX)) + 1);
         int height = Math.Max(1, (int)Math.Ceiling((halfExtentMm * 2.0) / Math.Max(0.1, pixelSpacingY)) + 1);
@@ -403,6 +407,11 @@ public static class VolumeReslicer
 
         int midSlice = (startSlice + endSlice) / 2;
         ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        if (VolumeComputeBackend.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, VolumeProjectionMode.MipPr, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
         short[] mipPixels = new short[reference.Pixels.Length];
 
         Parallel.For(0, reference.Height, row =>
@@ -446,6 +455,11 @@ public static class VolumeReslicer
 
         int midSlice = (startSlice + endSlice) / 2;
         ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        if (VolumeComputeBackend.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, VolumeProjectionMode.MinPr, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
         short[] minPixels = new short[reference.Pixels.Length];
 
         Parallel.For(0, reference.Height, row =>
@@ -489,6 +503,11 @@ public static class VolumeReslicer
 
         int midSlice = (startSlice + endSlice) / 2;
         ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        if (VolumeComputeBackend.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, VolumeProjectionMode.Mpr, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
         short[] averaged = new short[reference.Pixels.Length];
         int projectionCount = Math.Max(1, endSlice - startSlice + 1);
 
@@ -533,6 +552,11 @@ public static class VolumeReslicer
 
         int midSlice = (startSlice + endSlice) / 2;
         ReslicedImage reference = ExtractSlice(volume, orientation, midSlice);
+        if (VolumeComputeBackend.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, VolumeProjectionMode.MpVrt, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
         short[] projected = new short[reference.Pixels.Length];
         double range = Math.Max(1, volume.MaxValue - volume.MinValue);
 
@@ -594,6 +618,20 @@ public static class VolumeReslicer
             orientation,
             reference.Width,
             reference.Height);
+        if (VolumeComputeBackend.TryRenderDvrView(volume, state, VolumeTransferFunction.CreateDefault(volume.MinValue, volume.MaxValue), out ReslicedImage gpuImage))
+        {
+            return new ReslicedImage
+            {
+                Pixels = gpuImage.Pixels,
+                Width = gpuImage.Width,
+                Height = gpuImage.Height,
+                PixelSpacingX = reference.PixelSpacingX,
+                PixelSpacingY = reference.PixelSpacingY,
+                SpatialMetadata = reference.SpatialMetadata,
+                RenderBackendLabel = gpuImage.RenderBackendLabel,
+            };
+        }
+
         VolumeGradientVolume gradients = GradientCache.GetValue(volume, static source => VolumeGradientVolume.Create(source));
         VolumeTransferFunction tf = VolumeTransferFunction.CreateDefault(volume.MinValue, volume.MaxValue);
 
@@ -616,8 +654,13 @@ public static class VolumeReslicer
         VolumeRenderState state,
         VolumeTransferFunction? transferFunction = null)
     {
-        VolumeGradientVolume gradients = GradientCache.GetValue(volume, static source => VolumeGradientVolume.Create(source));
         transferFunction ??= VolumeTransferFunction.CreateDefault(volume.MinValue, volume.MaxValue);
+        if (VolumeComputeBackend.TryRenderDvrView(volume, state, transferFunction, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
+        VolumeGradientVolume gradients = GradientCache.GetValue(volume, static source => VolumeGradientVolume.Create(source));
         return VolumeRayCaster.RenderView(volume, gradients, transferFunction, state);
     }
 
@@ -822,6 +865,14 @@ public static class VolumeReslicer
         double extentY = Math.Max(0, (volume.SizeY - 1) * spacingY);
         double extentZ = Math.Max(0, (volume.SizeZ - 1) * spacingZ);
         return Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ) * 0.5;
+    }
+
+    private static double GetMinimumVolumeSpacing(SeriesVolume volume)
+    {
+        double spacingX = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
+        double spacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double spacingZ = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
+        return Math.Max(0.1, Math.Min(spacingX, Math.Min(spacingY, spacingZ)));
     }
 
     private static double ComputeObliqueSliceSpacing(SeriesVolume volume, Vector3D normal)

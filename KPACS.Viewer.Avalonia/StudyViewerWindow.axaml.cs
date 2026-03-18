@@ -529,15 +529,18 @@ public partial class StudyViewerWindow : Window
         if (slot.Volume is not null)
         {
             ApplySlotOverlayStudyInfo(slot);
-            SliceOrientation orientation = slot.Panel.BoundVolume == slot.Volume
+            bool isCurrentBoundVolume = slot.Panel.BoundVolume == slot.Volume;
+            SliceOrientation orientation = isCurrentBoundVolume
                 ? slot.Panel.VolumeOrientation
                 : SliceOrientation.Axial;
-            int sliceCount = VolumeReslicer.GetSliceCount(slot.Volume, orientation);
+            int sliceCount = isCurrentBoundVolume
+                ? Math.Max(1, slot.Panel.VolumeSliceCount)
+                : VolumeReslicer.GetSliceCount(slot.Volume, orientation);
             slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, Math.Max(0, sliceCount - 1));
             slot.Panel.StackItemCount = sliceCount;
 
             DicomViewPanel.DisplayState? previousState = slot.ViewState;
-            if (slot.Panel.BoundVolume != slot.Volume)
+            if (!isCurrentBoundVolume)
             {
                 slot.Panel.BindVolume(slot.Volume, orientation, slot.InstanceIndex);
             }
@@ -3770,6 +3773,10 @@ public partial class StudyViewerWindow : Window
                 _renderingPanelPinned = false;
                 _renderingPanelVisible = false;
                 _renderingPanelOffset = new Point(settings.RenderingPanelOffsetX, settings.RenderingPanelOffsetY);
+                if (Enum.TryParse(settings.RenderingBackendPreference, ignoreCase: true, out VolumeComputePreference renderingBackendPreference))
+                {
+                    _renderingBackendPreference = renderingBackendPreference;
+                }
                 _reportDebugEnabled = settings.ReportDebugEnabled;
                 _customAnatomyRegions.Clear();
                 if (settings.CustomAnatomyRegions is not null)
@@ -3846,6 +3853,8 @@ public partial class StudyViewerWindow : Window
                 {
                     _currentLayoutSpec = persistedLayout;
                 }
+
+                ApplyRenderingBackendPreference(rerenderLoadedVolumes: false);
             }
         }
         catch
@@ -3853,6 +3862,8 @@ public partial class StudyViewerWindow : Window
             _linkedViewSyncEnabled = true;
             _savedCustomLayouts = [];
             _currentLayoutSpec = [.. defaultLayout];
+            _renderingBackendPreference = VolumeComputePreference.Auto;
+            ApplyRenderingBackendPreference(rerenderLoadedVolumes: false);
         }
     }
 
@@ -3889,6 +3900,7 @@ public partial class StudyViewerWindow : Window
                 RenderingPanelVisible = _renderingPanelVisible,
                 RenderingPanelOffsetX = _renderingPanelOffset.X,
                 RenderingPanelOffsetY = _renderingPanelOffset.Y,
+                RenderingBackendPreference = _renderingBackendPreference.ToString(),
                 ReportDebugEnabled = _reportDebugEnabled,
                 CustomAnatomyRegions = [.. _customAnatomyRegions],
                 CustomAnatomyStructuresByRegion = _customAnatomyStructuresByRegion.ToDictionary(
@@ -4134,6 +4146,7 @@ public partial class StudyViewerWindow : Window
         public bool RenderingPanelVisible { get; init; }
         public double RenderingPanelOffsetX { get; init; }
         public double RenderingPanelOffsetY { get; init; }
+        public string? RenderingBackendPreference { get; init; }
         public bool ReportDebugEnabled { get; init; }
         public List<string>? CustomAnatomyRegions { get; init; }
         public Dictionary<string, List<string>>? CustomAnatomyStructuresByRegion { get; init; }

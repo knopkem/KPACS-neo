@@ -3,7 +3,9 @@ using Avalonia.Controls;
 using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Media;
+using Avalonia.Threading;
 using KPACS.Viewer.Controls;
+using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
 
 namespace KPACS.Viewer;
@@ -66,6 +68,12 @@ public partial class StudyViewerWindow
         new("Flow", (int)ColorScheme.Flow),
     ];
 
+    private static readonly WorkspaceChoice<VolumeComputePreference>[] s_renderingBackendOptions =
+    [
+        new("GPU/OpenCL", VolumeComputePreference.Auto),
+        new("CPU", VolumeComputePreference.CpuOnly),
+    ];
+
     private Point _renderingPanelOffset;
     private bool _renderingPanelPinned;
     private bool _renderingPanelVisible;
@@ -73,6 +81,8 @@ public partial class StudyViewerWindow
     private IPointer? _renderingPanelDragPointer;
     private Point _renderingPanelDragStart;
     private Point _renderingPanelDragStartOffset;
+    private string _renderingBenchmarkSummary = string.Empty;
+    private VolumeComputePreference _renderingBackendPreference = VolumeComputePreference.Auto;
 
     private void RefreshRenderingWorkspacePanel(bool forceVisible = false)
     {
@@ -104,6 +114,12 @@ public partial class StudyViewerWindow
                 ? "This viewport is loaded, but no 3D volume is available yet. Select a CT/MR volume viewport to use DVR controls."
                 : "Select a viewport with a loaded volume to configure 3D rendering.";
         RenderingWorkspaceTargetText.Text = BuildRenderingWorkspaceTargetText(slot, hasImage, hasVolume);
+        RenderingWorkspaceBackendText.Text = BuildRenderingBackendText(panel, hasVolume, _renderingBackendPreference);
+        RenderingWorkspaceBenchmarkText.Text = hasVolume
+            ? string.IsNullOrWhiteSpace(_renderingBenchmarkSummary)
+                ? "Run the benchmark to compare the current view on CPU and OpenCL. Warm-up runs are excluded from the timing."
+                : _renderingBenchmarkSummary
+            : "Benchmark is available only for loaded volume viewports.";
 
         _isRefreshingRenderingWorkspaceUi = true;
         try
@@ -113,6 +129,8 @@ public partial class StudyViewerWindow
             RenderingWorkspaceShadingCombo.IsEnabled = hasVolume;
             RenderingWorkspaceLightDirectionCombo.IsEnabled = hasVolume;
             RenderingWorkspaceColorMapCombo.IsEnabled = _slots.Count > 0;
+            RenderingWorkspaceBackendCombo.IsEnabled = true;
+            RenderingWorkspaceBenchmarkButton.IsEnabled = hasVolume;
 
             RenderingWorkspaceProjectionCombo.SelectedItem = hasVolume
                 ? s_renderingProjectionOptions.FirstOrDefault(option => option.Value == panel!.ProjectionMode)
@@ -126,6 +144,7 @@ public partial class StudyViewerWindow
             RenderingWorkspaceLightDirectionCombo.SelectedItem = hasVolume
                 ? s_renderingLightDirectionOptions.FirstOrDefault(option => option.Value == panel!.DvrLightDirectionPreset)
                 : null;
+            RenderingWorkspaceBackendCombo.SelectedItem = s_renderingBackendOptions.FirstOrDefault(option => option.Value == _renderingBackendPreference);
             RenderingWorkspaceColorMapCombo.SelectedItem = s_renderingColorMapOptions.FirstOrDefault(option => option.Value == _selectedColorScheme);
         }
         finally
@@ -145,6 +164,8 @@ public partial class StudyViewerWindow
         RenderingPanelSummaryText.Text = string.Empty;
         RenderingPanelHintText.Text = string.Empty;
         RenderingWorkspaceTargetText.Text = string.Empty;
+        RenderingWorkspaceBackendText.Text = string.Empty;
+        RenderingWorkspaceBenchmarkText.Text = string.Empty;
     }
 
     private void EnsureRenderingWorkspaceOptionSources()
@@ -152,6 +173,11 @@ public partial class StudyViewerWindow
         if (RenderingWorkspaceProjectionCombo.ItemsSource is null)
         {
             RenderingWorkspaceProjectionCombo.ItemsSource = s_renderingProjectionOptions;
+        }
+
+        if (RenderingWorkspaceBackendCombo.ItemsSource is null)
+        {
+            RenderingWorkspaceBackendCombo.ItemsSource = s_renderingBackendOptions;
         }
 
         if (RenderingWorkspaceDvrPresetCombo.ItemsSource is null)
@@ -195,7 +221,7 @@ public partial class StudyViewerWindow
         string dvrSuffix = panel.IsDvrMode
             ? $" · TF {GetDvrPresetLabel(panel.DvrPreset)} · Shade {GetDvrShadingLabel(panel.DvrShadingPreset)} · Light {GetDvrLightDirectionLabel(panel.DvrLightDirectionPreset)}"
             : string.Empty;
-        return $"Active viewport · {panel.ProjectionModeLabel}{dvrSuffix}";
+        return $"Active viewport · {panel.ProjectionModeLabel}{dvrSuffix} · Backend {panel.LastRenderBackendLabel}";
     }
 
     private static string BuildRenderingWorkspaceTargetText(ViewportSlot? slot, bool hasImage, bool hasVolume)
@@ -224,11 +250,30 @@ public partial class StudyViewerWindow
         return $"Target viewport: {seriesLabel}{modality} · {dataKind}";
     }
 
+    private static string BuildRenderingBackendText(DicomViewPanel? panel, bool hasVolume, VolumeComputePreference preference)
+    {
+        VolumeComputeBackendStatus status = VolumeComputeBackend.CurrentStatus;
+        string runtime = $"Selection: {GetRenderingBackendPreferenceLabel(preference)} · Runtime: {status.DisplayName} · Device: {status.DeviceName}";
+        string detail = string.IsNullOrWhiteSpace(status.Detail) ? string.Empty : $" · {status.Detail}";
+        if (!hasVolume || panel is null)
+        {
+            return runtime + detail;
+        }
+
+        return $"Last frame: {panel.LastRenderBackendLabel} · {runtime}{detail}";
+    }
+
     private static string GetDvrPresetLabel(TransferFunctionPreset preset) => VolumeRenderingPresetCatalog.GetLabel(preset);
 
     private static string GetDvrShadingLabel(VolumeShadingPreset preset) => VolumeRenderingPresetCatalog.GetShadingLabel(preset);
 
     private static string GetDvrLightDirectionLabel(VolumeLightDirectionPreset preset) => VolumeRenderingPresetCatalog.GetLightDirectionLabel(preset);
+
+    private static string GetRenderingBackendPreferenceLabel(VolumeComputePreference preference) => preference switch
+    {
+        VolumeComputePreference.CpuOnly => "CPU",
+        _ => "GPU/OpenCL",
+    };
 
     private void OnWorkspaceRenderingClick(object? sender, RoutedEventArgs e)
     {
@@ -262,6 +307,29 @@ public partial class StudyViewerWindow
 
         panel.SetProjectionMode(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: true);
+    }
+
+    private void OnRenderingWorkspaceBackendSelectionChanged(object? sender, SelectionChangedEventArgs e)
+    {
+        if (_isRefreshingRenderingWorkspaceUi)
+        {
+            return;
+        }
+
+        if (RenderingWorkspaceBackendCombo.SelectedItem is not WorkspaceChoice<VolumeComputePreference> choice)
+        {
+            return;
+        }
+
+        if (_renderingBackendPreference == choice.Value)
+        {
+            return;
+        }
+
+        _renderingBackendPreference = choice.Value;
+        ApplyRenderingBackendPreference(rerenderLoadedVolumes: true);
+        RefreshRenderingWorkspacePanel(forceVisible: true);
+        SaveViewerSettings();
     }
 
     private void OnRenderingWorkspaceDvrPresetSelectionChanged(object? sender, SelectionChangedEventArgs e)
@@ -341,6 +409,41 @@ public partial class StudyViewerWindow
         ApplyColorScheme(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: _renderingPanelVisible || _renderingPanelPinned);
         SaveViewerSettings();
+    }
+
+    private async void OnRenderingWorkspaceBenchmarkClick(object? sender, RoutedEventArgs e)
+    {
+        if (_activeSlot?.Panel is not DicomViewPanel panel || !panel.IsVolumeBound)
+        {
+            return;
+        }
+
+        RenderingWorkspaceBenchmarkButton.IsEnabled = false;
+        RenderingWorkspaceBenchmarkText.Text = "Benchmark running…";
+
+        try
+        {
+            DicomViewPanel.VolumeRenderBenchmarkResult result = await System.Threading.Tasks.Task.Run(() => panel.BenchmarkCurrentVolumeRendering(3));
+            _renderingBenchmarkSummary = result.OpenClMeasured
+                ? $"{result.Summary}. Runtime detail: {result.OpenClStatus}"
+                : result.Summary;
+            RenderingWorkspaceBenchmarkText.Text = _renderingBenchmarkSummary;
+            RefreshRenderingWorkspacePanel(forceVisible: true);
+            ShowToast(result.Summary, result.OpenClMeasured ? ToastSeverity.Info : ToastSeverity.Warning, TimeSpan.FromSeconds(6));
+        }
+        catch (Exception ex)
+        {
+            _renderingBenchmarkSummary = $"Benchmark failed: {ex.Message}";
+            RenderingWorkspaceBenchmarkText.Text = _renderingBenchmarkSummary;
+            ShowToast(_renderingBenchmarkSummary, ToastSeverity.Warning, TimeSpan.FromSeconds(6));
+        }
+        finally
+        {
+            await Dispatcher.UIThread.InvokeAsync(() =>
+            {
+                RenderingWorkspaceBenchmarkButton.IsEnabled = _activeSlot?.Panel?.IsVolumeBound == true;
+            });
+        }
     }
 
     private void OnRenderingPanelPinClick(object? sender, RoutedEventArgs e)
@@ -429,6 +532,32 @@ public partial class StudyViewerWindow
         _renderingPanelOffset = new Point(clampedX, clampedY);
         transform.X = clampedX;
         transform.Y = clampedY;
+    }
+
+    private void ApplyRenderingBackendPreference(bool rerenderLoadedVolumes)
+    {
+        VolumeComputeBackend.DefaultPreference = _renderingBackendPreference;
+        _renderingBenchmarkSummary = string.Empty;
+
+        if (!rerenderLoadedVolumes)
+        {
+            return;
+        }
+
+        foreach (ViewportSlot slot in _slots)
+        {
+            if (slot.Volume is null || !slot.Panel.IsVolumeBound)
+            {
+                continue;
+            }
+
+            slot.Panel.ShowVolumeSlice(slot.InstanceIndex);
+            slot.CurrentSpatialMetadata = slot.Panel.SpatialMetadata;
+            if (slot.Panel.IsImageLoaded)
+            {
+                slot.ViewState = slot.Panel.CaptureDisplayState();
+            }
+        }
     }
 
     private TranslateTransform EnsureRenderingPanelTransform()

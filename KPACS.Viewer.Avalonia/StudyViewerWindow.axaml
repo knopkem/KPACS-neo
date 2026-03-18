@@ -823,6 +823,32 @@
                                            TextWrapping="Wrap" />
                             </Border>
 
+                            <Border Background="#1A273340" BorderBrush="#335E7893" BorderThickness="1" CornerRadius="10" Padding="10,8">
+                                <StackPanel Spacing="6">
+                                    <TextBlock Text="Backend"
+                                               Foreground="#FFF0F6FC"
+                                               FontWeight="SemiBold"
+                                               FontSize="11" />
+                                    <ComboBox x:Name="RenderingWorkspaceBackendCombo"
+                                              MinWidth="220"
+                                              HorizontalAlignment="Left"
+                                              SelectionChanged="OnRenderingWorkspaceBackendSelectionChanged" />
+                                    <TextBlock x:Name="RenderingWorkspaceBackendText"
+                                               Foreground="#FFD6E5F3"
+                                               FontSize="10"
+                                               TextWrapping="Wrap" />
+                                    <Button x:Name="RenderingWorkspaceBenchmarkButton"
+                                            Classes="workspaceAction"
+                                            Content="Benchmark CPU vs OpenCL"
+                                            HorizontalAlignment="Left"
+                                            Click="OnRenderingWorkspaceBenchmarkClick" />
+                                    <TextBlock x:Name="RenderingWorkspaceBenchmarkText"
+                                               Foreground="#FF9DB3C7"
+                                               FontSize="10"
+                                               TextWrapping="Wrap" />
+                                </StackPanel>
+                            </Border>
+
                             <StackPanel Spacing="4">
                                 <TextBlock Text="Projection"
                                            Foreground="#FFF0F6FC"

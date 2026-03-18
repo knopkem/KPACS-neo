@@ -124,6 +124,7 @@ public partial class DicomViewPanel : UserControl
     private double _projectionDragStartThicknessMm;
     private double _projectionDragStartY;
     private IPointer? _projectionPointer;
+    private string _lastRenderBackendLabel = "CPU";
 
     /// <summary>True when this panel is displaying a slice from a bound volume.</summary>
     public bool IsVolumeBound => _volume is not null;
@@ -142,6 +143,7 @@ public partial class DicomViewPanel : UserControl
     public string ProjectionModeLabel => GetProjectionModeLabel(_projectionMode);
     public string OrientationLabel => HasTiltedPlane ? $"{GetOrientationLabel(_volumeOrientation)} oblique" : GetOrientationLabel(_volumeOrientation);
     public bool HasTiltedPlane => Math.Abs(_planeTiltAroundColumn) > 1e-4 || Math.Abs(_planeTiltAroundRow) > 1e-4;
+    public string LastRenderBackendLabel => _lastRenderBackendLabel;
 
     // ==============================================================================================
     // Rendering
@@ -795,6 +797,7 @@ public partial class DicomViewPanel : UserControl
         }
 
                 _preserveTiltOffsetDuringNextShow = false;
+        _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         _volumeSlicePixels = resliced.Pixels;
         _imageWidth = resliced.Width;
@@ -1074,7 +1077,7 @@ public partial class DicomViewPanel : UserControl
         }
 
         _preserveTiltOffsetDuringNextShow = true;
-        ShowVolumeSlice(_volumeSliceIndex);
+        ShowVolumeSlicePreservingNavigation(_volumeSliceIndex);
         UpdateOverlay();
         NotifyViewStateChanged();
         return true;
@@ -1089,6 +1092,87 @@ public partial class DicomViewPanel : UserControl
 
         _isPlaneTiltDragging = false;
         return true;
+    }
+
+    private bool ShowVolumeSlicePreservingNavigation(int sliceIndex)
+    {
+        bool hasNavigationState = TryCaptureNavigationState(out NavigationState navigationState);
+        SpatialVector3D patientCenter = default;
+        bool hasPatientCenter = hasNavigationState && TryCaptureNavigationPatientCenter(navigationState, out patientCenter);
+        bool changed = ShowVolumeSlice(sliceIndex);
+        if (!changed || !hasNavigationState || _pendingInitialFitToWindow)
+        {
+            return changed;
+        }
+
+        if (hasPatientCenter)
+        {
+            ApplyAbsoluteNavigationStateToPatientPoint(navigationState, patientCenter);
+        }
+        else
+        {
+            ApplyAbsoluteNavigationState(navigationState);
+        }
+
+        return true;
+    }
+
+    private bool TryCaptureNavigationPatientCenter(NavigationState navigationState, out SpatialVector3D patientCenter)
+    {
+        patientCenter = default;
+        if (SpatialMetadata is not DicomSpatialMetadata metadata)
+        {
+            return false;
+        }
+
+        patientCenter = metadata.PatientPointFromPixel(navigationState.CenterImagePoint);
+        return true;
+    }
+
+    private void ApplyAbsoluteNavigationState(NavigationState state)
+    {
+        if (_rawPixelData is null && _volumeSlicePixels is null)
+        {
+            return;
+        }
+
+        Point clampedCenterImagePoint = ClampImagePointToCurrentImage(state.CenterImagePoint);
+
+        _fitToWindow = false;
+        _zoomFactor = Math.Clamp(state.ZoomFactor, 0.01, 20.0);
+        ApplyZoomTransform();
+        RenderImage();
+
+        double cx = RootGrid.Bounds.Width / 2.0;
+        double cy = RootGrid.Bounds.Height / 2.0;
+        _panX = cx - (ImageToDisplayX(clampedCenterImagePoint.X) * _zoomFactor);
+        _panY = cy - (ImageToDisplayY(clampedCenterImagePoint.Y) * _zoomFactor);
+        _panTransform.X = _panX;
+        _panTransform.Y = _panY;
+        Update3DCursorOverlay();
+        UpdateMeasurementPresentation();
+        UpdateOverlay();
+        ZoomChanged?.Invoke();
+    }
+
+    private void ApplyAbsoluteNavigationStateToPatientPoint(NavigationState state, SpatialVector3D patientPoint)
+    {
+        if (SpatialMetadata is not DicomSpatialMetadata metadata)
+        {
+            ApplyAbsoluteNavigationState(state);
+            return;
+        }
+
+        ApplyAbsoluteNavigationState(state with { CenterImagePoint = ClampImagePointToCurrentImage(metadata.PixelPointFromPatient(patientPoint)) });
+    }
+
+    private Point ClampImagePointToCurrentImage(Point imagePoint)
+    {
+        double maxX = Math.Max(0, _imageWidth - 1);
+        double maxY = Math.Max(0, _imageHeight - 1);
+        return new Point(
+            Math.Clamp(imagePoint.X, 0, maxX),
+            Math.Clamp(imagePoint.Y, 0, maxY));
     }
 
     private static string GetProjectionModeLabel(VolumeProjectionMode mode) => mode switch

@@ -6,6 +6,7 @@
 // Phase 1: Orthographic orbit around the volume centre with Phong shading.
 // ------------------------------------------------------------------------------------------------
 
+using System.Diagnostics;
 using Avalonia;
 using Avalonia.Input;
 using KPACS.Viewer.Models;
@@ -16,6 +17,14 @@ namespace KPACS.Viewer.Controls;
 
 public partial class DicomViewPanel
 {
+    public sealed record VolumeRenderBenchmarkResult(
+        int Iterations,
+        double CpuAverageMilliseconds,
+        double? OpenClAverageMilliseconds,
+        string OpenClStatus,
+        string Summary,
+        bool OpenClMeasured);
+
     // ==============================================================================================
     //  DVR state
     // ==============================================================================================
@@ -275,6 +284,7 @@ public partial class DicomViewPanel
 
         ReslicedImage resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
             _volume, _dvrRenderState, _dvrTransferFunction);
+        _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         _volumeSlicePixels = resliced.Pixels;
         _imageWidth = resliced.Width;
@@ -305,6 +315,7 @@ public partial class DicomViewPanel
 
         ReslicedImage resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
             _volume, _dvrRenderState, _dvrTransferFunction);
+        _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         _volumeSlicePixels = resliced.Pixels;
         _imageWidth = resliced.Width;
@@ -567,6 +578,96 @@ public partial class DicomViewPanel
         SpatialVector3D light = RotateAroundAxis(forward, up, azimuthRadians);
         light = RotateAroundAxis(light, right, -elevationRadians);
         return light.Normalize();
+    }
+
+    public VolumeRenderBenchmarkResult BenchmarkCurrentVolumeRendering(int iterations = 3)
+    {
+        if (_volume is null)
+        {
+            throw new InvalidOperationException("No volume is currently bound to this viewport.");
+        }
+
+        int effectiveIterations = Math.Max(1, iterations);
+        RenderCurrentVolumeStateForBenchmark(VolumeComputePreference.CpuOnly);
+        double cpuAverage = BenchmarkPreference(VolumeComputePreference.CpuOnly, effectiveIterations);
+
+        string openClStatus = VolumeComputeBackend.CurrentStatus.Detail;
+        if (!VolumeComputeBackend.IsOpenClAvailable)
+        {
+            return new VolumeRenderBenchmarkResult(
+                effectiveIterations,
+                cpuAverage,
+                null,
+                openClStatus,
+                $"CPU {cpuAverage:F1} ms avg over {effectiveIterations} render(s). OpenCL unavailable: {openClStatus}",
+                false);
+        }
+
+        RenderCurrentVolumeStateForBenchmark(VolumeComputePreference.OpenClOnly);
+        double openClAverage = BenchmarkPreference(VolumeComputePreference.OpenClOnly, effectiveIterations);
+        string summary = $"CPU {cpuAverage:F1} ms vs OpenCL {openClAverage:F1} ms avg over {effectiveIterations} render(s)";
+
+        return new VolumeRenderBenchmarkResult(
+            effectiveIterations,
+            cpuAverage,
+            openClAverage,
+            openClStatus,
+            summary,
+            true);
+    }
+
+    private double BenchmarkPreference(VolumeComputePreference preference, int iterations)
+    {
+        Stopwatch stopwatch = Stopwatch.StartNew();
+        for (int i = 0; i < iterations; i++)
+        {
+            RenderCurrentVolumeStateForBenchmark(preference);
+        }
+
+        stopwatch.Stop();
+        return stopwatch.Elapsed.TotalMilliseconds / iterations;
+    }
+
+    private ReslicedImage RenderCurrentVolumeStateForBenchmark(VolumeComputePreference preference)
+    {
+        if (_volume is null)
+        {
+            return new ReslicedImage();
+        }
+
+        using IDisposable scope = VolumeComputeBackend.BeginPreferenceScope(preference);
+
+        if (IsDvrMode)
+        {
+            VolumeTransferFunction transferFunction = _dvrTransferFunction
+                ?? VolumeTransferFunction.CreateWindowed(
+                    _dvrPreset,
+                    _volume.MinValue,
+                    _volume.MaxValue,
+                    _dvrTransferCenter,
+                    _dvrTransferWidth);
+
+            VolumeRenderState state = (_dvrRenderState ?? VolumeRayCaster.CreateViewState(
+                    _volume,
+                    _volumeOrientation,
+                    Math.Max(1, _imageWidth),
+                    Math.Max(1, _imageHeight))) with
+            {
+                OutputWidth = Math.Max(1, _imageWidth),
+                OutputHeight = Math.Max(1, _imageHeight),
+                SamplingStepFactor = 1.0,
+            };
+
+            return VolumeReslicer.ComputeDirectVolumeRenderingView(_volume, state, transferFunction);
+        }
+
+        VolumeSlicePlane? requestedPlane = HasTiltedPlane
+            ? GetCurrentSlicePlaneForSliceIndex(_volumeSliceIndex)
+            : null;
+
+        return requestedPlane is not null
+            ? VolumeReslicer.RenderSlab(_volume, requestedPlane, _projectionThicknessMm, _projectionMode)
+            : VolumeReslicer.RenderSlab(_volume, _volumeOrientation, _volumeSliceIndex, _projectionThicknessMm, _projectionMode);
     }
 
     // ==============================================================================================
