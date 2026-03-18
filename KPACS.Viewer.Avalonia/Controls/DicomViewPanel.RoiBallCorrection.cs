@@ -217,6 +217,8 @@ public partial class DicomViewPanel
             return false;
         }
 
+        VolumeRoiContour[] existingContours = measurement.VolumeContours ?? [];
+
         if (!usesInterpolatedContours)
         {
             if (!TrySelectSculptedContour(projectedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out int contourIndex, out Point[] updatedPoints, out _, out _))
@@ -226,7 +228,7 @@ public partial class DicomViewPanel
 
             VolumeRoiContour target = currentSliceContours[contourIndex];
             VolumeRoiContour updatedTarget = CreateUpdatedVolumeContour(target, updatedPoints);
-            VolumeRoiContour[] updatedContours = measurement.VolumeContours
+            VolumeRoiContour[] updatedContours = existingContours
                 .Select(contour => ReferenceEquals(contour, target) ? updatedTarget : contour)
                 .OrderBy(contour => contour.PlanePosition)
                 .ThenBy(contour => contour.ComponentId)
@@ -245,7 +247,7 @@ public partial class DicomViewPanel
         }
 
         VolumeRoiContour insertedContour = CreateInterpolatedVolumeContour(measurement, interpolatedUpdatedPoints);
-        VolumeRoiContour[] insertedContours = measurement.VolumeContours
+        VolumeRoiContour[] insertedContours = existingContours
             .Concat([insertedContour])
             .OrderBy(contour => contour.PlanePosition)
             .ThenBy(contour => contour.ComponentId)
@@ -270,9 +272,10 @@ public partial class DicomViewPanel
             return false;
         }
 
+        DicomSpatialMetadata metadata = SpatialMetadata ?? throw new InvalidOperationException("Spatial metadata is required for ROI draft ball correction.");
         VolumeRoiDraftContour target = currentContours[contourIndex];
         target.Anchors.Clear();
-        target.Anchors.AddRange(updatedPoints.Select(point => new MeasurementAnchor(point, SpatialMetadata.PatientPointFromPixel(point))));
+        target.Anchors.AddRange(updatedPoints.Select(point => new MeasurementAnchor(point, metadata.PatientPointFromPixel(point))));
         NotifyVolumeRoiDraftChanged();
         UpdateMeasurementPresentation();
         return true;

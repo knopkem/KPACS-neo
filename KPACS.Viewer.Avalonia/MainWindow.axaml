@@ -409,7 +409,6 @@
                                                         <TextBlock x:Name="FilesystemHintText" Margin="8" Foreground="#FF666666" Text="Expand Computer, choose a drive or folder, then right-click it and select Scan folder." TextWrapping="Wrap" />
                                                         <TreeView x:Name="FilesystemTreeView"
                                                                   IsVisible="False"
-                                                                  PointerPressed="OnFilesystemTreePointerPressed"
                                                                   KeyDown="OnFilesystemTreeKeyDown"
                                                                   SelectionChanged="OnFilesystemTreeSelectionChanged">
                                                                 <TreeView.ItemTemplate>

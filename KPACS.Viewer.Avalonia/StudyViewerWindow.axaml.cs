@@ -89,6 +89,11 @@ public partial class StudyViewerWindow : Window
     private const double ParallelPlaneDotThreshold = 0.985;
     private const double CutlineEdgeTolerance = 1e-3;
 
+    public StudyViewerWindow()
+        : this(CreateDefaultContext(), "StudyViewerWindow", 1)
+    {
+    }
+
     public StudyViewerWindow(ViewerStudyContext context, string placementKey, int viewerNumber)
     {
         InitializeComponent();
@@ -136,6 +141,20 @@ public partial class StudyViewerWindow : Window
         ApplyLayout(_currentLayoutSpec, persistLayout: false);
         InitializeSecondaryCaptureUi();
         Closed += OnViewerClosed;
+    }
+
+    private static ViewerStudyContext CreateDefaultContext()
+    {
+        return new ViewerStudyContext
+        {
+            StudyDetails = new StudyDetails
+            {
+                Study = new StudyListItem(),
+            },
+            StartBlank = true,
+            LayoutRows = 1,
+            LayoutColumns = 1,
+        };
     }
 
     private void InitializeWorkspaceDock()
