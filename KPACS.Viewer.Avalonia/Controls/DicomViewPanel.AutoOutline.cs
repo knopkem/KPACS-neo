@@ -17,6 +17,8 @@ public partial class DicomViewPanel
     private const int AutoOutlineMaxVoxelCount = 180000;
     private const int AutoOutlineMaxSeedCandidates = 7;
     private const int AutoOutlineMaxVisitedVoxelsPerSeed = 60000;
+    private const int AutoOutlineSlicePropagationMaxMisses = 4;
+    private const int AutoOutlineSlicePropagationSeedSampleCount = 10;
     private const double AutoOutlineSeedNeighborhoodRadiusMm = 4.5;
     private const double AutoOutlineAdaptiveStdDevWeight = 2.35;
     private const double AutoOutlineMrToleranceMultiplier = 1.35;
@@ -84,6 +86,27 @@ public partial class DicomViewPanel
         return polygonPoints.Length >= 3;
     }
 
+    private bool TryCreateAutoOutlinedPolygon(
+        AutoOutlineSliceSource source,
+        Point imagePoint,
+        out Point[] polygonPoints,
+        int sensitivityLevel = 0)
+    {
+        polygonPoints = [];
+
+        int seedX = Math.Clamp((int)Math.Round(imagePoint.X), 0, source.Width - 1);
+        int seedY = Math.Clamp((int)Math.Round(imagePoint.Y), 0, source.Height - 1);
+        if (!TryBuildAutoOutlineMask(source, seedX, seedY, sensitivityLevel, out AutoOutlineMask mask))
+        {
+            return false;
+        }
+
+        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: 64)
+            .Select(point => new Point(point.X + mask.Left, point.Y + mask.Top))
+            .ToArray();
+        return polygonPoints.Length >= 3;
+    }
+
     private bool TryCreateAutoOutlinedVolumeRoiDraft(Point imagePoint, int sensitivityLevel = 0)
     {
         if (_volume is null || SpatialMetadata is null)
@@ -93,19 +116,79 @@ public partial class DicomViewPanel
         }
 
         Point clampedPoint = ClampImagePoint(imagePoint);
-        if (!TrySegmentVolumeSeed(imagePoint, sensitivityLevel, out HashSet<int> region, out string failureReason))
+        if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out string failureReason))
         {
             AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, failureReason));
             return false;
         }
 
-        VolumeRoiContour[] contours = BuildAutoOutlinedVolumeContours(region);
-        if (contours.Length == 0)
+        ApplyAutoOutlinedVolumeContours(clampedPoint, sensitivityLevel, contours);
+        AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, $"Auto 3D ROI created {contours.Length} contour slice(s)."));
+        return true;
+    }
+
+    private bool TryBuildAutoOutlinedVolumeContours(
+        Point imagePoint,
+        int sensitivityLevel,
+        out VolumeRoiContour[] contours,
+        out string failureReason)
+    {
+        contours = [];
+        failureReason = "Auto 3D ROI could not isolate a stable volume around this seed.";
+        string propagatedFailureReason = failureReason;
+        VolumeRoiContour[] propagatedContours = [];
+        bool hasPropagatedContours = false;
+
+        if (CanUseSlicePropagatedAutoOutline())
         {
-            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, "Auto 3D ROI segmented voxels, but no usable slice contours could be reconstructed."));
+            if (TryBuildSlicePropagatedVolumeContours(imagePoint, sensitivityLevel, out propagatedContours, out string slicePropagationFailureMessage))
+            {
+                hasPropagatedContours = propagatedContours.Length > 0;
+                contours = propagatedContours;
+            }
+            else
+            {
+                propagatedFailureReason = slicePropagationFailureMessage;
+            }
+        }
+
+        if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, out HashSet<int> region, out string regionFailureReason))
+        {
+            VolumeRoiContour[] regionContours = BuildAutoOutlinedVolumeContours(region);
+            if (regionContours.Length > 0)
+            {
+                if (!hasPropagatedContours || IsVolumeContourCandidatePreferred(regionContours, propagatedContours))
+                {
+                    contours = regionContours;
+                }
+
+                return true;
+            }
+
+            if (hasPropagatedContours)
+            {
+                contours = propagatedContours;
+                return true;
+            }
+
+            failureReason = "Auto 3D ROI segmented voxels, but no usable slice contours could be reconstructed.";
             return false;
         }
 
+        if (hasPropagatedContours)
+        {
+            contours = propagatedContours;
+            return true;
+        }
+
+        failureReason = CanUseSlicePropagatedAutoOutline()
+            ? $"{propagatedFailureReason} 3D grow fallback: {regionFailureReason}"
+            : regionFailureReason;
+        return false;
+    }
+
+    private void ApplyAutoOutlinedVolumeContours(Point imagePoint, int sensitivityLevel, VolumeRoiContour[] contours)
+    {
         _measurementDraft = null;
         SetSelectedMeasurement(null);
 
@@ -115,7 +198,7 @@ public partial class DicomViewPanel
         {
             draft = _volumeRoiDraft!;
             draft.PendingAddContour = null;
-            draft.AutoOutlineState = new VolumeRoiAutoOutlineState(ClampImagePoint(imagePoint), sensitivityLevel);
+            draft.AutoOutlineState = new VolumeRoiAutoOutlineState(imagePoint, sensitivityLevel);
             Dictionary<int, int> componentMap = [];
             int? firstMappedComponentId = null;
             foreach (VolumeRoiContour contour in contours.OrderBy(contour => contour.PlanePosition))
@@ -129,7 +212,7 @@ public partial class DicomViewPanel
 
                 string sliceKey = BuildVolumeRoiSliceKey(draft.SeriesInstanceUid, draft.FrameOfReferenceUid, contour.PlanePosition);
                 string contourKey = BuildVolumeRoiContourKey(sliceKey, componentId);
-                VolumeRoiDraftContour incomingContour = new(
+                draft.Contours[contourKey] = new VolumeRoiDraftContour(
                     sliceKey,
                     contourKey,
                     componentId,
@@ -144,8 +227,6 @@ public partial class DicomViewPanel
                     contour.ColumnSpacing,
                     [.. contour.Anchors],
                     contour.IsClosed);
-
-                draft.Contours[contourKey] = incomingContour;
             }
 
             draft.ActiveAddComponentId = componentMap.Count == 1 ? firstMappedComponentId : null;
@@ -153,7 +234,7 @@ public partial class DicomViewPanel
         else
         {
             draft = new VolumeRoiDraft(
-                SpatialMetadata.SeriesInstanceUid,
+                SpatialMetadata!.SeriesInstanceUid,
                 SpatialMetadata.FrameOfReferenceUid,
                 SpatialMetadata.AcquisitionNumber,
                 SpatialMetadata.Normal.Normalize(),
@@ -161,7 +242,7 @@ public partial class DicomViewPanel
                 FilePath,
                 SpatialMetadata.SopInstanceUid)
             {
-                AutoOutlineState = new VolumeRoiAutoOutlineState(ClampImagePoint(imagePoint), sensitivityLevel),
+                AutoOutlineState = new VolumeRoiAutoOutlineState(imagePoint, sensitivityLevel),
                 AdditiveModeEnabled = _volumeRoiDraft?.AdditiveModeEnabled == true,
             };
 
@@ -188,14 +269,11 @@ public partial class DicomViewPanel
 
             draft.NextComponentId = Math.Max(1, contours.Select(contour => contour.ComponentId).DefaultIfEmpty(0).Max() + 1);
             draft.ActiveAddComponentId = null;
-
             _volumeRoiDraft = draft;
         }
 
         NotifyVolumeRoiDraftChanged();
         UpdateMeasurementPresentation();
-        AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, $"Auto 3D ROI created {contours.Length} contour slice(s)."));
-        return true;
     }
 
     private bool TryBuildAutoOutlineMask(int seedX, int seedY, int sensitivityLevel, out AutoOutlineMask mask)
@@ -294,6 +372,102 @@ public partial class DicomViewPanel
         return true;
     }
 
+    private bool TryBuildAutoOutlineMask(AutoOutlineSliceSource source, int seedX, int seedY, int sensitivityLevel, out AutoOutlineMask mask)
+    {
+        mask = default;
+        if (!TryGetSlicePixelValue(source, seedX, seedY, out double seedValue))
+        {
+            return false;
+        }
+
+        int radius = Math.Clamp(Math.Max(source.Width, source.Height) / 5, 36, 120);
+        int left = Math.Max(0, seedX - radius);
+        int top = Math.Max(0, seedY - radius);
+        int right = Math.Min(source.Width - 1, seedX + radius);
+        int bottom = Math.Min(source.Height - 1, seedY + radius);
+        int width = right - left + 1;
+        int height = bottom - top + 1;
+        if (width <= 2 || height <= 2)
+        {
+            return false;
+        }
+
+        int localSeedX = seedX - left;
+        int localSeedY = seedY - top;
+        double[,] homogenizedValues = BuildHomogenizedPixelWindow(source, left, top, width, height);
+        double homogenizedSeedValue = homogenizedValues[localSeedX, localSeedY];
+        if (!TryComputeAutoOutlineTolerance(source, seedX, seedY, seedValue, homogenizedSeedValue, sensitivityLevel, out double localMean, out double tolerance))
+        {
+            return false;
+        }
+
+        bool[,] included = new bool[width, height];
+        bool[,] visited = new bool[width, height];
+        Queue<(int X, int Y)> queue = new();
+        queue.Enqueue((localSeedX, localSeedY));
+        visited[localSeedX, localSeedY] = true;
+
+        int count = 0;
+        while (queue.Count > 0)
+        {
+            (int x, int y) = queue.Dequeue();
+            int imageX = x + left;
+            int imageY = y + top;
+            double homogenizedValue = homogenizedValues[x, y];
+            if (!TryGetSlicePixelValue(source, imageX, imageY, out double rawValue))
+            {
+                rawValue = homogenizedValue;
+            }
+
+            if (!IsAutoOutlinePixelAccepted(homogenizedValue, rawValue, homogenizedSeedValue, seedValue, localMean, tolerance))
+            {
+                continue;
+            }
+
+            included[x, y] = true;
+            count++;
+            if (count > AutoOutlineMaxPixels)
+            {
+                return false;
+            }
+
+            for (int offsetY = -1; offsetY <= 1; offsetY++)
+            {
+                for (int offsetX = -1; offsetX <= 1; offsetX++)
+                {
+                    if (offsetX == 0 && offsetY == 0)
+                    {
+                        continue;
+                    }
+
+                    int nextX = x + offsetX;
+                    int nextY = y + offsetY;
+                    if ((uint)nextX >= (uint)width || (uint)nextY >= (uint)height || visited[nextX, nextY])
+                    {
+                        continue;
+                    }
+
+                    visited[nextX, nextY] = true;
+                    queue.Enqueue((nextX, nextY));
+                }
+            }
+        }
+
+        if (count < AutoOutlineMinPixels)
+        {
+            return false;
+        }
+
+        bool[,] cleanedMask = SmoothAutoOutlineMask(included, localSeedX, localSeedY, out count);
+        if (count < AutoOutlineMinPixels)
+        {
+            return false;
+        }
+
+        mask = new AutoOutlineMask(left, top, cleanedMask, count);
+        return true;
+    }
+
     private bool TryComputeAutoOutlineTolerance(int seedX, int seedY, double seedValue, double homogenizedSeedValue, int sensitivityLevel, out double mean, out double tolerance)
     {
         List<double> values = [];
@@ -323,6 +497,42 @@ public partial class DicomViewPanel
         double max = values.Max();
         double interQuartileRange = ComputeInterQuartileRange(values);
         string modality = (_modality ?? string.Empty).Trim().ToUpperInvariant();
+        double baselineTolerance = modality == "CT"
+            ? 18.0
+            : Math.Max(6.0, Math.Abs(homogenizedSeedValue != 0 ? homogenizedSeedValue : seedValue) * 0.075);
+        tolerance = ApplyAutoOutlineSensitivity(Math.Max(baselineTolerance, Math.Max(stdDev * 2.1, Math.Max((max - min) * 0.48, interQuartileRange * 1.7))), sensitivityLevel);
+        return true;
+    }
+
+    private static bool TryComputeAutoOutlineTolerance(AutoOutlineSliceSource source, int seedX, int seedY, double seedValue, double homogenizedSeedValue, int sensitivityLevel, out double mean, out double tolerance)
+    {
+        List<double> values = [];
+        for (int y = Math.Max(0, seedY - 3); y <= Math.Min(source.Height - 1, seedY + 3); y++)
+        {
+            for (int x = Math.Max(0, seedX - 3); x <= Math.Min(source.Width - 1, seedX + 3); x++)
+            {
+                if (TryGetHomogenizedPixelValue(source, x, y, out double value))
+                {
+                    values.Add(value);
+                }
+            }
+        }
+
+        if (values.Count == 0)
+        {
+            mean = 0;
+            tolerance = 0;
+            return false;
+        }
+
+        mean = values.Average();
+        double averageValue = mean;
+        double variance = values.Average(value => (value - averageValue) * (value - averageValue));
+        double stdDev = Math.Sqrt(Math.Max(variance, 0));
+        double min = values.Min();
+        double max = values.Max();
+        double interQuartileRange = ComputeInterQuartileRange(values);
+        string modality = source.Modality.Trim().ToUpperInvariant();
         double baselineTolerance = modality == "CT"
             ? 18.0
             : Math.Max(6.0, Math.Abs(homogenizedSeedValue != 0 ? homogenizedSeedValue : seedValue) * 0.075);
@@ -963,6 +1173,44 @@ public partial class DicomViewPanel
         return true;
     }
 
+    private static bool TryGetHomogenizedPixelValue(AutoOutlineSliceSource source, int x, int y, out double value)
+    {
+        value = 0;
+        if (source.Width <= 0 || source.Height <= 0 || (uint)x >= (uint)source.Width || (uint)y >= (uint)source.Height)
+        {
+            return false;
+        }
+
+        int radius = s_autoOutlineKernel.Length / 2;
+        double weightedSum = 0;
+        double weightTotal = 0;
+        for (int offsetY = -radius; offsetY <= radius; offsetY++)
+        {
+            int sampleY = Math.Clamp(y + offsetY, 0, source.Height - 1);
+            int weightY = s_autoOutlineKernel[offsetY + radius];
+            for (int offsetX = -radius; offsetX <= radius; offsetX++)
+            {
+                int sampleX = Math.Clamp(x + offsetX, 0, source.Width - 1);
+                if (!TryGetSlicePixelValue(source, sampleX, sampleY, out double sample))
+                {
+                    continue;
+                }
+
+                int weight = weightY * s_autoOutlineKernel[offsetX + radius];
+                weightedSum += sample * weight;
+                weightTotal += weight;
+            }
+        }
+
+        if (weightTotal <= 0)
+        {
+            return TryGetSlicePixelValue(source, x, y, out value);
+        }
+
+        value = weightedSum / weightTotal;
+        return true;
+    }
+
     private double[,] BuildHomogenizedPixelWindow(int left, int top, int width, int height)
     {
         double[,] values = new double[width, height];
@@ -975,6 +1223,577 @@ public partial class DicomViewPanel
         }
 
         return values;
+    }
+
+    private static double[,] BuildHomogenizedPixelWindow(AutoOutlineSliceSource source, int left, int top, int width, int height)
+    {
+        double[,] values = new double[width, height];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                TryGetHomogenizedPixelValue(source, left + x, top + y, out values[x, y]);
+            }
+        }
+
+        return values;
+    }
+
+    private bool CanUseSlicePropagatedAutoOutline()
+    {
+        return _volume is not null &&
+            SpatialMetadata is not null &&
+            _projectionMode == VolumeProjectionMode.Mpr &&
+            !HasTiltedPlane;
+    }
+
+    private bool TryBuildSlicePropagatedVolumeContours(
+        Point imagePoint,
+        int sensitivityLevel,
+        out VolumeRoiContour[] contours,
+        out string failureReason)
+    {
+        contours = [];
+        failureReason = "Slice-propagated auto-outline could not establish a stable 3D contour stack.";
+        if (_volume is null || SpatialMetadata is null || _volumeSlicePixels is null || _imageWidth <= 0 || _imageHeight <= 0)
+        {
+            failureReason = "Slice-propagated auto-outline requires the current MPR slice buffer.";
+            return false;
+        }
+
+        AutoOutlineSliceSource seedSource = new(_imageWidth, _imageHeight, _volumeSlicePixels, _modality ?? string.Empty);
+        Point clampedPoint = new(
+            Math.Clamp(imagePoint.X, 0, _imageWidth - 1),
+            Math.Clamp(imagePoint.Y, 0, _imageHeight - 1));
+
+        if (!TryCreateAutoOutlinedPolygon(seedSource, clampedPoint, out Point[] seedPolygon, sensitivityLevel) || seedPolygon.Length < 3)
+        {
+            failureReason = "The seed slice could not be isolated reliably with the 2D auto-outline.";
+            return false;
+        }
+
+        if (!TryComputeAutoOutlineIntensitySignature(seedSource, seedPolygon, out AutoOutlineIntensitySignature seedSignature))
+        {
+            failureReason = "The seed slice was outlined, but its intensity signature was not stable enough for 3D propagation.";
+            return false;
+        }
+
+        List<(int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature)> sliceContours =
+        [
+            (_volumeSliceIndex, SpatialMetadata, seedPolygon, seedSignature)
+        ];
+
+        PropagateAutoOutlineAcrossSlices(sliceContours, seedSignature, -1, sensitivityLevel);
+        PropagateAutoOutlineAcrossSlices(sliceContours, seedSignature, 1, sensitivityLevel);
+
+        contours = sliceContours
+            .OrderBy(entry => entry.SliceIndex)
+            .Select(entry => CreateVolumeRoiContour(entry.Metadata, entry.Polygon, 0))
+            .ToArray();
+
+        if (contours.Length == 0)
+        {
+            failureReason = "The seed slice was found, but no valid 3D contour stack could be assembled.";
+            return false;
+        }
+
+        return true;
+    }
+
+    private void PropagateAutoOutlineAcrossSlices(
+        List<(int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature)> sliceContours,
+        AutoOutlineIntensitySignature seedSignature,
+        int direction,
+        int sensitivityLevel)
+    {
+        if (_volume is null || sliceContours.Count == 0)
+        {
+            return;
+        }
+
+        int sliceCount = VolumeReslicer.GetSliceCount(_volume, _volumeOrientation);
+    (int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature) current = sliceContours[0];
+        int consecutiveMisses = 0;
+
+        for (int sliceIndex = current.SliceIndex + direction; sliceIndex >= 0 && sliceIndex < sliceCount; sliceIndex += direction)
+        {
+            ReslicedImage resliced = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, sliceIndex);
+            if (resliced.SpatialMetadata is null || resliced.Pixels.Length == 0 || resliced.Width <= 0 || resliced.Height <= 0)
+            {
+                break;
+            }
+
+            AutoOutlineSliceSource source = new(resliced.Width, resliced.Height, resliced.Pixels, _modality ?? string.Empty);
+
+            if (!TryFindBestSlicePropagatedPolygon(source, current.Metadata, current.Polygon, current.Signature, seedSignature, resliced.SpatialMetadata, sensitivityLevel, out Point[] polygon, out AutoOutlineIntensitySignature polygonSignature))
+            {
+                consecutiveMisses++;
+                if (consecutiveMisses >= AutoOutlineSlicePropagationMaxMisses)
+                {
+                    break;
+                }
+
+                continue;
+            }
+
+            current = (sliceIndex, resliced.SpatialMetadata, polygon, polygonSignature);
+            sliceContours.Add(current);
+            consecutiveMisses = 0;
+        }
+    }
+
+    private bool TryFindBestSlicePropagatedPolygon(
+        AutoOutlineSliceSource source,
+        DicomSpatialMetadata referenceMetadata,
+        Point[] referencePolygon,
+        AutoOutlineIntensitySignature referenceSignature,
+        AutoOutlineIntensitySignature seedSignature,
+        DicomSpatialMetadata targetMetadata,
+        int sensitivityLevel,
+        out Point[] polygon,
+        out AutoOutlineIntensitySignature polygonSignature)
+    {
+        polygon = [];
+        polygonSignature = default;
+        Point[] projectedReferencePolygon = ProjectPolygon(referenceMetadata, referencePolygon, targetMetadata);
+        if (projectedReferencePolygon.Length < 3)
+        {
+            return false;
+        }
+
+        List<Point> seedCandidates = BuildSlicePropagationSeedCandidates(projectedReferencePolygon, source.Width, source.Height);
+        if (seedCandidates.Count == 0)
+        {
+            return false;
+        }
+
+        double bestScore = double.NegativeInfinity;
+        foreach (int candidateSensitivity in EnumerateSlicePropagationSensitivityLevels(sensitivityLevel))
+        {
+            foreach (Point seedCandidate in seedCandidates)
+            {
+                if (!TryCreateAutoOutlinedPolygon(source, seedCandidate, out Point[] candidatePolygon, candidateSensitivity) ||
+                    candidatePolygon.Length < 3)
+                {
+                    continue;
+                }
+
+                if (!TryComputeAutoOutlineIntensitySignature(source, candidatePolygon, out AutoOutlineIntensitySignature candidateSignature) ||
+                    !IsSlicePropagationContourStable(projectedReferencePolygon, candidatePolygon, referenceSignature, candidateSignature, seedSignature))
+                {
+                    continue;
+                }
+
+                double score = ComputeSlicePropagationContourScore(projectedReferencePolygon, candidatePolygon, referenceSignature, candidateSignature, seedSignature);
+                if (score <= bestScore)
+                {
+                    continue;
+                }
+
+                bestScore = score;
+                polygon = candidatePolygon;
+                polygonSignature = candidateSignature;
+            }
+
+            if (polygon.Length >= 3)
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private static bool IsSlicePropagationContourStable(
+        DicomSpatialMetadata previousMetadata,
+        Point[] previousPolygon,
+        DicomSpatialMetadata currentMetadata,
+        Point[] currentPolygon)
+    {
+        Point[] projectedPreviousPolygon = ProjectPolygon(previousMetadata, previousPolygon, currentMetadata);
+        return IsSlicePropagationContourStable(projectedPreviousPolygon, currentPolygon, default, default, default);
+    }
+
+    private static bool IsSlicePropagationContourStable(
+        Point[] projectedReferencePolygon,
+        Point[] currentPolygon,
+        AutoOutlineIntensitySignature referenceSignature,
+        AutoOutlineIntensitySignature candidateSignature,
+        AutoOutlineIntensitySignature seedSignature)
+    {
+        if (projectedReferencePolygon.Length < 3 || currentPolygon.Length < 3)
+        {
+            return false;
+        }
+
+        Point previousProjectedCenter = GetPolygonCenter(projectedReferencePolygon);
+        Point currentCenter = GetPolygonCenter(currentPolygon);
+        double centroidDistance = GetPointDistance(previousProjectedCenter, currentCenter);
+        double previousArea = Math.Abs(ComputeSignedPolygonArea(projectedReferencePolygon));
+        double currentArea = Math.Abs(ComputeSignedPolygonArea(currentPolygon));
+        if (previousArea <= double.Epsilon || currentArea <= double.Epsilon)
+        {
+            return false;
+        }
+
+        double areaRatio = currentArea / previousArea;
+        double centroidLimit = Math.Max(18.0, Math.Sqrt(previousArea) * 0.9);
+        double boundsOverlap = ComputePolygonBoundsOverlap(projectedReferencePolygon, currentPolygon);
+        bool geometryStable = areaRatio is >= 0.05 and <= 6.5 && centroidDistance <= centroidLimit && boundsOverlap >= 0.12;
+        if (!geometryStable)
+        {
+            return false;
+        }
+
+        if (!referenceSignature.IsValid || !candidateSignature.IsValid || !seedSignature.IsValid)
+        {
+            return true;
+        }
+
+        return IsIntensitySignatureCompatible(referenceSignature, candidateSignature, seedSignature);
+    }
+
+    private static double ComputeSlicePropagationContourScore(
+        Point[] projectedReferencePolygon,
+        Point[] currentPolygon,
+        AutoOutlineIntensitySignature referenceSignature,
+        AutoOutlineIntensitySignature candidateSignature,
+        AutoOutlineIntensitySignature seedSignature)
+    {
+        double previousArea = Math.Max(1.0, Math.Abs(ComputeSignedPolygonArea(projectedReferencePolygon)));
+        double currentArea = Math.Max(1.0, Math.Abs(ComputeSignedPolygonArea(currentPolygon)));
+        double areaRatio = currentArea / previousArea;
+        double areaPenalty = Math.Abs(Math.Log(areaRatio));
+        double centroidDistance = GetPointDistance(GetPolygonCenter(projectedReferencePolygon), GetPolygonCenter(currentPolygon));
+        double boundsOverlap = ComputePolygonBoundsOverlap(projectedReferencePolygon, currentPolygon);
+        double intensityScore = referenceSignature.IsValid && candidateSignature.IsValid && seedSignature.IsValid
+            ? ComputeIntensitySignatureScore(referenceSignature, candidateSignature, seedSignature)
+            : 0;
+        return (boundsOverlap * 3.0) - areaPenalty - (centroidDistance * 0.035) + intensityScore;
+    }
+
+    private static List<Point> BuildSlicePropagationSeedCandidates(Point[] projectedReferencePolygon, int width, int height)
+    {
+        List<Point> candidates = [];
+        HashSet<(int X, int Y)> seen = [];
+
+        void AddCandidate(Point candidate)
+        {
+            Point clamped = new(
+                Math.Clamp(candidate.X, 0, Math.Max(0, width - 1)),
+                Math.Clamp(candidate.Y, 0, Math.Max(0, height - 1)));
+            (int X, int Y) key = ((int)Math.Round(clamped.X), (int)Math.Round(clamped.Y));
+            if (seen.Add(key))
+            {
+                candidates.Add(clamped);
+            }
+        }
+
+        Point center = GetPolygonCenter(projectedReferencePolygon);
+        Point seedCenter = FindInteriorSeedPoint(projectedReferencePolygon, center);
+        AddCandidate(seedCenter);
+
+        Rect bounds = GetPolygonBounds(projectedReferencePolygon);
+        AddCandidate(FindInteriorSeedPoint(projectedReferencePolygon, new Point(bounds.X + (bounds.Width * 0.5), bounds.Y + (bounds.Height * 0.5))));
+
+        Point[] samples = ResampleContour(projectedReferencePolygon.ToArray(), AutoOutlineSlicePropagationSeedSampleCount);
+        foreach (Point sample in samples)
+        {
+            Point inward = new(
+                center.X + ((sample.X - center.X) * 0.45),
+                center.Y + ((sample.Y - center.Y) * 0.45));
+            AddCandidate(FindInteriorSeedPoint(projectedReferencePolygon, inward));
+        }
+
+        return candidates;
+    }
+
+    private static Point ProjectContourCenterToSlice(DicomSpatialMetadata sourceMetadata, Point[] sourcePolygon, DicomSpatialMetadata targetMetadata)
+    {
+        return ProjectPolygonCenter(sourceMetadata, sourcePolygon, targetMetadata);
+    }
+
+    private static Point ProjectPolygonCenter(DicomSpatialMetadata sourceMetadata, Point[] sourcePolygon, DicomSpatialMetadata targetMetadata)
+    {
+        if (sourcePolygon.Length == 0)
+        {
+            return default;
+        }
+
+        SpatialVector3D sum = default;
+        int count = 0;
+        foreach (Point point in sourcePolygon)
+        {
+            sum += sourceMetadata.PatientPointFromPixel(point);
+            count++;
+        }
+
+        SpatialVector3D center = count == 0 ? default : sum / count;
+        return targetMetadata.PixelPointFromPatient(center);
+    }
+
+    private static Point[] ProjectPolygon(DicomSpatialMetadata sourceMetadata, Point[] sourcePolygon, DicomSpatialMetadata targetMetadata)
+    {
+        return sourcePolygon
+            .Select(point => targetMetadata.PixelPointFromPatient(sourceMetadata.PatientPointFromPixel(point)))
+            .ToArray();
+    }
+
+    private static IEnumerable<int> EnumerateSlicePropagationSensitivityLevels(int sensitivityLevel)
+    {
+        yield return sensitivityLevel;
+
+        int expanded = Math.Clamp(sensitivityLevel + 1, AutoOutlineMinSensitivityLevel, AutoOutlineMaxSensitivityLevel);
+        if (expanded != sensitivityLevel)
+        {
+            yield return expanded;
+        }
+
+        int contracted = Math.Clamp(sensitivityLevel - 1, AutoOutlineMinSensitivityLevel, AutoOutlineMaxSensitivityLevel);
+        if (contracted != sensitivityLevel && contracted != expanded)
+        {
+            yield return contracted;
+        }
+    }
+
+    private static Point FindInteriorSeedPoint(Point[] polygon, Point candidate)
+    {
+        if (polygon.Length < 3)
+        {
+            return candidate;
+        }
+
+        if (IsPointInsideOutlinePolygon(candidate, polygon))
+        {
+            return candidate;
+        }
+
+        Point center = GetPolygonCenter(polygon);
+        if (IsPointInsideOutlinePolygon(center, polygon))
+        {
+            return center;
+        }
+
+        for (int step = 1; step <= 8; step++)
+        {
+            double t = step / 8.0;
+            Point probe = new(
+                candidate.X + ((center.X - candidate.X) * t),
+                candidate.Y + ((center.Y - candidate.Y) * t));
+            if (IsPointInsideOutlinePolygon(probe, polygon))
+            {
+                return probe;
+            }
+        }
+
+        return center;
+    }
+
+    private static bool IsPointInsideOutlinePolygon(Point point, Point[] polygon)
+    {
+        bool inside = false;
+        for (int index = 0, previous = polygon.Length - 1; index < polygon.Length; previous = index++)
+        {
+            Point currentPoint = polygon[index];
+            Point previousPoint = polygon[previous];
+            bool intersects = ((currentPoint.Y > point.Y) != (previousPoint.Y > point.Y)) &&
+                              (point.X < ((previousPoint.X - currentPoint.X) * (point.Y - currentPoint.Y) / Math.Max(double.Epsilon, previousPoint.Y - currentPoint.Y)) + currentPoint.X);
+            if (intersects)
+            {
+                inside = !inside;
+            }
+        }
+
+        return inside;
+    }
+
+    private static Rect GetPolygonBounds(Point[] polygon)
+    {
+        if (polygon.Length == 0)
+        {
+            return default;
+        }
+
+        double minX = polygon.Min(point => point.X);
+        double maxX = polygon.Max(point => point.X);
+        double minY = polygon.Min(point => point.Y);
+        double maxY = polygon.Max(point => point.Y);
+        return new Rect(minX, minY, Math.Max(0, maxX - minX), Math.Max(0, maxY - minY));
+    }
+
+    private static double ComputePolygonBoundsOverlap(Point[] firstPolygon, Point[] secondPolygon)
+    {
+        Rect first = GetPolygonBounds(firstPolygon);
+        Rect second = GetPolygonBounds(secondPolygon);
+        double left = Math.Max(first.X, second.X);
+        double top = Math.Max(first.Y, second.Y);
+        double right = Math.Min(first.Right, second.Right);
+        double bottom = Math.Min(first.Bottom, second.Bottom);
+        if (right <= left || bottom <= top)
+        {
+            return 0;
+        }
+
+        double intersection = (right - left) * (bottom - top);
+        double union = Math.Max(1.0, first.Width * first.Height + second.Width * second.Height - intersection);
+        return intersection / union;
+    }
+
+    private static bool IsVolumeContourCandidatePreferred(VolumeRoiContour[] candidateContours, VolumeRoiContour[] currentContours)
+    {
+        int candidateSliceCount = candidateContours.Select(contour => contour.PlanePosition).Distinct().Count();
+        int currentSliceCount = currentContours.Select(contour => contour.PlanePosition).Distinct().Count();
+        if (currentSliceCount > 0 && candidateSliceCount > Math.Max(currentSliceCount + 6, (int)Math.Round(currentSliceCount * 1.6)))
+        {
+            return false;
+        }
+
+        if (candidateSliceCount != currentSliceCount)
+        {
+            return candidateSliceCount > currentSliceCount;
+        }
+
+        if (candidateContours.Length != currentContours.Length)
+        {
+            return candidateContours.Length > currentContours.Length;
+        }
+
+        double candidateAnchorCount = candidateContours.Sum(contour => contour.Anchors.Length);
+        double currentAnchorCount = currentContours.Sum(contour => contour.Anchors.Length);
+        return candidateAnchorCount > currentAnchorCount;
+    }
+
+    private static bool TryComputeAutoOutlineIntensitySignature(AutoOutlineSliceSource source, Point[] polygon, out AutoOutlineIntensitySignature signature)
+    {
+        signature = default;
+        if (polygon.Length < 3)
+        {
+            return false;
+        }
+
+        Rect bounds = GetPolygonBounds(polygon);
+        int left = Math.Max(0, (int)Math.Floor(bounds.X));
+        int top = Math.Max(0, (int)Math.Floor(bounds.Y));
+        int right = Math.Min(source.Width - 1, (int)Math.Ceiling(bounds.Right));
+        int bottom = Math.Min(source.Height - 1, (int)Math.Ceiling(bounds.Bottom));
+        if (right < left || bottom < top)
+        {
+            return false;
+        }
+
+        List<double> values = [];
+        for (int y = top; y <= bottom; y++)
+        {
+            for (int x = left; x <= right; x++)
+            {
+                if (!IsPointInsidePolygon(new Point(x + 0.5, y + 0.5), polygon) || !TryGetSlicePixelValue(source, x, y, out double value))
+                {
+                    continue;
+                }
+
+                values.Add(value);
+            }
+        }
+
+        if (values.Count < AutoOutlineMinPixels)
+        {
+            return false;
+        }
+
+        values.Sort();
+        double mean = values.Average();
+        double variance = values.Average(value => (value - mean) * (value - mean));
+        double median = values.Count % 2 == 0
+            ? (values[(values.Count / 2) - 1] + values[values.Count / 2]) * 0.5
+            : values[values.Count / 2];
+        double p10 = InterpolatePercentile(values, 0.10);
+        double p90 = InterpolatePercentile(values, 0.90);
+        signature = new AutoOutlineIntensitySignature(mean, median, Math.Sqrt(Math.Max(variance, 0)), values[0], values[^1], p10, p90, values.Count);
+        return true;
+    }
+
+    private static bool IsIntensitySignatureCompatible(
+        AutoOutlineIntensitySignature referenceSignature,
+        AutoOutlineIntensitySignature candidateSignature,
+        AutoOutlineIntensitySignature seedSignature)
+    {
+        double meanTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.35, 14.0);
+        double medianTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.15, 12.0);
+        double p10Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0);
+        double p90Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0);
+
+        return Math.Abs(candidateSignature.Mean - referenceSignature.Mean) <= meanTolerance &&
+            Math.Abs(candidateSignature.Median - referenceSignature.Median) <= medianTolerance &&
+            Math.Abs(candidateSignature.Percentile10 - seedSignature.Percentile10) <= p10Tolerance &&
+            Math.Abs(candidateSignature.Percentile90 - seedSignature.Percentile90) <= p90Tolerance;
+    }
+
+    private static double ComputeIntensitySignatureScore(
+        AutoOutlineIntensitySignature referenceSignature,
+        AutoOutlineIntensitySignature candidateSignature,
+        AutoOutlineIntensitySignature seedSignature)
+    {
+        double meanTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.35, 14.0);
+        double medianTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.15, 12.0);
+        double p10Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0);
+        double p90Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0);
+
+        double meanPenalty = Math.Abs(candidateSignature.Mean - referenceSignature.Mean) / Math.Max(1.0, meanTolerance);
+        double medianPenalty = Math.Abs(candidateSignature.Median - referenceSignature.Median) / Math.Max(1.0, medianTolerance);
+        double lowerPenalty = Math.Abs(candidateSignature.Percentile10 - seedSignature.Percentile10) / Math.Max(1.0, p10Tolerance);
+        double upperPenalty = Math.Abs(candidateSignature.Percentile90 - seedSignature.Percentile90) / Math.Max(1.0, p90Tolerance);
+        return 2.4 - (meanPenalty * 0.9) - (medianPenalty * 0.8) - (lowerPenalty * 0.35) - (upperPenalty * 0.45);
+    }
+
+    private static double ComputeSignatureTolerance(
+        AutoOutlineIntensitySignature referenceSignature,
+        AutoOutlineIntensitySignature seedSignature,
+        double stdDevWeight,
+        double minimumTolerance)
+    {
+        double dynamicRange = Math.Max(
+            referenceSignature.Percentile90 - referenceSignature.Percentile10,
+            seedSignature.Percentile90 - seedSignature.Percentile10);
+        double stdDev = Math.Max(referenceSignature.StandardDeviation, seedSignature.StandardDeviation);
+        return Math.Max(minimumTolerance, Math.Max(stdDev * stdDevWeight, dynamicRange * 0.55));
+    }
+
+    private static VolumeRoiContour CreateVolumeRoiContour(DicomSpatialMetadata metadata, Point[] polygon, int componentId)
+    {
+        MeasurementAnchor[] anchors = polygon
+            .Select(point => new MeasurementAnchor(point, metadata.PatientPointFromPixel(point)))
+            .ToArray();
+        return new VolumeRoiContour(
+            anchors,
+            metadata.FilePath,
+            metadata.SopInstanceUid,
+            metadata.Origin,
+            metadata.RowDirection,
+            metadata.ColumnDirection,
+            metadata.Normal,
+            metadata.Origin.Dot(metadata.Normal),
+            true,
+            metadata.RowSpacing,
+            metadata.ColumnSpacing,
+            componentId);
+    }
+
+    private static bool TryGetSlicePixelValue(AutoOutlineSliceSource source, int x, int y, out double value)
+    {
+        value = 0;
+        if (x < 0 || y < 0 || x >= source.Width || y >= source.Height)
+        {
+            return false;
+        }
+
+        int index = (y * source.Width) + x;
+        if ((uint)index >= (uint)source.Pixels.Length)
+        {
+            return false;
+        }
+
+        value = source.Pixels.Span[index];
+        return true;
     }
 
     private bool[,] SmoothAutoOutlineMask(bool[,] included, int seedX, int seedY, out int pixelCount)
@@ -1988,6 +2807,7 @@ public partial class DicomViewPanel
     private static int GetVoxelKey(int x, int y, int z, int sizeX, int sizeY) => (z * sizeY * sizeX) + (y * sizeX) + x;
 
     private readonly record struct AutoOutlineMask(int Left, int Top, bool[,] Pixels, int Count);
+    private readonly record struct AutoOutlineSliceSource(int Width, int Height, ReadOnlyMemory<short> Pixels, string Modality);
 
     private readonly record struct ContourVertex(int X, int Y);
 
@@ -2013,6 +2833,19 @@ public partial class DicomViewPanel
     }
 
     private readonly record struct VolumeSeedCandidate(int X, int Y, int Z, short RawValue, double HomogenizedValue);
+
+    private readonly record struct AutoOutlineIntensitySignature(
+        double Mean,
+        double Median,
+        double StandardDeviation,
+        double Min,
+        double Max,
+        double Percentile10,
+        double Percentile90,
+        int PixelCount)
+    {
+        public bool IsValid => PixelCount > 0;
+    }
 
     private readonly record struct VolumeSliceContourCandidate(AutoOutlineMask Mask, Point[] ImagePoints, Point Centroid);
 
