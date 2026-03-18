@@ -67,6 +67,8 @@ public static class VolumeComputeBackend
 
     public static bool IsOpenClAvailable => Runtime.Value.Renderer is not null;
 
+    public static bool CanUseOpenCl => Preference != VolumeComputePreference.CpuOnly && IsOpenClAvailable;
+
     /// <summary>
     /// Returns the error message from the most recent failed OpenCL render attempt,
     /// or <c>null</c> if the last render succeeded or no renderer is available.
@@ -354,6 +356,20 @@ inline float lookup_opacity(__global const float* opacityLut, float minValue, fl
     return opacityLut[index];
 }
 
+inline float3 lookup_color(
+    __global const float* colorLutR,
+    __global const float* colorLutG,
+    __global const float* colorLutB,
+    float minValue,
+    float maxValue,
+    float value)
+{
+    float denominator = fmax(maxValue - minValue, 1.0f);
+    float normalized = clamp_float((value - minValue) / denominator, 0.0f, 1.0f);
+    int index = clamp_int((int)(normalized * 4095.0f), 0, 4095);
+    return (float3)(colorLutR[index], colorLutG[index], colorLutB[index]);
+}
+
 inline float3 sample_gradient(__global const short* volume, int sizeX, int sizeY, int sizeZ, float x, float y, float z, float invSpacing2X, float invSpacing2Y, float invSpacing2Z)
 {
     float gx = (sample_clamped(volume, sizeX, sizeY, sizeZ, x + 1.0f, y, z) - sample_clamped(volume, sizeX, sizeY, sizeZ, x - 1.0f, y, z)) * invSpacing2X;
@@ -592,6 +608,10 @@ __kernel void RenderDvr(
     float minValue,
     float maxValue,
     __global const float* opacityLut,
+    __global const float* colorLutR,
+    __global const float* colorLutG,
+    __global const float* colorLutB,
+    int useColor,
     float gradientModulationStrength,
     int outputWidth,
     int outputHeight,
@@ -618,7 +638,8 @@ __kernel void RenderDvr(
     float samplingStepFactor,
     float opacityTerminationThreshold,
     float slabThicknessMm,
-    __global short* output)
+    __global short* output,
+    __global uint* colorOutput)
 {
     int column = get_global_id(0);
     int row = get_global_id(1);
@@ -683,6 +704,10 @@ __kernel void RenderDvr(
     if (intersect_aabb(rayOrigin, rayDirection, boxMin, boxMax, &tNear, &tFar) == 0)
     {
         output[row * outputWidth + column] = (short)clamp((int)round(minValue), -32768, 32767);
+        if (useColor != 0)
+        {
+            colorOutput[row * outputWidth + column] = (uint)0xFF000000;
+        }
         return;
     }
 
@@ -693,6 +718,10 @@ __kernel void RenderDvr(
         if (fabs(rayForwardDot) < 1.0e-6f)
         {
             output[row * outputWidth + column] = (short)clamp((int)round(minValue), -32768, 32767);
+            if (useColor != 0)
+            {
+                colorOutput[row * outputWidth + column] = (uint)0xFF000000;
+            }
             return;
         }
 
@@ -706,11 +735,18 @@ __kernel void RenderDvr(
         if (tFar < tNear)
         {
             output[row * outputWidth + column] = (short)clamp((int)round(minValue), -32768, 32767);
+            if (useColor != 0)
+            {
+                colorOutput[row * outputWidth + column] = (uint)0xFF000000;
+            }
             return;
         }
     }
 
     float accumulatedValue = 0.0f;
+    float accumulatedRed = 0.0f;
+    float accumulatedGreen = 0.0f;
+    float accumulatedBlue = 0.0f;
     float accumulatedAlpha = 0.0f;
     for (float t = tNear; t <= tFar; t += stepMm)
     {
@@ -745,14 +781,28 @@ __kernel void RenderDvr(
             continue;
         }
 
-        float normalized = clamp_float((voxelValue - minValue) / range, 0.0f, 1.0f);
         float3 normal = safe_normalize(gradient);
         float3 viewDirection = safe_normalize(-rayDirection);
         float3 halfVector = safe_normalize(lightDirection + viewDirection);
         float illumination = compute_phong(normal, lightDirection, halfVector, ambientIntensity, diffuseIntensity, specularIntensity, shininess);
-        float shadedValue = clamp_float(normalized * illumination, 0.0f, 1.0f);
         float contribution = opacity * (1.0f - accumulatedAlpha);
-        accumulatedValue += shadedValue * contribution;
+
+        if (useColor != 0)
+        {
+            float3 baseColor = lookup_color(colorLutR, colorLutG, colorLutB, minValue, maxValue, voxelValue);
+            float3 shadedColor = clamp(baseColor * illumination, 0.0f, 1.0f);
+            accumulatedRed += shadedColor.x * contribution;
+            accumulatedGreen += shadedColor.y * contribution;
+            accumulatedBlue += shadedColor.z * contribution;
+            accumulatedValue += voxelValue * contribution;
+        }
+        else
+        {
+            float normalized = clamp_float((voxelValue - minValue) / range, 0.0f, 1.0f);
+            float shadedValue = clamp_float(normalized * illumination, 0.0f, 1.0f);
+            accumulatedValue += shadedValue * contribution;
+        }
+
         accumulatedAlpha += contribution;
         if (accumulatedAlpha >= opacityTerminationThreshold)
         {
@@ -760,8 +810,24 @@ __kernel void RenderDvr(
         }
     }
 
-    float finalNormalized = accumulatedAlpha > 1.0e-4f ? accumulatedValue / accumulatedAlpha : 0.0f;
-    float finalValue = minValue + finalNormalized * range;
+    float finalValue;
+    if (useColor != 0)
+    {
+        finalValue = accumulatedAlpha > 1.0e-4f ? accumulatedValue / accumulatedAlpha : minValue;
+        float finalRed = accumulatedAlpha > 1.0e-4f ? accumulatedRed / accumulatedAlpha : 0.0f;
+        float finalGreen = accumulatedAlpha > 1.0e-4f ? accumulatedGreen / accumulatedAlpha : 0.0f;
+        float finalBlue = accumulatedAlpha > 1.0e-4f ? accumulatedBlue / accumulatedAlpha : 0.0f;
+        uint blueByte = (uint)clamp((int)round(finalBlue * 255.0f), 0, 255);
+        uint greenByte = (uint)clamp((int)round(finalGreen * 255.0f), 0, 255);
+        uint redByte = (uint)clamp((int)round(finalRed * 255.0f), 0, 255);
+        colorOutput[row * outputWidth + column] = blueByte | (greenByte << 8) | (redByte << 16) | ((uint)255 << 24);
+    }
+    else
+    {
+        float finalNormalized = accumulatedAlpha > 1.0e-4f ? accumulatedValue / accumulatedAlpha : 0.0f;
+        finalValue = minValue + finalNormalized * range;
+    }
+
     output[row * outputWidth + column] = (short)clamp((int)round(finalValue), -32768, 32767);
 }
 
@@ -926,8 +992,16 @@ __kernel void RenderObliqueSlab(
     private int _cachedProjectionOutputLength;
     private IMem<short>? _cachedDvrOutputBuffer;
     private int _cachedDvrOutputLength;
+    private IMem<uint>? _cachedDvrColorOutputBuffer;
+    private int _cachedDvrColorOutputLength;
     private IMem<float>? _cachedOpacityLutBuffer;
     private float[]? _cachedOpacityLutData;
+    private IMem<float>? _cachedColorLutRBuffer;
+    private float[]? _cachedColorLutRData;
+    private IMem<float>? _cachedColorLutGBuffer;
+    private float[]? _cachedColorLutGData;
+    private IMem<float>? _cachedColorLutBBuffer;
+    private float[]? _cachedColorLutBData;
 
     private OpenClVolumeRenderer(
         OpenClContext context,
@@ -1281,7 +1355,12 @@ __kernel void RenderObliqueSlab(
                 int height = state.OutputHeight > 0 ? state.OutputHeight : 512;
                 int outputLength = width * height;
                 IMem<float> lutBuffer = EnsureOpacityLutBuffer(transferFunction.CreateOpacityLutSnapshot());
+                (float[] colorLutR, float[] colorLutG, float[] colorLutB) = transferFunction.CreateColorLutSnapshots();
+                IMem<float> colorLutRBuffer = EnsureColorLutBuffer(ref _cachedColorLutRBuffer, ref _cachedColorLutRData, colorLutR);
+                IMem<float> colorLutGBuffer = EnsureColorLutBuffer(ref _cachedColorLutGBuffer, ref _cachedColorLutGData, colorLutG);
+                IMem<float> colorLutBBuffer = EnsureColorLutBuffer(ref _cachedColorLutBBuffer, ref _cachedColorLutBData, colorLutB);
                 IMem<short> outputBuffer = EnsureDvrOutputBuffer(outputLength);
+                IMem<uint> colorOutputBuffer = EnsureDvrColorOutputBuffer(outputLength);
 
                 SetKernelArgBuffer(_dvrKernel, 0, _cachedVolumeBuffer);
                 SetKernelArgValue(_dvrKernel, 1, volume.SizeX);
@@ -1293,40 +1372,54 @@ __kernel void RenderObliqueSlab(
                 SetKernelArgValue(_dvrKernel, 7, (float)volume.MinValue);
                 SetKernelArgValue(_dvrKernel, 8, (float)volume.MaxValue);
                 SetKernelArgBuffer(_dvrKernel, 9, lutBuffer);
-                SetKernelArgValue(_dvrKernel, 10, (float)transferFunction.GradientModulationStrength);
-                SetKernelArgValue(_dvrKernel, 11, width);
-                SetKernelArgValue(_dvrKernel, 12, height);
-                SetKernelArgValue(_dvrKernel, 13, (int)state.Projection);
-                SetKernelArgValue(_dvrKernel, 14, (float)state.OrthographicWidthMm);
-                SetKernelArgValue(_dvrKernel, 15, (float)state.OrthographicHeightMm);
-                SetKernelArgValue(_dvrKernel, 16, (float)state.CameraPosition.X);
-                SetKernelArgValue(_dvrKernel, 17, (float)state.CameraPosition.Y);
-                SetKernelArgValue(_dvrKernel, 18, (float)state.CameraPosition.Z);
-                SetKernelArgValue(_dvrKernel, 19, (float)state.CameraTarget.X);
-                SetKernelArgValue(_dvrKernel, 20, (float)state.CameraTarget.Y);
-                SetKernelArgValue(_dvrKernel, 21, (float)state.CameraTarget.Z);
-                SetKernelArgValue(_dvrKernel, 22, (float)state.CameraUp.X);
-                SetKernelArgValue(_dvrKernel, 23, (float)state.CameraUp.Y);
-                SetKernelArgValue(_dvrKernel, 24, (float)state.CameraUp.Z);
-                SetKernelArgValue(_dvrKernel, 25, (float)state.LightDirection.X);
-                SetKernelArgValue(_dvrKernel, 26, (float)state.LightDirection.Y);
-                SetKernelArgValue(_dvrKernel, 27, (float)state.LightDirection.Z);
-                SetKernelArgValue(_dvrKernel, 28, (float)state.FieldOfViewDegrees);
-                SetKernelArgValue(_dvrKernel, 29, (float)state.AmbientIntensity);
-                SetKernelArgValue(_dvrKernel, 30, (float)state.DiffuseIntensity);
-                SetKernelArgValue(_dvrKernel, 31, (float)state.SpecularIntensity);
-                SetKernelArgValue(_dvrKernel, 32, (float)state.Shininess);
-                SetKernelArgValue(_dvrKernel, 33, (float)state.SamplingStepFactor);
-                SetKernelArgValue(_dvrKernel, 34, (float)state.OpacityTerminationThreshold);
-                SetKernelArgValue(_dvrKernel, 35, (float)state.SlabThicknessMm);
-                SetKernelArgBuffer(_dvrKernel, 36, outputBuffer);
+                SetKernelArgBuffer(_dvrKernel, 10, colorLutRBuffer);
+                SetKernelArgBuffer(_dvrKernel, 11, colorLutGBuffer);
+                SetKernelArgBuffer(_dvrKernel, 12, colorLutBBuffer);
+                SetKernelArgValue(_dvrKernel, 13, transferFunction.HasColorLookup ? 1 : 0);
+                SetKernelArgValue(_dvrKernel, 14, (float)transferFunction.GradientModulationStrength);
+                SetKernelArgValue(_dvrKernel, 15, width);
+                SetKernelArgValue(_dvrKernel, 16, height);
+                SetKernelArgValue(_dvrKernel, 17, (int)state.Projection);
+                SetKernelArgValue(_dvrKernel, 18, (float)state.OrthographicWidthMm);
+                SetKernelArgValue(_dvrKernel, 19, (float)state.OrthographicHeightMm);
+                SetKernelArgValue(_dvrKernel, 20, (float)state.CameraPosition.X);
+                SetKernelArgValue(_dvrKernel, 21, (float)state.CameraPosition.Y);
+                SetKernelArgValue(_dvrKernel, 22, (float)state.CameraPosition.Z);
+                SetKernelArgValue(_dvrKernel, 23, (float)state.CameraTarget.X);
+                SetKernelArgValue(_dvrKernel, 24, (float)state.CameraTarget.Y);
+                SetKernelArgValue(_dvrKernel, 25, (float)state.CameraTarget.Z);
+                SetKernelArgValue(_dvrKernel, 26, (float)state.CameraUp.X);
+                SetKernelArgValue(_dvrKernel, 27, (float)state.CameraUp.Y);
+                SetKernelArgValue(_dvrKernel, 28, (float)state.CameraUp.Z);
+                SetKernelArgValue(_dvrKernel, 29, (float)state.LightDirection.X);
+                SetKernelArgValue(_dvrKernel, 30, (float)state.LightDirection.Y);
+                SetKernelArgValue(_dvrKernel, 31, (float)state.LightDirection.Z);
+                SetKernelArgValue(_dvrKernel, 32, (float)state.FieldOfViewDegrees);
+                SetKernelArgValue(_dvrKernel, 33, (float)state.AmbientIntensity);
+                SetKernelArgValue(_dvrKernel, 34, (float)state.DiffuseIntensity);
+                SetKernelArgValue(_dvrKernel, 35, (float)state.SpecularIntensity);
+                SetKernelArgValue(_dvrKernel, 36, (float)state.Shininess);
+                SetKernelArgValue(_dvrKernel, 37, (float)state.SamplingStepFactor);
+                SetKernelArgValue(_dvrKernel, 38, (float)state.OpacityTerminationThreshold);
+                SetKernelArgValue(_dvrKernel, 39, (float)state.SlabThicknessMm);
+                SetKernelArgBuffer(_dvrKernel, 40, outputBuffer);
+                SetKernelArgBuffer(_dvrKernel, 41, colorOutputBuffer);
 
                 Execute2D(_dvrKernel, width, height);
                 short[] pixels = ReadBuffer(outputBuffer, outputLength);
+                uint[] packedColor = ReadBuffer(colorOutputBuffer, outputLength);
                 UpdateKernelProfilingTime();
+                byte[]? bgraPixels = null;
+                if (transferFunction.HasColorLookup)
+                {
+                    bgraPixels = new byte[outputLength * 4];
+                    Buffer.BlockCopy(packedColor, 0, bgraPixels, 0, bgraPixels.Length);
+                }
+
                 image = new ReslicedImage
                 {
                     Pixels = pixels,
+                    BgraPixels = bgraPixels,
                     Width = width,
                     Height = height,
                     PixelSpacingX = ComputePixelSpacingX(state, width, height),
@@ -1348,7 +1441,11 @@ __kernel void RenderObliqueSlab(
 
     public void Dispose()
     {
+        ReleaseMem(_cachedColorLutBBuffer);
+        ReleaseMem(_cachedColorLutGBuffer);
+        ReleaseMem(_cachedColorLutRBuffer);
         ReleaseMem(_cachedOpacityLutBuffer);
+        ReleaseMem(_cachedDvrColorOutputBuffer);
         ReleaseMem(_cachedDvrOutputBuffer);
         ReleaseMem(_cachedProjectionOutputBuffer);
         ReleaseMem(_cachedVolumeBuffer);
@@ -1358,8 +1455,15 @@ __kernel void RenderObliqueSlab(
         Cl.ReleaseProgram(_program);
         Cl.ReleaseCommandQueue(_queue);
         Cl.ReleaseContext(_context);
+        _cachedColorLutBBuffer = null;
+        _cachedColorLutBData = null;
+        _cachedColorLutGBuffer = null;
+        _cachedColorLutGData = null;
+        _cachedColorLutRBuffer = null;
+        _cachedColorLutRData = null;
         _cachedOpacityLutBuffer = null;
         _cachedOpacityLutData = null;
+        _cachedDvrColorOutputBuffer = null;
         _cachedDvrOutputBuffer = null;
         _cachedProjectionOutputBuffer = null;
         _cachedVolumeBuffer = null;
@@ -1479,6 +1583,19 @@ __kernel void RenderObliqueSlab(
         return _cachedDvrOutputBuffer;
     }
 
+    private IMem<uint> EnsureDvrColorOutputBuffer(int length)
+    {
+        if (_cachedDvrColorOutputBuffer is not null && _cachedDvrColorOutputLength == length)
+        {
+            return _cachedDvrColorOutputBuffer;
+        }
+
+        ReleaseMem(_cachedDvrColorOutputBuffer);
+        _cachedDvrColorOutputBuffer = CreateBuffer<uint>(MemFlags.WriteOnly, length);
+        _cachedDvrColorOutputLength = length;
+        return _cachedDvrColorOutputBuffer;
+    }
+
     private IMem<float> EnsureOpacityLutBuffer(float[] lut)
     {
         if (_cachedOpacityLutBuffer is not null && _cachedOpacityLutData is not null && LutsEqual(_cachedOpacityLutData, lut))
@@ -1490,6 +1607,19 @@ __kernel void RenderObliqueSlab(
         _cachedOpacityLutBuffer = CreateBuffer(MemFlags.ReadOnly | MemFlags.CopyHostPtr, lut);
         _cachedOpacityLutData = (float[])lut.Clone();
         return _cachedOpacityLutBuffer;
+    }
+
+    private IMem<float> EnsureColorLutBuffer(ref IMem<float>? buffer, ref float[]? cachedData, float[] lut)
+    {
+        if (buffer is not null && cachedData is not null && LutsEqual(cachedData, lut))
+        {
+            return buffer;
+        }
+
+        ReleaseMem(buffer);
+        buffer = CreateBuffer(MemFlags.ReadOnly | MemFlags.CopyHostPtr, lut);
+        cachedData = (float[])lut.Clone();
+        return buffer;
     }
 
     private static bool LutsEqual(float[] left, float[] right)

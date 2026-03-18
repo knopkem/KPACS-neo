@@ -121,6 +121,7 @@ public partial class DicomViewPanel : UserControl
     private SliceOrientation _volumeOrientation = SliceOrientation.Axial;
     private int _volumeSliceIndex;
     private short[]? _volumeSlicePixels;
+    private byte[]? _volumeSliceBgraPixels;
     private VolumeProjectionMode _projectionMode = VolumeProjectionMode.Mpr;
     private double _projectionThicknessMm = 1.0;
     private double _planeTiltAroundColumn;
@@ -165,6 +166,7 @@ public partial class DicomViewPanel : UserControl
     private byte[] _lutR = new byte[256];
     private byte[] _lutG = new byte[256];
     private byte[] _lutB = new byte[256];
+    private bool _dvrAutoColorLutEnabled;
     private byte[]? _renderBuffer;
     private byte[]? _viewTransformBuffer;
 
@@ -226,13 +228,13 @@ public partial class DicomViewPanel : UserControl
     public double WindowCenter
     {
         get => _windowCenter;
-        set { _windowCenter = value; RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); NotifyViewStateChanged(); }
+        set { _windowCenter = value; ApplyActiveColorLut(); RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); NotifyViewStateChanged(); }
     }
 
     public double WindowWidth
     {
         get => _windowWidth;
-        set { _windowWidth = Math.Max(1, value); RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); NotifyViewStateChanged(); }
+        set { _windowWidth = Math.Max(1, value); ApplyActiveColorLut(); RenderImage(); UpdateOverlay(); WindowChanged?.Invoke(); NotifyViewStateChanged(); }
     }
 
     public double ZoomFactor => _zoomFactor;
@@ -242,6 +244,8 @@ public partial class DicomViewPanel : UserControl
     public string PatientName => _patientName;
     public bool IsImageLoaded => _rawPixelData != null || _volumeSlicePixels != null;
     public int CurrentColorScheme => _colorScheme;
+    public bool IsDvrAutoColorLutEnabled => _dvrAutoColorLutEnabled;
+    public bool SupportsDvrAutoColorLut => _volume is not null && string.Equals(_modality, "CT", StringComparison.OrdinalIgnoreCase);
     public string FilePath => _fileName;
     public DicomSpatialMetadata? SpatialMetadata { get; private set; }
 
@@ -465,6 +469,7 @@ public partial class DicomViewPanel : UserControl
 
         _volume = null;
         _volumeSlicePixels = null;
+        _volumeSliceBgraPixels = null;
         _volumeSliceIndex = 0;
         _projectionPointer = null;
         _isProjectionThicknessDragging = false;
@@ -546,6 +551,7 @@ public partial class DicomViewPanel : UserControl
             _windowWidth = Math.Max(1, ww);
             _defaultWindowCenter = _windowCenter;
             _defaultWindowWidth = _windowWidth;
+            _volumeSliceBgraPixels = null;
 
             // --- Color LUT ---
             if (_isMonochrome1)
@@ -685,6 +691,7 @@ public partial class DicomViewPanel : UserControl
         _rawPixelData = null;
         _volume = null;
         _volumeSlicePixels = null;
+        _volumeSliceBgraPixels = null;
         _planeTiltAroundColumn = 0;
         _planeTiltAroundRow = 0;
         _planeOffsetMm = 0;
@@ -748,6 +755,7 @@ public partial class DicomViewPanel : UserControl
         _windowWidth = Math.Max(1, volume.DefaultWindowWidth);
         _defaultWindowCenter = _windowCenter;
         _defaultWindowWidth = _windowWidth;
+        _volumeSliceBgraPixels = null;
 
         if (_isMonochrome1)
             SetColorLutInternal(1);
@@ -792,7 +800,7 @@ public partial class DicomViewPanel : UserControl
         ReslicedImage resliced;
         if (IsDvrMode && _dvrRenderState is not null)
         {
-            UpdateDvrRenderState(highQuality: VolumeComputeBackend.IsOpenClAvailable);
+            UpdateDvrRenderState(highQuality: CanUseGpuForCurrentDvr());
             resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
                 _volume, _dvrRenderState, _dvrTransferFunction);
         }
@@ -816,6 +824,7 @@ public partial class DicomViewPanel : UserControl
         _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         _volumeSlicePixels = resliced.Pixels;
+        _volumeSliceBgraPixels = resliced.BgraPixels;
         _imageWidth = resliced.Width;
         _imageHeight = resliced.Height;
         _frameCount = GetCurrentSliceCount();
@@ -845,7 +854,7 @@ public partial class DicomViewPanel : UserControl
         PlaceholderText.IsVisible = false;
         if (IsDvrMode)
         {
-            bool gpuAvailable = VolumeComputeBackend.IsOpenClAvailable;
+            bool gpuAvailable = VolumeComputeBackend.CanUseOpenCl;
             RenderImage(sharp: gpuAvailable);
             if (!gpuAvailable)
             {
@@ -925,6 +934,8 @@ public partial class DicomViewPanel : UserControl
             _windowCenter = _preDvrWindowCenter;
             _windowWidth = Math.Max(1, _preDvrWindowWidth);
         }
+
+        ApplyActiveColorLut();
 
         ShowVolumeSlice(_volumeSliceIndex);
         UpdateOverlay();
@@ -1318,6 +1329,39 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
+        // Volume-based pre-colored rendering path
+        if (_volumeSliceBgraPixels is not null && _displayBitmap is not null)
+        {
+            int sourcePixelCount = sourceRenderWidth * sourceRenderHeight;
+            int sourceRequiredBytes = sourcePixelCount * 4;
+            byte[] sourceBgra;
+
+            if (sourceRenderWidth == _imageWidth && sourceRenderHeight == _imageHeight)
+            {
+                sourceBgra = _volumeSliceBgraPixels;
+            }
+            else
+            {
+                sourceBgra = HasViewTransform()
+                    ? EnsureViewTransformBuffer(sourceRequiredBytes)
+                    : EnsureRenderBuffer(sourceRequiredBytes);
+                ResampleBgraBuffer(_volumeSliceBgraPixels, _imageWidth, _imageHeight, sourceBgra, sourceRenderWidth, sourceRenderHeight);
+            }
+
+            byte[] outputBgra = sourceBgra;
+            int usedLength = sourceRequiredBytes;
+            if (HasViewTransform())
+            {
+                int requiredBytes = renderWidth * renderHeight * 4;
+                outputBgra = EnsureRenderBuffer(requiredBytes);
+                TransformBgraBuffer(sourceBgra, sourceRenderWidth, sourceRenderHeight, outputBgra);
+                usedLength = requiredBytes;
+            }
+
+            CopyToDisplayBitmap(outputBgra, usedLength, renderWidth, renderHeight);
+            return;
+        }
+
         // Volume-based rendering path
         if (_volumeSlicePixels is not null && _displayBitmap is not null)
         {
@@ -1400,7 +1444,7 @@ public partial class DicomViewPanel : UserControl
     /// </summary>
     private void RenderImageFastThenSharp()
     {
-        if (VolumeComputeBackend.IsOpenClAvailable)
+        if (VolumeComputeBackend.CanUseOpenCl)
         {
             // Powerful hardware: render sharp immediately — no deferred pass needed.
             RenderImage(sharp: true);
@@ -1414,7 +1458,7 @@ public partial class DicomViewPanel : UserControl
     private void ScheduleSharpRender()
     {
         // GPU workstation already renders sharp during interaction — no deferred pass needed.
-        if (VolumeComputeBackend.IsOpenClAvailable)
+        if (VolumeComputeBackend.CanUseOpenCl)
         {
             return;
         }
@@ -1704,10 +1748,58 @@ public partial class DicomViewPanel : UserControl
     private void SetColorLutInternal(int scheme)
     {
         _colorScheme = scheme;
-        var (r, g, b) = ColorLut.GetLut(scheme);
+        var (r, g, b) = ShouldUseDvrAutoColorLut()
+            ? ColorLut.CreateAutoCtDvrLut(
+                _windowCenter,
+                _windowWidth,
+                _dvrTransferCenter,
+                _dvrTransferWidth,
+                _dvrPreset)
+            : ColorLut.GetLut(scheme);
+
         _lutR = r;
         _lutG = g;
         _lutB = b;
+    }
+
+    private void ApplyActiveColorLut()
+    {
+        SetColorLutInternal(_colorScheme);
+    }
+
+    private bool ShouldUseDvrAutoColorLut()
+    {
+        return _dvrAutoColorLutEnabled && IsDvrMode && SupportsDvrAutoColorLut;
+    }
+
+    public void SetDvrAutoColorLutEnabled(bool enabled)
+    {
+        bool effectiveEnabled = enabled && SupportsDvrAutoColorLut;
+        if (_dvrAutoColorLutEnabled == effectiveEnabled)
+        {
+            return;
+        }
+
+        _dvrAutoColorLutEnabled = effectiveEnabled;
+        if (_volume is not null)
+        {
+            RebuildDvrTransferFunction();
+        }
+
+        ApplyActiveColorLut();
+
+        if (IsDvrMode)
+        {
+            RenderDvrViewFast();
+            ScheduleDvrSharpRender();
+        }
+        else
+        {
+            RenderImage();
+        }
+
+        UpdateOverlay();
+        NotifyViewStateChanged();
     }
 
     /// <summary>
@@ -1911,6 +2003,7 @@ public partial class DicomViewPanel : UserControl
         _viewRotationQuarterTurns = NormalizeQuarterTurns(state.ViewRotationQuarterTurns);
         _viewFlipHorizontal = state.ViewFlipHorizontal;
         _viewFlipVertical = state.ViewFlipVertical;
+        ApplyActiveColorLut();
 
         if (state.FitToWindow)
         {
@@ -3093,6 +3186,49 @@ public partial class DicomViewPanel : UserControl
                 }
 
                 destination[(rotatedY * destinationWidth) + rotatedX] = source[sourceOffset + x];
+            }
+        }
+    }
+
+    private static void ResampleBgraBuffer(byte[] sourceBgra, int sourceWidth, int sourceHeight, byte[] destinationBgra, int destinationWidth, int destinationHeight)
+    {
+        if (sourceWidth <= 0 || sourceHeight <= 0 || destinationWidth <= 0 || destinationHeight <= 0)
+        {
+            return;
+        }
+
+        if (sourceWidth == destinationWidth && sourceHeight == destinationHeight)
+        {
+            Buffer.BlockCopy(sourceBgra, 0, destinationBgra, 0, Math.Min(sourceBgra.Length, destinationBgra.Length));
+            return;
+        }
+
+        for (int y = 0; y < destinationHeight; y++)
+        {
+            double sourceY = destinationHeight == 1 ? 0.0 : y * (sourceHeight - 1.0) / (destinationHeight - 1.0);
+            int y0 = Math.Clamp((int)Math.Floor(sourceY), 0, sourceHeight - 1);
+            int y1 = Math.Min(y0 + 1, sourceHeight - 1);
+            double ty = sourceY - y0;
+
+            for (int x = 0; x < destinationWidth; x++)
+            {
+                double sourceX = destinationWidth == 1 ? 0.0 : x * (sourceWidth - 1.0) / (destinationWidth - 1.0);
+                int x0 = Math.Clamp((int)Math.Floor(sourceX), 0, sourceWidth - 1);
+                int x1 = Math.Min(x0 + 1, sourceWidth - 1);
+                double tx = sourceX - x0;
+
+                int destinationOffset = (y * destinationWidth + x) * 4;
+                int topLeft = (y0 * sourceWidth + x0) * 4;
+                int topRight = (y0 * sourceWidth + x1) * 4;
+                int bottomLeft = (y1 * sourceWidth + x0) * 4;
+                int bottomRight = (y1 * sourceWidth + x1) * 4;
+
+                for (int channel = 0; channel < 4; channel++)
+                {
+                    double top = sourceBgra[topLeft + channel] * (1.0 - tx) + sourceBgra[topRight + channel] * tx;
+                    double bottom = sourceBgra[bottomLeft + channel] * (1.0 - tx) + sourceBgra[bottomRight + channel] * tx;
+                    destinationBgra[destinationOffset + channel] = (byte)Math.Clamp(Math.Round(top * (1.0 - ty) + bottom * ty), 0, 255);
+                }
             }
         }
     }

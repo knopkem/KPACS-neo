@@ -67,6 +67,9 @@ public sealed class VolumeTransferFunction
     private const int LutSize = 4096;
 
     private readonly double[] _opacityLut = new double[LutSize];
+    private readonly float[]? _colorRLut;
+    private readonly float[]? _colorGLut;
+    private readonly float[]? _colorBLut;
 
     /// <summary>Minimum scalar value mapped to index 0.</summary>
     public double MinValue { get; }
@@ -85,6 +88,8 @@ public sealed class VolumeTransferFunction
     /// <summary>The preset that was used to create this TF, if any.</summary>
     public TransferFunctionPreset Preset { get; }
 
+    public bool HasColorLookup => _colorRLut is not null && _colorGLut is not null && _colorBLut is not null;
+
     // ------------------------------------------------------------------
     //  Construction
     // ------------------------------------------------------------------
@@ -94,13 +99,24 @@ public sealed class VolumeTransferFunction
         double minValue,
         double maxValue,
         double gradientModulationStrength,
-        TransferFunctionPreset preset)
+        TransferFunctionPreset preset,
+        bool enableAutoColor,
+        double autoColorCenter,
+        double autoColorWidth)
     {
         MinValue = minValue;
         MaxValue = maxValue;
         GradientModulationStrength = gradientModulationStrength;
         Preset = preset;
         BuildLut(controlPoints);
+
+        if (enableAutoColor)
+        {
+            _colorRLut = new float[LutSize];
+            _colorGLut = new float[LutSize];
+            _colorBLut = new float[LutSize];
+            BuildColorLut(autoColorCenter, autoColorWidth);
+        }
     }
 
     // ------------------------------------------------------------------
@@ -115,6 +131,22 @@ public sealed class VolumeTransferFunction
     {
         int index = MapToIndex(value);
         return _opacityLut[index];
+    }
+
+    public void LookupColor(double value, out float red, out float green, out float blue)
+    {
+        if (!HasColorLookup)
+        {
+            red = 0f;
+            green = 0f;
+            blue = 0f;
+            return;
+        }
+
+        int index = MapToIndex(value);
+        red = _colorRLut![index];
+        green = _colorGLut![index];
+        blue = _colorBLut![index];
     }
 
     /// <summary>
@@ -143,6 +175,31 @@ public sealed class VolumeTransferFunction
         return lut;
     }
 
+    public (float[] R, float[] G, float[] B) CreateColorLutSnapshots()
+    {
+        float[] red = new float[LutSize];
+        float[] green = new float[LutSize];
+        float[] blue = new float[LutSize];
+
+        if (HasColorLookup)
+        {
+            Array.Copy(_colorRLut!, red, LutSize);
+            Array.Copy(_colorGLut!, green, LutSize);
+            Array.Copy(_colorBLut!, blue, LutSize);
+            return (red, green, blue);
+        }
+
+        for (int i = 0; i < LutSize; i++)
+        {
+            float normalized = i / (float)(LutSize - 1);
+            red[i] = normalized;
+            green[i] = normalized;
+            blue[i] = normalized;
+        }
+
+        return (red, green, blue);
+    }
+
     // ------------------------------------------------------------------
     //  Factory methods — CT Presets
     // ------------------------------------------------------------------
@@ -159,7 +216,10 @@ public sealed class VolumeTransferFunction
             minValue,
             maxValue,
             definition.GradientModulationStrength,
-            definition.Preset);
+            definition.Preset,
+            enableAutoColor: false,
+            autoColorCenter: 0.0,
+            autoColorWidth: 1.0);
     }
 
     public static VolumeTransferFunction CreateWindowed(
@@ -167,7 +227,8 @@ public sealed class VolumeTransferFunction
         double minValue,
         double maxValue,
         double center,
-        double width)
+        double width,
+        bool enableAutoColor = false)
     {
         PresetDefinition definition = GetPresetDefinition(preset, minValue, maxValue);
         (double defaultCenter, double defaultWidth) = GetSuggestedWindow(definition.ControlPoints, minValue, maxValue);
@@ -186,7 +247,10 @@ public sealed class VolumeTransferFunction
             minValue,
             maxValue,
             definition.GradientModulationStrength,
-            definition.Preset);
+            definition.Preset,
+            enableAutoColor,
+            center,
+            safeWidth);
     }
 
     public static (double Center, double Width) GetSuggestedWindow(
@@ -271,6 +335,23 @@ public sealed class VolumeTransferFunction
         {
             double value = MinValue + (MaxValue - MinValue) * i / (LutSize - 1);
             _opacityLut[i] = InterpolateOpacity(controlPoints, value);
+        }
+    }
+
+    private void BuildColorLut(double center, double width)
+    {
+        if (!HasColorLookup)
+        {
+            return;
+        }
+
+        for (int i = 0; i < LutSize; i++)
+        {
+            double value = MinValue + (MaxValue - MinValue) * i / (LutSize - 1);
+            (float red, float green, float blue) = ColorLut.SampleAutoCtDvrColor(value, center, width, Preset);
+            _colorRLut![i] = red;
+            _colorGLut![i] = green;
+            _colorBLut![i] = blue;
         }
     }
 

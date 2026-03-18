@@ -134,6 +134,7 @@ public partial class DicomViewPanel
         double range = Math.Max(1, _volume.MaxValue - _volume.MinValue);
         _windowCenter = _volume.MinValue + range * 0.5;
         _windowWidth = range;
+        ApplyActiveColorLut();
 
         UpdateDvrRenderState(highQuality: false);
     }
@@ -210,7 +211,7 @@ public partial class DicomViewPanel
             SlabThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), _projectionThicknessMm),
             OutputWidth = outputWidth,
             OutputHeight = outputHeight,
-            SamplingStepFactor = highQuality || VolumeComputeBackend.IsOpenClAvailable ? 1.0 : 3.5,  // GPU is fast enough for full quality during interaction
+            SamplingStepFactor = highQuality || VolumeComputeBackend.CanUseOpenCl ? 1.0 : 3.5,
         };
     }
 
@@ -286,7 +287,7 @@ public partial class DicomViewPanel
             return;
         }
 
-        bool gpuAvailable = VolumeComputeBackend.IsOpenClAvailable;
+        bool gpuAvailable = CanUseGpuForCurrentDvr();
         UpdateDvrRenderState(highQuality: gpuAvailable);
 
         ReslicedImage resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
@@ -294,6 +295,7 @@ public partial class DicomViewPanel
         _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         _volumeSlicePixels = resliced.Pixels;
+        _volumeSliceBgraPixels = resliced.BgraPixels;
         _imageWidth = resliced.Width;
         _imageHeight = resliced.Height;
 
@@ -326,6 +328,7 @@ public partial class DicomViewPanel
         _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         _volumeSlicePixels = resliced.Pixels;
+        _volumeSliceBgraPixels = resliced.BgraPixels;
         _imageWidth = resliced.Width;
         _imageHeight = resliced.Height;
 
@@ -345,7 +348,7 @@ public partial class DicomViewPanel
     private void ScheduleDvrSharpRender()
     {
         // GPU already renders at full quality during interaction — no deferred pass needed.
-        if (VolumeComputeBackend.IsOpenClAvailable)
+        if (CanUseGpuForCurrentDvr())
         {
             return;
         }
@@ -478,6 +481,7 @@ public partial class DicomViewPanel
 
         _dvrPreset = preset;
         ResetDvrTransferWindow();
+        ApplyActiveColorLut();
 
         if (IsDvrMode)
         {
@@ -520,6 +524,7 @@ public partial class DicomViewPanel
             _volume.MinValue,
             _volume.MaxValue);
         RebuildDvrTransferFunction();
+        ApplyActiveColorLut();
     }
 
     public void SetDvrTransferWindow(double center, double width)
@@ -533,6 +538,7 @@ public partial class DicomViewPanel
         _dvrTransferCenter = Math.Clamp(center, _volume.MinValue - range * 0.25, _volume.MaxValue + range * 0.25);
         _dvrTransferWidth = Math.Clamp(width, range / 200.0, range * 1.25);
         RebuildDvrTransferFunction();
+        ApplyActiveColorLut();
     }
 
     public double DvrTransferCenter => _dvrTransferCenter;
@@ -581,7 +587,13 @@ public partial class DicomViewPanel
             _volume.MinValue,
             _volume.MaxValue,
             _dvrTransferCenter,
-            _dvrTransferWidth);
+            _dvrTransferWidth,
+            enableAutoColor: _dvrAutoColorLutEnabled && SupportsDvrAutoColorLut);
+    }
+
+    private bool CanUseGpuForCurrentDvr()
+    {
+        return VolumeComputeBackend.CanUseOpenCl;
     }
 
     private SpatialVector3D GetDvrLightDirection(SpatialVector3D forward, SpatialVector3D right, SpatialVector3D up)
@@ -755,7 +767,8 @@ public partial class DicomViewPanel
                     _volume.MinValue,
                     _volume.MaxValue,
                     _dvrTransferCenter,
-                    _dvrTransferWidth);
+                    _dvrTransferWidth,
+                    enableAutoColor: _dvrAutoColorLutEnabled && SupportsDvrAutoColorLut);
 
             VolumeRenderState state = (_dvrRenderState ?? VolumeRayCaster.CreateViewState(
                     _volume,

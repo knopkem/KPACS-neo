@@ -910,6 +910,20 @@
                                            FontSize="10"
                                            TextWrapping="Wrap" />
                             </StackPanel>
+
+                            <StackPanel Spacing="4">
+                                <TextBlock Text="Auto Color LUT"
+                                           Foreground="#FFF0F6FC"
+                                           FontWeight="SemiBold"
+                                           FontSize="11" />
+                                <CheckBox x:Name="RenderingWorkspaceAutoColorLutCheckBox"
+                                          Content="Enable CT tissue-aware coloring for DVR"
+                                          Click="OnRenderingWorkspaceAutoColorLutClick" />
+                                <TextBlock x:Name="RenderingWorkspaceAutoColorLutText"
+                                           Foreground="#FF9DB3C7"
+                                           FontSize="10"
+                                           TextWrapping="Wrap" />
+                            </StackPanel>
                         </StackPanel>
                     </ScrollViewer>
                 </StackPanel>

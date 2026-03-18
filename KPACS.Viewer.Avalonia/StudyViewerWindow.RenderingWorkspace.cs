@@ -109,7 +109,7 @@ public partial class StudyViewerWindow
 
         RenderingPanelSummaryText.Text = BuildRenderingWorkspaceSummary(slot, panel, hasVolume);
         RenderingPanelHintText.Text = hasVolume
-            ? $"Projection, DVR preset, shading, and light direction apply to the active viewport. Selecting a DVR preset also applies its recommended shading, light, and viewer-wide color map. Current preset note: {VolumeRenderingPresetCatalog.GetDescription(panel!.DvrPreset)}"
+            ? $"Projection, DVR preset, shading, light direction, and Auto Color LUT apply to the active viewport. Selecting a DVR preset also applies its recommended shading, light, and viewer-wide color map. Current preset note: {VolumeRenderingPresetCatalog.GetDescription(panel!.DvrPreset)}"
             : hasImage
                 ? "This viewport is loaded, but no 3D volume is available yet. Select a CT/MR volume viewport to use DVR controls."
                 : "Select a viewport with a loaded volume to configure 3D rendering.";
@@ -124,11 +124,13 @@ public partial class StudyViewerWindow
         _isRefreshingRenderingWorkspaceUi = true;
         try
         {
+            bool autoColorLutSupported = hasVolume && panel!.IsDvrMode && panel.SupportsDvrAutoColorLut;
             RenderingWorkspaceProjectionCombo.IsEnabled = hasVolume;
             RenderingWorkspaceDvrPresetCombo.IsEnabled = hasVolume;
             RenderingWorkspaceShadingCombo.IsEnabled = hasVolume;
             RenderingWorkspaceLightDirectionCombo.IsEnabled = hasVolume;
             RenderingWorkspaceColorMapCombo.IsEnabled = _slots.Count > 0;
+            RenderingWorkspaceAutoColorLutCheckBox.IsEnabled = autoColorLutSupported;
             RenderingWorkspaceBackendCombo.IsEnabled = true;
             RenderingWorkspaceBenchmarkButton.IsEnabled = hasVolume;
 
@@ -146,6 +148,14 @@ public partial class StudyViewerWindow
                 : null;
             RenderingWorkspaceBackendCombo.SelectedItem = s_renderingBackendOptions.FirstOrDefault(option => option.Value == _renderingBackendPreference);
             RenderingWorkspaceColorMapCombo.SelectedItem = s_renderingColorMapOptions.FirstOrDefault(option => option.Value == _selectedColorScheme);
+            RenderingWorkspaceAutoColorLutCheckBox.IsChecked = autoColorLutSupported && panel!.IsDvrAutoColorLutEnabled;
+            RenderingWorkspaceAutoColorLutText.Text = !hasVolume
+                ? "Auto Color LUT is available for DVR on loaded CT volumes."
+                : !panel!.IsDvrMode
+                    ? "Switch the active viewport to DVR mode to enable automatic CT tissue colors."
+                    : panel.SupportsDvrAutoColorLut
+                        ? "Builds a CT-focused color LUT from HU tissue anchors and keeps luminance aligned with grayscale for DVR output."
+                        : "Auto Color LUT is currently CT-only and stays off for this viewport.";
         }
         finally
         {
@@ -348,7 +358,7 @@ public partial class StudyViewerWindow
         panel.SetDvrShadingPreset(VolumeRenderingPresetCatalog.GetRecommendedShadingPreset(choice.Value));
         panel.SetDvrLightDirectionPreset(VolumeRenderingPresetCatalog.GetRecommendedLightDirectionPreset(choice.Value));
         int recommendedColorScheme = VolumeRenderingPresetCatalog.GetRecommendedColorScheme(choice.Value);
-        if (_selectedColorScheme != recommendedColorScheme)
+        if (!panel.IsDvrAutoColorLutEnabled && _selectedColorScheme != recommendedColorScheme)
         {
             ApplyColorScheme(recommendedColorScheme);
         }
@@ -408,6 +418,19 @@ public partial class StudyViewerWindow
 
         ApplyColorScheme(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: _renderingPanelVisible || _renderingPanelPinned);
+        SaveViewerSettings();
+    }
+
+    private void OnRenderingWorkspaceAutoColorLutClick(object? sender, RoutedEventArgs e)
+    {
+        if (_isRefreshingRenderingWorkspaceUi || _activeSlot?.Panel is not DicomViewPanel panel || !panel.IsVolumeBound)
+        {
+            return;
+        }
+
+        bool enabled = RenderingWorkspaceAutoColorLutCheckBox.IsChecked == true;
+        panel.SetDvrAutoColorLutEnabled(enabled);
+        RefreshRenderingWorkspacePanel(forceVisible: true);
         SaveViewerSettings();
     }
 

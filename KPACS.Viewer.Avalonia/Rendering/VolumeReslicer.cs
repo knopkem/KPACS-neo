@@ -44,6 +44,9 @@ public sealed class ReslicedImage
     /// <summary>16-bit signed pixel data, row-major, ready for windowing.</summary>
     public short[] Pixels { get; init; } = [];
 
+    /// <summary>Optional BGRA pixel data, row-major, used when rendering already-produced color frames.</summary>
+    public byte[]? BgraPixels { get; init; }
+
     /// <summary>Width of the resliced image in pixels.</summary>
     public int Width { get; init; }
 

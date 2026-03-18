@@ -130,6 +130,7 @@ public static class VolumeRayCaster
         int width = state.OutputWidth > 0 ? state.OutputWidth : 512;
         int height = state.OutputHeight > 0 ? state.OutputHeight : 512;
         short[] pixels = new short[width * height];
+        byte[]? bgraPixels = transferFunction.HasColorLookup ? new byte[width * height * 4] : null;
 
         // Volume bounding box in physical (mm) space
         double spacingX = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
@@ -234,6 +235,9 @@ public static class VolumeRayCaster
                 }
 
                 double accumulatedValue = 0.0;
+                double accumulatedRed = 0.0;
+                double accumulatedGreen = 0.0;
+                double accumulatedBlue = 0.0;
                 double accumulatedAlpha = 0.0;
 
                 // Front-to-back ray march
@@ -272,16 +276,29 @@ public static class VolumeRayCaster
                     }
 
                     // Phong shading
-                    double normalized = Math.Clamp((voxelValue - volume.MinValue) / valueRange, 0.0, 1.0);
                     Vector3D normal = gradient.Normalize();
                     Vector3D viewDir = rayDir * -1.0;
                     Vector3D halfVec = (lightDirection + viewDir).Normalize();
                     double illumination = ComputePhong(normal, lightDirection, halfVec, state);
-                    double shadedValue = Math.Clamp(normalized * illumination, 0.0, 1.0);
 
                     // Front-to-back compositing
                     double contribution = opacity * (1.0 - accumulatedAlpha);
-                    accumulatedValue += shadedValue * contribution;
+
+                    if (transferFunction.HasColorLookup)
+                    {
+                        transferFunction.LookupColor(voxelValue, out float baseRed, out float baseGreen, out float baseBlue);
+                        accumulatedRed += Math.Clamp(baseRed * illumination, 0.0, 1.0) * contribution;
+                        accumulatedGreen += Math.Clamp(baseGreen * illumination, 0.0, 1.0) * contribution;
+                        accumulatedBlue += Math.Clamp(baseBlue * illumination, 0.0, 1.0) * contribution;
+                        accumulatedValue += voxelValue * contribution;
+                    }
+                    else
+                    {
+                        double normalized = Math.Clamp((voxelValue - volume.MinValue) / valueRange, 0.0, 1.0);
+                        double shadedValue = Math.Clamp(normalized * illumination, 0.0, 1.0);
+                        accumulatedValue += shadedValue * contribution;
+                    }
+
                     accumulatedAlpha += contribution;
 
                     if (accumulatedAlpha >= state.OpacityTerminationThreshold)
@@ -290,11 +307,34 @@ public static class VolumeRayCaster
                     }
                 }
 
-                double finalNormalized = accumulatedAlpha > 0.0001
-                    ? accumulatedValue / accumulatedAlpha
-                    : 0.0;
-                double finalValue = volume.MinValue + finalNormalized * valueRange;
-                pixels[row * width + column] = (short)Math.Clamp(Math.Round(finalValue), short.MinValue, short.MaxValue);
+                int pixelIndex = row * width + column;
+                if (transferFunction.HasColorLookup)
+                {
+                    double finalValue = accumulatedAlpha > 0.0001
+                        ? accumulatedValue / accumulatedAlpha
+                        : volume.MinValue;
+                    pixels[pixelIndex] = (short)Math.Clamp(Math.Round(finalValue), short.MinValue, short.MaxValue);
+
+                    if (bgraPixels is not null)
+                    {
+                        int colorOffset = pixelIndex * 4;
+                        double finalRed = accumulatedAlpha > 0.0001 ? accumulatedRed / accumulatedAlpha : 0.0;
+                        double finalGreen = accumulatedAlpha > 0.0001 ? accumulatedGreen / accumulatedAlpha : 0.0;
+                        double finalBlue = accumulatedAlpha > 0.0001 ? accumulatedBlue / accumulatedAlpha : 0.0;
+                        bgraPixels[colorOffset] = (byte)Math.Clamp(Math.Round(finalBlue * 255.0), 0, 255);
+                        bgraPixels[colorOffset + 1] = (byte)Math.Clamp(Math.Round(finalGreen * 255.0), 0, 255);
+                        bgraPixels[colorOffset + 2] = (byte)Math.Clamp(Math.Round(finalRed * 255.0), 0, 255);
+                        bgraPixels[colorOffset + 3] = 255;
+                    }
+                }
+                else
+                {
+                    double finalNormalized = accumulatedAlpha > 0.0001
+                        ? accumulatedValue / accumulatedAlpha
+                        : 0.0;
+                    double finalValue = volume.MinValue + finalNormalized * valueRange;
+                    pixels[pixelIndex] = (short)Math.Clamp(Math.Round(finalValue), short.MinValue, short.MaxValue);
+                }
             }
         });
 
@@ -302,6 +342,7 @@ public static class VolumeRayCaster
         return new ReslicedImage
         {
             Pixels = pixels,
+            BgraPixels = bgraPixels,
             Width = width,
             Height = height,
             PixelSpacingX = pixelSizeX,
