@@ -24,6 +24,7 @@ Thumbs.db
 
 # Retired local-only project
 KPACS.Viewer/
+KPACS.sln
 
 # Local published release output; keep packaged archives only
 release/win-x64-singlefile/
