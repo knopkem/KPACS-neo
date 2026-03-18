@@ -1,3 +1,4 @@
+using System.Runtime.CompilerServices;
 using System.Threading;
 using KPACS.Viewer.Models;
 using OpenCL.Net;
@@ -65,6 +66,87 @@ public static class VolumeComputeBackend
     }
 
     public static bool IsOpenClAvailable => Runtime.Value.Renderer is not null;
+
+    /// <summary>
+    /// Returns the error message from the most recent failed OpenCL render attempt,
+    /// or <c>null</c> if the last render succeeded or no renderer is available.
+    /// </summary>
+    public static string? LastRenderError => Runtime.Value.Renderer?.LastError;
+
+    /// <summary>
+    /// Returns the actual GPU kernel execution time in ms from the last OpenCL render,
+    /// as reported by the device's hardware profiling counters.
+    /// Returns <c>null</c> if no renderer or profiling data unavailable.
+    /// </summary>
+    public static double? LastKernelTimeMs
+    {
+        get
+        {
+            OpenClVolumeRenderer? r = Runtime.Value.Renderer;
+            return r is not null && r.LastKernelTimeMs >= 0 ? r.LastKernelTimeMs : null;
+        }
+    }
+
+    /// <summary>
+    /// Enumerates all OpenCL platforms and devices visible to the runtime.
+    /// Returns a human-readable diagnostic string (like clinfo).
+    /// </summary>
+    public static string GetOpenClDiagnostics()
+    {
+        try
+        {
+            var sb = new System.Text.StringBuilder();
+            OpenCL.Net.Platform[] platforms = Cl.GetPlatformIDs(out ErrorCode platformError);
+            if (platformError != ErrorCode.Success || platforms.Length == 0)
+            {
+                return $"OpenCL GetPlatformIDs returned {platformError}, {platforms?.Length ?? 0} platform(s).";
+            }
+
+            sb.AppendLine($"{platforms.Length} OpenCL platform(s) found:");
+            for (int p = 0; p < platforms.Length; p++)
+            {
+                string platName = Cl.GetPlatformInfo(platforms[p], PlatformInfo.Name, out _).ToString().Trim();
+                string platVendor = Cl.GetPlatformInfo(platforms[p], PlatformInfo.Vendor, out _).ToString().Trim();
+                string platVersion = Cl.GetPlatformInfo(platforms[p], PlatformInfo.Version, out _).ToString().Trim();
+                sb.AppendLine($"  Platform[{p}]: {platName} | {platVendor} | {platVersion}");
+
+                // Enumerate ALL device types (GPU, CPU, Accelerator)
+                foreach (DeviceType deviceType in new[] { DeviceType.Gpu, DeviceType.Cpu, DeviceType.Accelerator })
+                {
+                    OpenCL.Net.Device[] devices = Cl.GetDeviceIDs(platforms[p], deviceType, out ErrorCode devErr);
+                    if (devErr != ErrorCode.Success || devices.Length == 0)
+                    {
+                        continue;
+                    }
+
+                    foreach (OpenCL.Net.Device dev in devices)
+                    {
+                        string devName = Cl.GetDeviceInfo(dev, DeviceInfo.Name, out _).ToString().Trim();
+                        string devVendor = Cl.GetDeviceInfo(dev, DeviceInfo.Vendor, out _).ToString().Trim();
+                        uint devCu = SafeCast<uint>(Cl.GetDeviceInfo(dev, DeviceInfo.MaxComputeUnits, out _));
+                        ulong devMem = SafeCast<ulong>(Cl.GetDeviceInfo(dev, DeviceInfo.GlobalMemSize, out _));
+                        ulong devMaxWg = SafeCast<ulong>(Cl.GetDeviceInfo(dev, DeviceInfo.MaxWorkGroupSize, out _));
+                        string devVersion = Cl.GetDeviceInfo(dev, DeviceInfo.Version, out _).ToString().Trim();
+                        sb.AppendLine($"    [{deviceType}] {devName} | {devVendor} | {devCu} CU | {devMem / (1024UL * 1024UL)} MB | WG {devMaxWg} | {devVersion}");
+                    }
+                }
+            }
+
+            sb.AppendLine($"Selected: {CurrentStatus.DeviceName} | Kind: {CurrentStatus.Kind} | Accelerated: {CurrentStatus.IsAccelerated}");
+            sb.Append($"Detail: {CurrentStatus.Detail}");
+            return sb.ToString();
+        }
+        catch (Exception ex)
+        {
+            return $"OpenCL diagnostics failed: {ex.Message}";
+        }
+    }
+
+    private static T SafeCast<T>(InfoBuffer buffer) where T : struct
+    {
+        try { return buffer.CastTo<T>(); }
+        catch { return default!; }
+    }
 
     public static bool TryRenderProjection(
         SeriesVolume volume,
@@ -237,8 +319,8 @@ inline float sample_trilinear(__global const short* volume, int sizeX, int sizeY
 
 inline float3 safe_normalize(float3 value)
 {
-    float lengthValue = length(value);
-    return lengthValue > 1.0e-6f ? value / lengthValue : (float3)(0.0f, 0.0f, 0.0f);
+    float len2 = dot(value, value);
+    return len2 > 1.0e-12f ? value * native_rsqrt(len2) : (float3)(0.0f, 0.0f, 0.0f);
 }
 
 inline float lookup_opacity(__global const float* opacityLut, float minValue, float maxValue, float value)
@@ -249,22 +331,20 @@ inline float lookup_opacity(__global const float* opacityLut, float minValue, fl
     return opacityLut[index];
 }
 
-inline float3 sample_gradient(__global const short* volume, int sizeX, int sizeY, int sizeZ, float x, float y, float z, float spacingX, float spacingY, float spacingZ)
+inline float3 sample_gradient(__global const short* volume, int sizeX, int sizeY, int sizeZ, float x, float y, float z, float invSpacing2X, float invSpacing2Y, float invSpacing2Z)
 {
-    float sx = fmax(spacingX, 1.0e-3f);
-    float sy = fmax(spacingY, 1.0e-3f);
-    float sz = fmax(spacingZ, 1.0e-3f);
-    float gx = (sample_clamped(volume, sizeX, sizeY, sizeZ, x + 1.0f, y, z) - sample_clamped(volume, sizeX, sizeY, sizeZ, x - 1.0f, y, z)) / (2.0f * sx);
-    float gy = (sample_clamped(volume, sizeX, sizeY, sizeZ, x, y + 1.0f, z) - sample_clamped(volume, sizeX, sizeY, sizeZ, x, y - 1.0f, z)) / (2.0f * sy);
-    float gz = (sample_clamped(volume, sizeX, sizeY, sizeZ, x, y, z + 1.0f) - sample_clamped(volume, sizeX, sizeY, sizeZ, x, y, z - 1.0f)) / (2.0f * sz);
+    float gx = (sample_clamped(volume, sizeX, sizeY, sizeZ, x + 1.0f, y, z) - sample_clamped(volume, sizeX, sizeY, sizeZ, x - 1.0f, y, z)) * invSpacing2X;
+    float gy = (sample_clamped(volume, sizeX, sizeY, sizeZ, x, y + 1.0f, z) - sample_clamped(volume, sizeX, sizeY, sizeZ, x, y - 1.0f, z)) * invSpacing2Y;
+    float gz = (sample_clamped(volume, sizeX, sizeY, sizeZ, x, y, z + 1.0f) - sample_clamped(volume, sizeX, sizeY, sizeZ, x, y, z - 1.0f)) * invSpacing2Z;
     return (float3)(gx, gy, gz);
 }
 
 inline float compute_phong(float3 normal, float3 lightDirection, float3 halfVector, float ambientIntensity, float diffuseIntensity, float specularIntensity, float shininess)
 {
-    float diffuseTerm = fmax(dot(normal, lightDirection), 0.0f);
-    float specularTerm = diffuseTerm > 0.0f ? pow(fmax(dot(normal, halfVector), 0.0f), shininess) : 0.0f;
-    return ambientIntensity + diffuseIntensity * diffuseTerm + specularIntensity * specularTerm;
+    float NdotL = fmax(dot(normal, lightDirection), 0.0f);
+    float NdotH = fmax(dot(normal, halfVector), 0.0f);
+    float specularTerm = native_powr(fmax(NdotH, 1.0e-6f), shininess) * step(1.0e-6f, NdotL);
+    return mad(diffuseIntensity, NdotL, mad(specularIntensity, specularTerm, ambientIntensity));
 }
 
 inline int intersect_aabb(float3 origin, float3 direction, float3 boxMin, float3 boxMax, float* tNear, float* tFar)
@@ -541,6 +621,9 @@ __kernel void RenderDvr(
     float minSpacing = fmin(spacingX, fmin(spacingY, spacingZ));
     float stepMm = minSpacing * fmax(0.25f, samplingStepFactor);
     float range = fmax(maxValue - minValue, 1.0f);
+    float invSpacing2X = native_recip(2.0f * fmax(spacingX, 1.0e-3f));
+    float invSpacing2Y = native_recip(2.0f * fmax(spacingY, 1.0e-3f));
+    float invSpacing2Z = native_recip(2.0f * fmax(spacingZ, 1.0e-3f));
 
     float pixelSizeX;
     float pixelSizeY;
@@ -625,14 +708,15 @@ __kernel void RenderDvr(
             continue;
         }
 
-        float3 gradient = sample_gradient(volume, sizeX, sizeY, sizeZ, vx, vy, vz, spacingX, spacingY, spacingZ);
+        float3 gradient = sample_gradient(volume, sizeX, sizeY, sizeZ, vx, vy, vz, invSpacing2X, invSpacing2Y, invSpacing2Z);
         if (gradientModulationStrength > 0.0f)
         {
-            float modulation = fmin(1.0f, length(gradient) * gradientModulationStrength);
+            float gradLen2 = dot(gradient, gradient);
+            float modulation = fmin(1.0f, native_sqrt(fmax(gradLen2, 0.0f)) * gradientModulationStrength);
             opacity *= modulation;
         }
 
-        opacity = 1.0f - pow(1.0f - opacity, stepMm / minSpacing);
+        opacity = 1.0f - native_powr(fmax(1.0f - opacity, 1.0e-6f), stepMm / minSpacing);
         if (opacity <= 1.0e-4f)
         {
             continue;
@@ -666,6 +750,13 @@ __kernel void RenderDvr(
     private readonly OpenClKernel _projectionKernel;
     private readonly OpenClKernel _dvrKernel;
     private readonly OpenClDevice _device;
+    private readonly int _localSizeX;
+    private readonly int _localSizeY;
+    private readonly uint _computeUnits;
+    private string? _lastError;
+    private OpenClEvent _lastKernelEvent;
+    private bool _hasKernelEvent;
+    private double _lastKernelTimeMs = -1.0;
     private SeriesVolume? _cachedVolume;
     private IMem<short>? _cachedVolumeBuffer;
     private IMem<short>? _cachedProjectionOutputBuffer;
@@ -682,7 +773,9 @@ __kernel void RenderDvr(
         OpenClKernel projectionKernel,
         OpenClKernel dvrKernel,
         OpenClDevice device,
-        VolumeComputeBackendStatus status)
+        VolumeComputeBackendStatus status,
+        uint computeUnits,
+        ulong maxWorkGroupSize)
     {
         _context = context;
         _queue = queue;
@@ -691,9 +784,24 @@ __kernel void RenderDvr(
         _dvrKernel = dvrKernel;
         _device = device;
         Status = status;
+        _computeUnits = computeUnits;
+        int localDim = maxWorkGroupSize >= 256 ? 16 : (maxWorkGroupSize >= 64 ? 8 : 1);
+        _localSizeX = localDim;
+        _localSizeY = localDim;
     }
 
     public VolumeComputeBackendStatus Status { get; }
+
+    /// <summary>
+    /// The error message from the most recent failed OpenCL render attempt, or <c>null</c> if the last render succeeded.
+    /// </summary>
+    public string? LastError => _lastError;
+
+    /// <summary>
+    /// Actual GPU kernel execution time in milliseconds from OpenCL profiling events,
+    /// or -1.0 if profiling data is unavailable.
+    /// </summary>
+    public double LastKernelTimeMs => _lastKernelTimeMs;
 
     public static OpenClVolumeRenderer? TryCreate(out string detail)
     {
@@ -703,12 +811,23 @@ __kernel void RenderDvr(
         }
 
         ErrorCode error;
-        OpenClContext context = Cl.CreateContext(null!, 1, [device], null!, IntPtr.Zero, out error);
+
+        // CRITICAL: Explicitly bind the context to the selected platform.
+        // Without this, the OpenCL ICD loader may route to a different platform
+        // (e.g. Intel instead of NVIDIA on multi-GPU systems), causing the
+        // selected device to never actually execute any work.
+        IntPtr platformHandle = Unsafe.As<OpenClPlatform, IntPtr>(ref platform);
+        ContextProperty[] contextProperties =
+        [
+            new ContextProperty(ContextProperties.Platform, platformHandle),
+            ContextProperty.Zero,   // null terminator required by OpenCL spec
+        ];
+        OpenClContext context = Cl.CreateContext(contextProperties, 1, [device], null!, IntPtr.Zero, out error);
         ThrowOnError(error, "Failed to create OpenCL context.");
 
         try
         {
-            OpenClCommandQueue queue = Cl.CreateCommandQueue(context, device, CommandQueueProperties.None, out error);
+            OpenClCommandQueue queue = Cl.CreateCommandQueue(context, device, CommandQueueProperties.ProfilingEnable, out error);
             ThrowOnError(error, "Failed to create OpenCL command queue.");
 
             try
@@ -718,7 +837,7 @@ __kernel void RenderDvr(
 
                 try
                 {
-                    error = Cl.BuildProgram(program, 1, [device], string.Empty, null!, IntPtr.Zero);
+                    error = Cl.BuildProgram(program, 1, [device], "-cl-fast-relaxed-math", null!, IntPtr.Zero);
                     if (error != ErrorCode.Success)
                     {
                         string buildLog = Cl.GetProgramBuildInfo(program, device, ProgramBuildInfo.Log, out _).ToString();
@@ -733,6 +852,11 @@ __kernel void RenderDvr(
                         OpenClKernel dvrKernel = Cl.CreateKernel(program, "RenderDvr", out error);
                         ThrowOnError(error, "Failed to create OpenCL DVR kernel.");
 
+                        uint computeUnits = SafeCast<uint>(Cl.GetDeviceInfo(device, DeviceInfo.MaxComputeUnits, out _));
+                        ulong maxWorkGroupSize = SafeCast<ulong>(Cl.GetDeviceInfo(device, DeviceInfo.MaxWorkGroupSize, out _));
+                        ulong globalMem = SafeCast<ulong>(Cl.GetDeviceInfo(device, DeviceInfo.GlobalMemSize, out _));
+                        string memStr = $"{globalMem / (1024UL * 1024UL * 1024UL)} GB";
+
                         return new OpenClVolumeRenderer(
                             context,
                             queue,
@@ -745,7 +869,9 @@ __kernel void RenderDvr(
                                 $"OpenCL ({deviceName})",
                                 deviceName,
                                 true,
-                                $"OpenCL active on {deviceName}."));
+                                $"OpenCL active on {deviceName} ({computeUnits} CU, {memStr} VRAM)."),
+                            computeUnits,
+                            maxWorkGroupSize);
                     }
                     catch
                     {
@@ -794,6 +920,7 @@ __kernel void RenderDvr(
                 EnsureVolumeBuffer(volume);
                 if (_cachedVolumeBuffer is null)
                 {
+                    _lastError = "Volume buffer allocation returned null.";
                     return false;
                 }
 
@@ -816,6 +943,7 @@ __kernel void RenderDvr(
 
                 Execute2D(_projectionKernel, reference.Width, reference.Height);
                 short[] pixels = ReadBuffer(outputBuffer, outputLength);
+                UpdateKernelProfilingTime();
                 image = new ReslicedImage
                 {
                     Pixels = pixels,
@@ -826,10 +954,12 @@ __kernel void RenderDvr(
                     SpatialMetadata = reference.SpatialMetadata,
                     RenderBackendLabel = Status.DisplayName,
                 };
+                _lastError = null;
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                _lastError = $"OpenCL projection failed: {ex.Message}";
                 image = new ReslicedImage();
                 return false;
             }
@@ -900,6 +1030,7 @@ __kernel void RenderDvr(
 
                 Execute2D(_dvrKernel, width, height);
                 short[] pixels = ReadBuffer(outputBuffer, outputLength);
+                UpdateKernelProfilingTime();
                 image = new ReslicedImage
                 {
                     Pixels = pixels,
@@ -910,11 +1041,12 @@ __kernel void RenderDvr(
                     SpatialMetadata = null,
                     RenderBackendLabel = Status.DisplayName,
                 };
-
+                _lastError = null;
                 return true;
             }
-            catch
+            catch (Exception ex)
             {
+                _lastError = $"OpenCL DVR failed: {ex.Message}";
                 image = new ReslicedImage();
                 return false;
             }
@@ -992,7 +1124,7 @@ __kernel void RenderDvr(
                 return false;
             }
 
-            detail = $"Selected {deviceName}.";
+            detail = $"Selected {deviceName} (score={bestScore}).";
             return true;
         }
         catch (Exception ex)
@@ -1000,6 +1132,19 @@ __kernel void RenderDvr(
             detail = $"OpenCL probe failed: {ex.Message}";
             return false;
         }
+    }
+
+    /// <summary>
+    /// Verifies that the given pixel array contains at least some non-zero values.
+    /// If the GPU kernel silently failed, the output buffer is typically all-zero.
+    /// </summary>
+    public static bool HasNonZeroPixels(short[] pixels)
+    {
+        for (int i = 0; i < pixels.Length; i++)
+        {
+            if (pixels[i] != 0) return true;
+        }
+        return false;
     }
 
     private void EnsureVolumeBuffer(SeriesVolume volume)
@@ -1099,20 +1244,54 @@ __kernel void RenderDvr(
 
     private void Execute2D(OpenClKernel kernel, int width, int height)
     {
+        if (_hasKernelEvent)
+        {
+            try { Cl.ReleaseEvent(_lastKernelEvent); } catch { /* best-effort cleanup */ }
+            _hasKernelEvent = false;
+        }
+
+        int globalX = RoundUpToMultiple(width, _localSizeX);
+        int globalY = RoundUpToMultiple(height, _localSizeY);
         ErrorCode error = Cl.EnqueueNDRangeKernel(
             _queue,
             kernel,
             2,
             null!,
-            [new IntPtr(width), new IntPtr(height)],
-            null!,
+            [new IntPtr(globalX), new IntPtr(globalY)],
+            [new IntPtr(_localSizeX), new IntPtr(_localSizeY)],
             0,
-            Array.Empty<OpenClEvent>(),
-            out _);
+            null!,
+            out _lastKernelEvent);
         ThrowOnError(error, "Failed to execute OpenCL kernel.");
-        error = Cl.Finish(_queue);
-        ThrowOnError(error, "Failed to finish OpenCL queue.");
+        _hasKernelEvent = true;
+        // No Cl.Finish() — the subsequent blocking EnqueueReadBuffer
+        // implicitly waits for all prior commands on this in-order queue.
     }
+
+    /// <summary>
+    /// Queries OpenCL profiling events to get the actual kernel execution time on the device.
+    /// Must be called AFTER the blocking ReadBuffer (which ensures the kernel has completed).
+    /// </summary>
+    private void UpdateKernelProfilingTime()
+    {
+        _lastKernelTimeMs = -1.0;
+        if (!_hasKernelEvent) return;
+        try
+        {
+            InfoBuffer startInfo = Cl.GetEventProfilingInfo(_lastKernelEvent, ProfilingInfo.Start, out ErrorCode startErr);
+            InfoBuffer endInfo = Cl.GetEventProfilingInfo(_lastKernelEvent, ProfilingInfo.End, out ErrorCode endErr);
+            if (startErr == ErrorCode.Success && endErr == ErrorCode.Success)
+            {
+                ulong startNs = startInfo.CastTo<ulong>();
+                ulong endNs = endInfo.CastTo<ulong>();
+                _lastKernelTimeMs = (endNs - startNs) / 1_000_000.0;
+            }
+        }
+        catch { /* profiling not available */ }
+    }
+
+    private static int RoundUpToMultiple(int value, int multiple)
+        => ((value + multiple - 1) / multiple) * multiple;
 
     private T[] ReadBuffer<T>(IMem<T> buffer, int length) where T : struct
     {
@@ -1123,7 +1302,7 @@ __kernel void RenderDvr(
             Bool.True,
             data,
             0,
-            Array.Empty<OpenClEvent>(),
+            null!,
             out _);
         ThrowOnError(error, "Failed to read OpenCL buffer.");
         return data;

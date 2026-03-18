@@ -423,13 +423,23 @@ public partial class StudyViewerWindow
 
         try
         {
-            DicomViewPanel.VolumeRenderBenchmarkResult result = await System.Threading.Tasks.Task.Run(() => panel.BenchmarkCurrentVolumeRendering(3));
-            _renderingBenchmarkSummary = result.OpenClMeasured
-                ? $"{result.Summary}. Runtime detail: {result.OpenClStatus}"
-                : result.Summary;
+            DicomViewPanel.VolumeRenderBenchmarkResult result = await System.Threading.Tasks.Task.Run(() => panel.BenchmarkCurrentVolumeRendering());
+
+            // Log full diagnostics to debug output for troubleshooting.
+            System.Diagnostics.Debug.WriteLine("=== OpenCL Benchmark Diagnostics ===");
+            System.Diagnostics.Debug.WriteLine(result.DiagnosticTrace);
+            System.Diagnostics.Debug.WriteLine(result.OpenClDiagnostics);
+            System.Diagnostics.Debug.WriteLine($"GPU actually used: {result.GpuActuallyUsed}");
+            System.Diagnostics.Debug.WriteLine($"Summary: {result.Summary}");
+            System.Diagnostics.Debug.WriteLine("===================================");
+
+            _renderingBenchmarkSummary = $"{result.Summary}\n\n--- Trace ---\n{result.DiagnosticTrace}\n--- Devices ---\n{result.OpenClDiagnostics}";
             RenderingWorkspaceBenchmarkText.Text = _renderingBenchmarkSummary;
             RefreshRenderingWorkspacePanel(forceVisible: true);
-            ShowToast(result.Summary, result.OpenClMeasured ? ToastSeverity.Info : ToastSeverity.Warning, TimeSpan.FromSeconds(6));
+            ToastSeverity severity = result.OpenClMeasured && result.GpuActuallyUsed
+                ? ToastSeverity.Info
+                : ToastSeverity.Warning;
+            ShowToast(result.Summary, severity, TimeSpan.FromSeconds(8));
         }
         catch (Exception ex)
         {

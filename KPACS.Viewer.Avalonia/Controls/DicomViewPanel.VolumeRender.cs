@@ -23,7 +23,12 @@ public partial class DicomViewPanel
         double? OpenClAverageMilliseconds,
         string OpenClStatus,
         string Summary,
-        bool OpenClMeasured);
+        bool OpenClMeasured,
+        bool GpuActuallyUsed,
+        string OpenClDiagnostics,
+        string WorkloadInfo,
+        double? GpuKernelTimeMs,
+        string DiagnosticTrace);
 
     // ==============================================================================================
     //  DVR state
@@ -205,7 +210,7 @@ public partial class DicomViewPanel
             SlabThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), _projectionThicknessMm),
             OutputWidth = outputWidth,
             OutputHeight = outputHeight,
-            SamplingStepFactor = highQuality ? 1.0 : 3.5,  // coarser steps during interaction
+            SamplingStepFactor = highQuality || VolumeComputeBackend.IsOpenClAvailable ? 1.0 : 3.5,  // GPU is fast enough for full quality during interaction
         };
     }
 
@@ -270,8 +275,9 @@ public partial class DicomViewPanel
     // ==============================================================================================
 
     /// <summary>
-    /// Performs a lightweight DVR render using the current camera state.
-    /// Used during orbit interaction for fast feedback.
+    /// Performs a DVR render using the current camera state.
+    /// When OpenCL is available, renders at full quality; otherwise uses coarser
+    /// sampling for fast feedback during orbit interaction.
     /// </summary>
     private void RenderDvrViewFast()
     {
@@ -280,7 +286,8 @@ public partial class DicomViewPanel
             return;
         }
 
-        UpdateDvrRenderState(highQuality: false);
+        bool gpuAvailable = VolumeComputeBackend.IsOpenClAvailable;
+        UpdateDvrRenderState(highQuality: gpuAvailable);
 
         ReslicedImage resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
             _volume, _dvrRenderState, _dvrTransferFunction);
@@ -292,7 +299,8 @@ public partial class DicomViewPanel
 
         // Don't call ApplyDisplayImageSize() — dimensions are stable,
         // layout was already established by the initial DVR render.
-        RenderImage(sharp: false);
+        // GPU renders at full quality, so use sharp display output too.
+        RenderImage(sharp: gpuAvailable);
     }
 
     /// <summary>
@@ -331,10 +339,17 @@ public partial class DicomViewPanel
 
     /// <summary>
     /// Schedules a sharp DVR re-render after a short idle delay.
-    /// Uses a dedicated timer to avoid conflicting with the existing sharp-render mechanism.
+    /// When OpenCL is available, the fast render already runs at full quality,
+    /// so the deferred re-render is skipped entirely.
     /// </summary>
     private void ScheduleDvrSharpRender()
     {
+        // GPU already renders at full quality during interaction — no deferred pass needed.
+        if (VolumeComputeBackend.IsOpenClAvailable)
+        {
+            return;
+        }
+
         if (_dvrSharpRenderTimer is null)
         {
             _dvrSharpRenderTimer = new Avalonia.Threading.DispatcherTimer
@@ -580,40 +595,135 @@ public partial class DicomViewPanel
         return light.Normalize();
     }
 
-    public VolumeRenderBenchmarkResult BenchmarkCurrentVolumeRendering(int iterations = 3)
+    public VolumeRenderBenchmarkResult BenchmarkCurrentVolumeRendering(int iterations = 5)
     {
         if (_volume is null)
         {
             throw new InvalidOperationException("No volume is currently bound to this viewport.");
         }
 
+        var trace = new System.Text.StringBuilder();
+        void Log(string msg) { trace.AppendLine(msg); System.Diagnostics.Debug.WriteLine($"[BM] {msg}"); }
+
         int effectiveIterations = Math.Max(1, iterations);
+
+        // Collect workload dimensions.
+        int volX = _volume.SizeX, volY = _volume.SizeY, volZ = _volume.SizeZ;
+        long voxelCount = (long)volX * volY * volZ;
+        int outW = Math.Max(1, _imageWidth), outH = Math.Max(1, _imageHeight);
+        int pixelCount = outW * outH;
+        string workloadInfo = $"Volume: {volX}\u00d7{volY}\u00d7{volZ} ({voxelCount / 1_000_000.0:F1}M voxels), Output: {outW}\u00d7{outH} ({pixelCount / 1000.0:F0}K px)";
+        Log(workloadInfo);
+        Log($"IsDvrMode={IsDvrMode}");
+
+        // Warm up CPU path (two renders excluded from timing).
+        RenderCurrentVolumeStateForBenchmark(VolumeComputePreference.CpuOnly);
         RenderCurrentVolumeStateForBenchmark(VolumeComputePreference.CpuOnly);
         double cpuAverage = BenchmarkPreference(VolumeComputePreference.CpuOnly, effectiveIterations);
+        Log($"CPU avg: {cpuAverage:F1} ms");
 
         string openClStatus = VolumeComputeBackend.CurrentStatus.Detail;
+        string diagnostics = VolumeComputeBackend.GetOpenClDiagnostics();
+        Log($"OpenCL status: {openClStatus}");
+        Log($"IsOpenClAvailable: {VolumeComputeBackend.IsOpenClAvailable}");
+        Log($"Preference: {VolumeComputeBackend.Preference}");
+
         if (!VolumeComputeBackend.IsOpenClAvailable)
         {
+            Log("ABORT: OpenCL not available.");
             return new VolumeRenderBenchmarkResult(
                 effectiveIterations,
                 cpuAverage,
                 null,
                 openClStatus,
                 $"CPU {cpuAverage:F1} ms avg over {effectiveIterations} render(s). OpenCL unavailable: {openClStatus}",
-                false);
+                false,
+                false,
+                diagnostics,
+                workloadInfo,
+                null,
+                trace.ToString());
         }
 
+        // Warm up GPU path (two renders: kernel JIT + cache priming, excluded from timing).
+        Log("GPU warmup #1...");
+        ReslicedImage gpuProbe = RenderCurrentVolumeStateForBenchmark(VolumeComputePreference.OpenClOnly);
+        Log($"  warmup #1 done: label='{gpuProbe.RenderBackendLabel}', pixels={gpuProbe.Pixels?.Length ?? 0}, size={gpuProbe.Width}x{gpuProbe.Height}");
+        Log($"  LastRenderError={VolumeComputeBackend.LastRenderError ?? "(none)"}");
+        Log($"  LastKernelTimeMs={VolumeComputeBackend.LastKernelTimeMs?.ToString("F3") ?? "null"}");
         RenderCurrentVolumeStateForBenchmark(VolumeComputePreference.OpenClOnly);
-        double openClAverage = BenchmarkPreference(VolumeComputePreference.OpenClOnly, effectiveIterations);
-        string summary = $"CPU {cpuAverage:F1} ms vs OpenCL {openClAverage:F1} ms avg over {effectiveIterations} render(s)";
+        Log($"  warmup #2 done: LastKernelTimeMs={VolumeComputeBackend.LastKernelTimeMs?.ToString("F3") ?? "null"}");
 
+        // Detect silent GPU fallback: if the image has no RenderBackendLabel, GPU failed and CPU ran instead.
+        bool gpuActuallyUsed = !string.IsNullOrEmpty(gpuProbe.RenderBackendLabel);
+        string? gpuError = VolumeComputeBackend.LastRenderError;
+        double? gpuKernelMs = VolumeComputeBackend.LastKernelTimeMs;
+        Log($"gpuActuallyUsed={gpuActuallyUsed}, gpuError={gpuError ?? "(none)"}, gpuKernelMs={gpuKernelMs?.ToString("F3") ?? "null"}");
+
+        // Verify output has actual pixel data (not all zeros = kernel was a no-op).
+        bool hasRealOutput = gpuProbe.Pixels is not null && gpuProbe.Pixels.Length > 0
+            && OpenClVolumeRenderer.HasNonZeroPixels(gpuProbe.Pixels);
+        Log($"hasRealOutput={hasRealOutput}");
+
+        if (gpuProbe.Pixels is not null && gpuProbe.Pixels.Length > 0)
+        {
+            int nonZero = 0;
+            short min = short.MaxValue, max = short.MinValue;
+            for (int i = 0; i < gpuProbe.Pixels.Length; i++)
+            {
+                short v = gpuProbe.Pixels[i];
+                if (v != 0) nonZero++;
+                if (v < min) min = v;
+                if (v > max) max = v;
+            }
+            Log($"Output pixels: {nonZero}/{gpuProbe.Pixels.Length} nonzero, range=[{min}..{max}]");
+        }
+
+        double openClAverage = BenchmarkPreference(VolumeComputePreference.OpenClOnly, effectiveIterations);
+        Log($"OpenCL avg: {openClAverage:F1} ms");
+
+        // Get kernel time from last timed iteration (most representative).
+        double? finalKernelMs = VolumeComputeBackend.LastKernelTimeMs ?? gpuKernelMs;
+        Log($"Final kernel time: {finalKernelMs?.ToString("F3") ?? "null"} ms");
+        string kernelTimeStr = finalKernelMs.HasValue
+            ? $", GPU kernel: {finalKernelMs.Value:F3} ms"
+            : string.Empty;
+
+        string summary;
+        if (gpuActuallyUsed && hasRealOutput)
+        {
+            string speedup = openClAverage > 0.01
+                ? $" ({cpuAverage / openClAverage:F1}\u00d7)"
+                : string.Empty;
+            summary = $"CPU {cpuAverage:F1} ms vs OpenCL {openClAverage:F1} ms{speedup} avg over {effectiveIterations} render(s){kernelTimeStr}";
+        }
+        else if (gpuActuallyUsed && !hasRealOutput)
+        {
+            summary = $"\u26a0\ufe0f OpenCL returned all-zero output (kernel no-op)! "
+                + $"CPU {cpuAverage:F1} ms vs \"OpenCL\" {openClAverage:F1} ms{kernelTimeStr}. "
+                + $"The selected device may not actually execute the kernel.";
+            gpuActuallyUsed = false;
+        }
+        else
+        {
+            summary = $"\u26a0\ufe0f GPU FAILED SILENTLY \u2014 both timings are CPU! "
+                + $"CPU {cpuAverage:F1} ms vs \"OpenCL\" {openClAverage:F1} ms. "
+                + $"Error: {gpuError ?? "unknown"} \u00b7 {openClStatus}";
+        }
+
+        Log($"RESULT: {summary}");
         return new VolumeRenderBenchmarkResult(
             effectiveIterations,
             cpuAverage,
             openClAverage,
             openClStatus,
             summary,
-            true);
+            true,
+            gpuActuallyUsed,
+            diagnostics,
+            workloadInfo,
+            finalKernelMs,
+            trace.ToString());
     }
 
     private double BenchmarkPreference(VolumeComputePreference preference, int iterations)

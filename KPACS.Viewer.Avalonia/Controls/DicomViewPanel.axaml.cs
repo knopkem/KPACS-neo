@@ -772,11 +772,12 @@ public partial class DicomViewPanel : UserControl
             _volumeSliceIndex = sliceIndex;
         }
 
-        // DVR with active 3D camera: use the arbitrary-view renderer
+        // DVR with active 3D camera: use the arbitrary-view renderer.
+        // When OpenCL is available, render at full quality — the GPU is fast enough.
         ReslicedImage resliced;
         if (IsDvrMode && _dvrRenderState is not null)
         {
-            UpdateDvrRenderState(highQuality: false);
+            UpdateDvrRenderState(highQuality: VolumeComputeBackend.IsOpenClAvailable);
             resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
                 _volume, _dvrRenderState, _dvrTransferFunction);
         }
@@ -823,8 +824,12 @@ public partial class DicomViewPanel : UserControl
         PlaceholderText.IsVisible = false;
         if (IsDvrMode)
         {
-            RenderImage(sharp: false);
-            ScheduleDvrSharpRender();
+            bool gpuAvailable = VolumeComputeBackend.IsOpenClAvailable;
+            RenderImage(sharp: gpuAvailable);
+            if (!gpuAvailable)
+            {
+                ScheduleDvrSharpRender();
+            }
         }
         else
         {
