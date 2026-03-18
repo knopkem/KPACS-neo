@@ -10,5 +10,5 @@ obj/
 # Retired local-only project
 KPACS.Viewer/
 
-# Local published release output; keep packaged archives only
-release/win-x64-singlefile/
+# Local published release output
+release/
