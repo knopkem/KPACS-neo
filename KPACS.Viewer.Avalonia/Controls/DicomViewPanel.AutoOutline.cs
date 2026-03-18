@@ -19,6 +19,9 @@ public partial class DicomViewPanel
     private const int AutoOutlineMaxVisitedVoxelsPerSeed = 60000;
     private const int AutoOutlineSlicePropagationMaxMisses = 4;
     private const int AutoOutlineSlicePropagationSeedSampleCount = 10;
+    private const int AutoOutlineParallelCandidateThreshold = 4;
+    private const int AutoOutlineIntensitySignatureTargetSamples = 4096;
+    private const int AutoOutlineDirectionParallelismMinCpuCount = 4;
     private const double AutoOutlineSeedNeighborhoodRadiusMm = 4.5;
     private const double AutoOutlineAdaptiveStdDevWeight = 2.35;
     private const double AutoOutlineMrToleranceMultiplier = 1.35;
@@ -26,8 +29,11 @@ public partial class DicomViewPanel
     private const int AutoOutlineMinSensitivityLevel = -6;
     private const int AutoOutlineMaxSensitivityLevel = 6;
 
+    private const int AutoOutlineSlicePropagationSkipVolumeGrowMinContours = 3;
+
     public event Action<AutoOutlinedMeasurementInfo>? AutoOutlinedMeasurementCreated;
     public event Action<AutoOutlineAttemptInfo>? AutoOutlineAttempted;
+    private bool _autoOutlineInProgress;
 
     private bool TryCreateAutoOutlinedPolygonMeasurement(Point imagePoint, int sensitivityLevel = 0)
     {
@@ -107,24 +113,63 @@ public partial class DicomViewPanel
         return polygonPoints.Length >= 3;
     }
 
+    private bool TryCreateAutoOutlinedPolygon(
+        SlicePropagationSliceData sliceData,
+        Point imagePoint,
+        out Point[] polygonPoints,
+        int sensitivityLevel = 0)
+    {
+        polygonPoints = Array.Empty<Point>();
+
+        int seedX = Math.Clamp((int)Math.Round(imagePoint.X), 0, sliceData.Source.Width - 1);
+        int seedY = Math.Clamp((int)Math.Round(imagePoint.Y), 0, sliceData.Source.Height - 1);
+        if (!TryBuildAutoOutlineMask(sliceData, seedX, seedY, sensitivityLevel, out AutoOutlineMask mask))
+        {
+            return false;
+        }
+
+        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: 64)
+            .Select(point => new Point(point.X + mask.Left, point.Y + mask.Top))
+            .ToArray();
+        return polygonPoints.Length >= 3;
+    }
+
     private bool TryCreateAutoOutlinedVolumeRoiDraft(Point imagePoint, int sensitivityLevel = 0)
     {
+        if (_autoOutlineInProgress)
+        {
+            return false;
+        }
+
         if (_volume is null || SpatialMetadata is null)
         {
             AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, ClampImagePoint(imagePoint), sensitivityLevel, false, "Auto 3D ROI is unavailable because no 3D volume is loaded."));
             return false;
         }
 
-        Point clampedPoint = ClampImagePoint(imagePoint);
-        if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out string failureReason))
+        _autoOutlineInProgress = true;
+        try
         {
-            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, failureReason));
+            Point clampedPoint = ClampImagePoint(imagePoint);
+            if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out string failureReason))
+            {
+                AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, failureReason));
+                return false;
+            }
+
+            ApplyAutoOutlinedVolumeContours(clampedPoint, sensitivityLevel, contours);
+            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, $"Auto 3D ROI created {contours.Length} contour slice(s)."));
+            return true;
+        }
+        catch (Exception)
+        {
+            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, ClampImagePoint(imagePoint), sensitivityLevel, false, "Auto 3D ROI failed due to an internal error."));
             return false;
         }
-
-        ApplyAutoOutlinedVolumeContours(clampedPoint, sensitivityLevel, contours);
-        AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, $"Auto 3D ROI created {contours.Length} contour slice(s)."));
-        return true;
+        finally
+        {
+            _autoOutlineInProgress = false;
+        }
     }
 
     private bool TryBuildAutoOutlinedVolumeContours(
@@ -152,27 +197,33 @@ public partial class DicomViewPanel
             }
         }
 
-        if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, out HashSet<int> region, out string regionFailureReason))
+        bool skipVolumeGrow = hasPropagatedContours && propagatedContours.Length >= AutoOutlineSlicePropagationSkipVolumeGrowMinContours;
+        string regionFailureReason = string.Empty;
+
+        if (!skipVolumeGrow)
         {
-            VolumeRoiContour[] regionContours = BuildAutoOutlinedVolumeContours(region);
-            if (regionContours.Length > 0)
+            if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, out HashSet<int> region, out regionFailureReason))
             {
-                if (!hasPropagatedContours || IsVolumeContourCandidatePreferred(regionContours, propagatedContours))
+                VolumeRoiContour[] regionContours = BuildAutoOutlinedVolumeContours(region);
+                if (regionContours.Length > 0)
                 {
-                    contours = regionContours;
+                    if (!hasPropagatedContours || IsVolumeContourCandidatePreferred(regionContours, propagatedContours))
+                    {
+                        contours = regionContours;
+                    }
+
+                    return true;
                 }
 
-                return true;
-            }
+                if (hasPropagatedContours)
+                {
+                    contours = propagatedContours;
+                    return true;
+                }
 
-            if (hasPropagatedContours)
-            {
-                contours = propagatedContours;
-                return true;
+                failureReason = "Auto 3D ROI segmented voxels, but no usable slice contours could be reconstructed.";
+                return false;
             }
-
-            failureReason = "Auto 3D ROI segmented voxels, but no usable slice contours could be reconstructed.";
-            return false;
         }
 
         if (hasPropagatedContours)
@@ -466,6 +517,11 @@ public partial class DicomViewPanel
 
         mask = new AutoOutlineMask(left, top, cleanedMask, count);
         return true;
+    }
+
+    private bool TryBuildAutoOutlineMask(SlicePropagationSliceData sliceData, int seedX, int seedY, int sensitivityLevel, out AutoOutlineMask mask)
+    {
+        return TryBuildAutoOutlineMask(sliceData.Source, seedX, seedY, sensitivityLevel, out mask);
     }
 
     private bool TryComputeAutoOutlineTolerance(int seedX, int seedY, double seedValue, double homogenizedSeedValue, int sensitivityLevel, out double mean, out double tolerance)
@@ -1262,11 +1318,12 @@ public partial class DicomViewPanel
         }
 
         AutoOutlineSliceSource seedSource = new(_imageWidth, _imageHeight, _volumeSlicePixels, _modality ?? string.Empty);
+        SlicePropagationSliceData seedSlice = CreateSlicePropagationSliceData(_volumeSliceIndex, SpatialMetadata, seedSource);
         Point clampedPoint = new(
             Math.Clamp(imagePoint.X, 0, _imageWidth - 1),
             Math.Clamp(imagePoint.Y, 0, _imageHeight - 1));
 
-        if (!TryCreateAutoOutlinedPolygon(seedSource, clampedPoint, out Point[] seedPolygon, sensitivityLevel) || seedPolygon.Length < 3)
+        if (!TryCreateAutoOutlinedPolygon(seedSlice, clampedPoint, out Point[] seedPolygon, sensitivityLevel) || seedPolygon.Length < 3)
         {
             failureReason = "The seed slice could not be isolated reliably with the 2D auto-outline.";
             return false;
@@ -1283,8 +1340,26 @@ public partial class DicomViewPanel
             (_volumeSliceIndex, SpatialMetadata, seedPolygon, seedSignature)
         ];
 
-        PropagateAutoOutlineAcrossSlices(sliceContours, seedSignature, -1, sensitivityLevel);
-        PropagateAutoOutlineAcrossSlices(sliceContours, seedSignature, 1, sensitivityLevel);
+        System.Collections.Concurrent.ConcurrentDictionary<int, SlicePropagationSliceData> sliceCache = new();
+        sliceCache.TryAdd(seedSlice.SliceIndex, seedSlice);
+
+        List<(int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature)> backwardContours = [];
+        List<(int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature)> forwardContours = [];
+
+        if (Environment.ProcessorCount >= AutoOutlineDirectionParallelismMinCpuCount)
+        {
+            Parallel.Invoke(
+                () => backwardContours = PropagateAutoOutlineAcrossSlices(sliceContours[0], seedSignature, -1, sensitivityLevel, sliceCache),
+                () => forwardContours = PropagateAutoOutlineAcrossSlices(sliceContours[0], seedSignature, 1, sensitivityLevel, sliceCache));
+        }
+        else
+        {
+            backwardContours = PropagateAutoOutlineAcrossSlices(sliceContours[0], seedSignature, -1, sensitivityLevel, sliceCache);
+            forwardContours = PropagateAutoOutlineAcrossSlices(sliceContours[0], seedSignature, 1, sensitivityLevel, sliceCache);
+        }
+
+        sliceContours.AddRange(backwardContours);
+        sliceContours.AddRange(forwardContours);
 
         contours = sliceContours
             .OrderBy(entry => entry.SliceIndex)
@@ -1300,32 +1375,33 @@ public partial class DicomViewPanel
         return true;
     }
 
-    private void PropagateAutoOutlineAcrossSlices(
-        List<(int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature)> sliceContours,
+    private List<(int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature)> PropagateAutoOutlineAcrossSlices(
+        (int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature) seedContour,
         AutoOutlineIntensitySignature seedSignature,
         int direction,
-        int sensitivityLevel)
+        int sensitivityLevel,
+        System.Collections.Concurrent.ConcurrentDictionary<int, SlicePropagationSliceData> sliceCache)
     {
-        if (_volume is null || sliceContours.Count == 0)
+        List<(int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature)> sliceContours = [];
+        if (_volume is null)
         {
-            return;
+            return sliceContours;
         }
 
         int sliceCount = VolumeReslicer.GetSliceCount(_volume, _volumeOrientation);
-    (int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature) current = sliceContours[0];
+        (int SliceIndex, DicomSpatialMetadata Metadata, Point[] Polygon, AutoOutlineIntensitySignature Signature) current = seedContour;
         int consecutiveMisses = 0;
 
         for (int sliceIndex = current.SliceIndex + direction; sliceIndex >= 0 && sliceIndex < sliceCount; sliceIndex += direction)
         {
-            ReslicedImage resliced = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, sliceIndex);
-            if (resliced.SpatialMetadata is null || resliced.Pixels.Length == 0 || resliced.Width <= 0 || resliced.Height <= 0)
+            SlicePropagationSliceData sliceData = GetOrCreateSlicePropagationSliceData(sliceIndex, sliceCache);
+            DicomSpatialMetadata? sliceMetadata = sliceData.Metadata;
+            if (!sliceData.IsValid || sliceMetadata is null)
             {
                 break;
             }
 
-            AutoOutlineSliceSource source = new(resliced.Width, resliced.Height, resliced.Pixels, _modality ?? string.Empty);
-
-            if (!TryFindBestSlicePropagatedPolygon(source, current.Metadata, current.Polygon, current.Signature, seedSignature, resliced.SpatialMetadata, sensitivityLevel, out Point[] polygon, out AutoOutlineIntensitySignature polygonSignature))
+            if (!TryFindBestSlicePropagatedPolygon(sliceData, current.Metadata, current.Polygon, current.Signature, seedSignature, sensitivityLevel, out Point[] polygon, out AutoOutlineIntensitySignature polygonSignature))
             {
                 consecutiveMisses++;
                 if (consecutiveMisses >= AutoOutlineSlicePropagationMaxMisses)
@@ -1336,72 +1412,124 @@ public partial class DicomViewPanel
                 continue;
             }
 
-            current = (sliceIndex, resliced.SpatialMetadata, polygon, polygonSignature);
+            current = (sliceIndex, sliceMetadata, polygon, polygonSignature);
             sliceContours.Add(current);
             consecutiveMisses = 0;
         }
+
+        return sliceContours;
     }
 
     private bool TryFindBestSlicePropagatedPolygon(
-        AutoOutlineSliceSource source,
+        SlicePropagationSliceData sliceData,
         DicomSpatialMetadata referenceMetadata,
         Point[] referencePolygon,
         AutoOutlineIntensitySignature referenceSignature,
         AutoOutlineIntensitySignature seedSignature,
-        DicomSpatialMetadata targetMetadata,
         int sensitivityLevel,
         out Point[] polygon,
         out AutoOutlineIntensitySignature polygonSignature)
     {
         polygon = [];
         polygonSignature = default;
+        DicomSpatialMetadata? targetMetadata = sliceData.Metadata;
+        if (targetMetadata is null)
+        {
+            return false;
+        }
+
         Point[] projectedReferencePolygon = ProjectPolygon(referenceMetadata, referencePolygon, targetMetadata);
         if (projectedReferencePolygon.Length < 3)
         {
             return false;
         }
 
-        List<Point> seedCandidates = BuildSlicePropagationSeedCandidates(projectedReferencePolygon, source.Width, source.Height);
+        List<Point> seedCandidates = BuildSlicePropagationSeedCandidates(projectedReferencePolygon, sliceData.Source.Width, sliceData.Source.Height);
         if (seedCandidates.Count == 0)
         {
             return false;
         }
 
-        double bestScore = double.NegativeInfinity;
         foreach (int candidateSensitivity in EnumerateSlicePropagationSensitivityLevels(sensitivityLevel))
         {
-            foreach (Point seedCandidate in seedCandidates)
+            int maxCandidateParallelism = Math.Max(1, Environment.ProcessorCount >= AutoOutlineDirectionParallelismMinCpuCount
+                ? Environment.ProcessorCount / 2
+                : Environment.ProcessorCount);
+            IEnumerable<SlicePropagationCandidateResult> candidateResults = seedCandidates.Count >= AutoOutlineParallelCandidateThreshold && maxCandidateParallelism > 1
+                ? seedCandidates
+                    .AsParallel()
+                    .WithDegreeOfParallelism(Math.Min(seedCandidates.Count, maxCandidateParallelism))
+                    .Select(seedCandidate => EvaluateSlicePropagationCandidate(sliceData, seedCandidate, candidateSensitivity, projectedReferencePolygon, referenceSignature, seedSignature))
+                : seedCandidates
+                    .Select(seedCandidate => EvaluateSlicePropagationCandidate(sliceData, seedCandidate, candidateSensitivity, projectedReferencePolygon, referenceSignature, seedSignature));
+
+            SlicePropagationCandidateResult bestCandidate = candidateResults
+                .Where(candidate => candidate.IsValid)
+                .OrderByDescending(candidate => candidate.Score)
+                .FirstOrDefault();
+
+            if (bestCandidate.IsValid)
             {
-                if (!TryCreateAutoOutlinedPolygon(source, seedCandidate, out Point[] candidatePolygon, candidateSensitivity) ||
-                    candidatePolygon.Length < 3)
-                {
-                    continue;
-                }
-
-                if (!TryComputeAutoOutlineIntensitySignature(source, candidatePolygon, out AutoOutlineIntensitySignature candidateSignature) ||
-                    !IsSlicePropagationContourStable(projectedReferencePolygon, candidatePolygon, referenceSignature, candidateSignature, seedSignature))
-                {
-                    continue;
-                }
-
-                double score = ComputeSlicePropagationContourScore(projectedReferencePolygon, candidatePolygon, referenceSignature, candidateSignature, seedSignature);
-                if (score <= bestScore)
-                {
-                    continue;
-                }
-
-                bestScore = score;
-                polygon = candidatePolygon;
-                polygonSignature = candidateSignature;
-            }
-
-            if (polygon.Length >= 3)
-            {
+                polygon = bestCandidate.Polygon;
+                polygonSignature = bestCandidate.Signature;
                 return true;
             }
         }
 
         return false;
+    }
+
+    private SlicePropagationCandidateResult EvaluateSlicePropagationCandidate(
+        SlicePropagationSliceData sliceData,
+        Point seedCandidate,
+        int candidateSensitivity,
+        Point[] projectedReferencePolygon,
+        AutoOutlineIntensitySignature referenceSignature,
+        AutoOutlineIntensitySignature seedSignature)
+    {
+        if (!TryCreateAutoOutlinedPolygon(sliceData, seedCandidate, out Point[] candidatePolygon, candidateSensitivity) ||
+            candidatePolygon.Length < 3)
+        {
+            return default;
+        }
+
+        if (!TryComputeAutoOutlineIntensitySignature(sliceData.Source, candidatePolygon, out AutoOutlineIntensitySignature candidateSignature) ||
+            !IsSlicePropagationContourStable(projectedReferencePolygon, candidatePolygon, referenceSignature, candidateSignature, seedSignature))
+        {
+            return default;
+        }
+
+        double score = ComputeSlicePropagationContourScore(projectedReferencePolygon, candidatePolygon, referenceSignature, candidateSignature, seedSignature);
+        return new SlicePropagationCandidateResult(candidatePolygon, candidateSignature, score);
+    }
+
+    private SlicePropagationSliceData GetOrCreateSlicePropagationSliceData(
+        int sliceIndex,
+        System.Collections.Concurrent.ConcurrentDictionary<int, SlicePropagationSliceData> sliceCache)
+    {
+        return sliceCache.GetOrAdd(sliceIndex, CreateSlicePropagationSliceData);
+    }
+
+    private SlicePropagationSliceData CreateSlicePropagationSliceData(int sliceIndex)
+    {
+        if (_volume is null)
+        {
+            return default;
+        }
+
+        ReslicedImage resliced = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, sliceIndex);
+        if (resliced.SpatialMetadata is null || resliced.Pixels.Length == 0 || resliced.Width <= 0 || resliced.Height <= 0)
+        {
+            return default;
+        }
+
+        AutoOutlineSliceSource source = new(resliced.Width, resliced.Height, resliced.Pixels, _modality ?? string.Empty);
+        return CreateSlicePropagationSliceData(sliceIndex, resliced.SpatialMetadata, source);
+    }
+
+    private static SlicePropagationSliceData CreateSlicePropagationSliceData(int sliceIndex, DicomSpatialMetadata metadata, AutoOutlineSliceSource source)
+    {
+        return new SlicePropagationSliceData(sliceIndex, metadata, source);
     }
 
     private static bool IsSlicePropagationContourStable(
@@ -1681,21 +1809,14 @@ public partial class DicomViewPanel
             return false;
         }
 
-        List<double> values = [];
-        for (int y = top; y <= bottom; y++)
-        {
-            for (int x = left; x <= right; x++)
-            {
-                if (!IsPointInsidePolygon(new Point(x + 0.5, y + 0.5), polygon) || !TryGetSlicePixelValue(source, x, y, out double value))
-                {
-                    continue;
-                }
-
-                values.Add(value);
-            }
-        }
-
-        if (values.Count < AutoOutlineMinPixels)
+        int boundsWidth = right - left + 1;
+        int boundsHeight = bottom - top + 1;
+        int approximateBoundsPixelCount = boundsWidth * boundsHeight;
+        int stride = approximateBoundsPixelCount <= AutoOutlineIntensitySignatureTargetSamples
+            ? 1
+            : Math.Max(1, (int)Math.Floor(Math.Sqrt(approximateBoundsPixelCount / (double)AutoOutlineIntensitySignatureTargetSamples)));
+        if (!TryCollectIntensitySignatureValues(source, polygon, left, top, right, bottom, stride, out List<double> values) &&
+            (stride <= 1 || !TryCollectIntensitySignatureValues(source, polygon, left, top, right, bottom, 1, out values)))
         {
             return false;
         }
@@ -1710,6 +1831,37 @@ public partial class DicomViewPanel
         double p90 = InterpolatePercentile(values, 0.90);
         signature = new AutoOutlineIntensitySignature(mean, median, Math.Sqrt(Math.Max(variance, 0)), values[0], values[^1], p10, p90, values.Count);
         return true;
+    }
+
+    private static bool TryCollectIntensitySignatureValues(
+        AutoOutlineSliceSource source,
+        Point[] polygon,
+        int left,
+        int top,
+        int right,
+        int bottom,
+        int stride,
+        out List<double> values)
+    {
+        values = [];
+        int effectiveStride = Math.Max(1, stride);
+        int startYOffset = effectiveStride > 1 ? effectiveStride / 2 : 0;
+        int startXOffset = effectiveStride > 1 ? effectiveStride / 2 : 0;
+
+        for (int y = top + startYOffset; y <= bottom; y += effectiveStride)
+        {
+            for (int x = left + startXOffset; x <= right; x += effectiveStride)
+            {
+                if (!IsPointInsidePolygon(new Point(x + 0.5, y + 0.5), polygon) || !TryGetSlicePixelValue(source, x, y, out double value))
+                {
+                    continue;
+                }
+
+                values.Add(value);
+            }
+        }
+
+        return values.Count >= AutoOutlineMinPixels;
     }
 
     private static bool IsIntensitySignatureCompatible(
@@ -2845,6 +2997,16 @@ public partial class DicomViewPanel
         int PixelCount)
     {
         public bool IsValid => PixelCount > 0;
+    }
+
+    private readonly record struct SlicePropagationSliceData(int SliceIndex, DicomSpatialMetadata? Metadata, AutoOutlineSliceSource Source)
+    {
+        public bool IsValid => Metadata is not null && Source.Width > 0 && Source.Height > 0;
+    }
+
+    private readonly record struct SlicePropagationCandidateResult(Point[] Polygon, AutoOutlineIntensitySignature Signature, double Score)
+    {
+        public bool IsValid => Polygon.Length >= 3 && Signature.IsValid;
     }
 
     private readonly record struct VolumeSliceContourCandidate(AutoOutlineMask Mask, Point[] ImagePoints, Point Centroid);
