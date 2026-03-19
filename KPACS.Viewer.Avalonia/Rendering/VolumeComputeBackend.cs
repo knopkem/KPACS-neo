@@ -565,7 +565,7 @@ __kernel void RenderProjection(
         else
         {
             float normalized = clamp_float((value - minValue) / range, 0.0f, 1.0f);
-            float opacity = normalized <= 0.05f ? 0.0f : fmin(0.85f, pow(normalized, 1.6f) * 0.35f);
+            float opacity = normalized <= 0.05f ? 0.0f : fmin(0.85f, native_powr(fmax(normalized, 1.0e-6f), 1.6f) * 0.35f);
             float contribution = opacity * (1.0f - alpha);
             accumulator += value * contribution;
             alpha += contribution;
@@ -993,8 +993,12 @@ __kernel void RenderObliqueSlab(
     private readonly OpenClKernel _dvrKernel;
     private readonly OpenClKernel _obliqueKernel;
     private readonly OpenClDevice _device;
-    private readonly int _localSizeX;
-    private readonly int _localSizeY;
+    private readonly int _projLocalX;
+    private readonly int _projLocalY;
+    private readonly int _dvrLocalX;
+    private readonly int _dvrLocalY;
+    private readonly int _obliqueLocalX;
+    private readonly int _obliqueLocalY;
     private readonly uint _computeUnits;
     private string? _lastError;
     private OpenClEvent _lastKernelEvent;
@@ -1038,9 +1042,42 @@ __kernel void RenderObliqueSlab(
         _device = device;
         Status = status;
         _computeUnits = computeUnits;
-        int localDim = maxWorkGroupSize >= 256 ? 16 : (maxWorkGroupSize >= 64 ? 8 : 1);
-        _localSizeX = localDim;
-        _localSizeY = localDim;
+        (_projLocalX, _projLocalY) = ComputeKernelLocalSize(projectionKernel, device, maxWorkGroupSize);
+        (_dvrLocalX, _dvrLocalY) = ComputeKernelLocalSize(dvrKernel, device, maxWorkGroupSize);
+        (_obliqueLocalX, _obliqueLocalY) = ComputeKernelLocalSize(obliqueKernel, device, maxWorkGroupSize);
+    }
+
+    /// <summary>
+    /// Queries <c>CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE</c> for a specific kernel and
+    /// computes the best square 2D work-group dimensions that are aligned to the GPU warp/wavefront.
+    /// </summary>
+    private static (int LocalX, int LocalY) ComputeKernelLocalSize(
+        OpenClKernel kernel,
+        OpenClDevice device,
+        ulong maxWorkGroupSize)
+    {
+        // CL_KERNEL_PREFERRED_WORK_GROUP_SIZE_MULTIPLE = 0x11B3 (OpenCL 1.1+).
+        // OpenCL.Net 2.1.0 does not define this enum member, so we use the raw constant.
+        const KernelWorkGroupInfo PreferredWorkGroupSizeMultiple = (KernelWorkGroupInfo)0x11B3;
+        ulong preferred = SafeCast<ulong>(Cl.GetKernelWorkGroupInfo(
+            kernel, device, PreferredWorkGroupSizeMultiple, out _));
+        if (preferred < 1)
+        {
+            preferred = 16;
+        }
+
+        // Cap total work-group to min(256, maxWorkGroupSize) for 2D image kernels.
+        ulong maxTotal = Math.Min(maxWorkGroupSize, 256UL);
+
+        // Largest square side that is a multiple of `preferred` and satisfies side*side <= maxTotal.
+        ulong side = (ulong)Math.Sqrt((double)maxTotal);
+        side = Math.Max(1, (side / preferred) * preferred);
+        while (side > 1 && side * side > maxWorkGroupSize)
+        {
+            side = Math.Max(1, side - preferred);
+        }
+
+        return ((int)side, (int)side);
     }
 
     public VolumeComputeBackendStatus Status { get; }
@@ -1198,7 +1235,7 @@ __kernel void RenderObliqueSlab(
                 SetKernelArgValue(_projectionKernel, 11, reference.Height);
                 SetKernelArgBuffer(_projectionKernel, 12, outputBuffer);
 
-                Execute2D(_projectionKernel, reference.Width, reference.Height);
+                Execute2D(_projectionKernel, reference.Width, reference.Height, _projLocalX, _projLocalY);
                 short[] pixels = ReadBuffer(outputBuffer, outputLength);
                 UpdateKernelProfilingTime();
                 image = new ReslicedImage
@@ -1322,7 +1359,7 @@ __kernel void RenderObliqueSlab(
                 SetKernelArgValue(_obliqueKernel, argIdx++, height);
                 SetKernelArgBuffer(_obliqueKernel, argIdx++, outputBuffer);
 
-                Execute2D(_obliqueKernel, width, height);
+                Execute2D(_obliqueKernel, width, height, _obliqueLocalX, _obliqueLocalY);
                 short[] pixels = ReadBuffer(outputBuffer, outputLength);
                 UpdateKernelProfilingTime();
                 image = new ReslicedImage
@@ -1425,7 +1462,7 @@ __kernel void RenderObliqueSlab(
                 SetKernelArgBuffer(_dvrKernel, 46, outputBuffer);
                 SetKernelArgBuffer(_dvrKernel, 47, colorOutputBuffer);
 
-                Execute2D(_dvrKernel, width, height);
+                Execute2D(_dvrKernel, width, height, _dvrLocalX, _dvrLocalY);
                 short[] pixels = ReadBuffer(outputBuffer, outputLength);
                 uint[] packedColor = ReadBuffer(colorOutputBuffer, outputLength);
                 UpdateKernelProfilingTime();
@@ -1686,7 +1723,7 @@ __kernel void RenderObliqueSlab(
         return buffer;
     }
 
-    private void Execute2D(OpenClKernel kernel, int width, int height)
+    private void Execute2D(OpenClKernel kernel, int width, int height, int localX, int localY)
     {
         if (_hasKernelEvent)
         {
@@ -1694,15 +1731,15 @@ __kernel void RenderObliqueSlab(
             _hasKernelEvent = false;
         }
 
-        int globalX = RoundUpToMultiple(width, _localSizeX);
-        int globalY = RoundUpToMultiple(height, _localSizeY);
+        int globalX = RoundUpToMultiple(width, localX);
+        int globalY = RoundUpToMultiple(height, localY);
         ErrorCode error = Cl.EnqueueNDRangeKernel(
             _queue,
             kernel,
             2,
             null!,
             [new IntPtr(globalX), new IntPtr(globalY)],
-            [new IntPtr(_localSizeX), new IntPtr(_localSizeY)],
+            [new IntPtr(localX), new IntPtr(localY)],
             0,
             null!,
             out _lastKernelEvent);
