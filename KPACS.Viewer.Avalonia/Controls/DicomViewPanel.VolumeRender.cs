@@ -99,7 +99,7 @@ public partial class DicomViewPanel
     /// Sets up the DVR camera based on the currently bound volume and orientation.
     /// Called when DVR mode is first activated.
     /// </summary>
-    private void InitializeDvrCamera()
+    private void InitializeDvrCamera(bool resetTransferWindow = false)
     {
         if (_volume is null)
         {
@@ -131,15 +131,20 @@ public partial class DicomViewPanel
         _dvrAzimuth = 0;
         _dvrElevation = 0;
 
-        ResetDvrTransferWindow();
+        if (resetTransferWindow)
+        {
+            ResetDvrTransferWindow();
 
-        // Save current windowing and apply full-range window for DVR output
-        _preDvrWindowCenter = _windowCenter;
-        _preDvrWindowWidth = _windowWidth;
-        double range = Math.Max(1, _volume.MaxValue - _volume.MinValue);
-        _windowCenter = _volume.MinValue + range * 0.5;
-        _windowWidth = range;
-        ApplyActiveColorLut();
+            // Save current windowing and apply full-range window for DVR output.
+            // This should only happen when entering DVR, not while scrolling or
+            // re-applying an existing DVR view state.
+            _preDvrWindowCenter = _windowCenter;
+            _preDvrWindowWidth = _windowWidth;
+            double range = Math.Max(1, _volume.MaxValue - _volume.MinValue);
+            _windowCenter = _volume.MinValue + range * 0.5;
+            _windowWidth = range;
+            ApplyActiveColorLut();
+        }
 
         UpdateDvrRenderState(highQuality: false);
     }

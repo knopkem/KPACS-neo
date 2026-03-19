@@ -952,7 +952,7 @@ public partial class DicomViewPanel : UserControl
         int midSlice = GetCurrentSliceCount() / 2;
         if (IsDvrMode)
         {
-            InitializeDvrCamera();
+            InitializeDvrCamera(resetTransferWindow: false);
         }
 
         bool changed = ShowVolumeSlice(midSlice);
@@ -980,7 +980,7 @@ public partial class DicomViewPanel : UserControl
             _projectionThicknessMm = GetMaximumProjectionThicknessMm();
             // Initialise the 3D camera; first render will go through ShowVolumeSlice
             // which detects DVR mode and uses the arbitrary-view renderer.
-            InitializeDvrCamera();
+            InitializeDvrCamera(resetTransferWindow: true);
         }
         else if (wasDvr)
         {
@@ -2118,7 +2118,7 @@ public partial class DicomViewPanel : UserControl
         _viewFlipVertical = state.ViewFlipVertical;
         if (_projectionMode == VolumeProjectionMode.Dvr)
         {
-            InitializeDvrCamera();
+            InitializeDvrCamera(resetTransferWindow: false);
         }
         ApplyActiveColorLut();
 
