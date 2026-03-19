@@ -512,22 +512,7 @@ public partial class DicomViewPanel
 
     private HashSet<int> BuildRegionFromSegmentationMaskBuffer(SegmentationMaskBuffer buffer)
     {
-        HashSet<int> region = [];
-        for (int z = 0; z < buffer.SizeZ; z++)
-        {
-            for (int y = 0; y < buffer.SizeY; y++)
-            {
-                for (int x = 0; x < buffer.SizeX; x++)
-                {
-                    if (buffer.Get(x, y, z))
-                    {
-                        region.Add(GetVoxelKey(x, y, z, buffer.SizeX, buffer.SizeY));
-                    }
-                }
-            }
-        }
-
-        return region;
+        return [.. buffer.EnumerateForegroundLinearIndices()];
     }
 
     private static (double X, double Y, double Z) PatientPointToMaskVoxel(VolumeGridGeometry geometry, SpatialVector3D patientPoint)

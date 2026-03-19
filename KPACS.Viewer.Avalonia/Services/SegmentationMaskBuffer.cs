@@ -67,6 +67,27 @@ internal sealed class SegmentationMaskBuffer
         return total;
     }
 
+    public IEnumerable<int> EnumerateForegroundLinearIndices()
+    {
+        long totalVoxelCount = Geometry.TotalVoxelCount;
+        for (int byteIndex = 0; byteIndex < _bits.Length; byteIndex++)
+        {
+            byte current = _bits[byteIndex];
+            while (current != 0)
+            {
+                int bitOffset = BitOperations.TrailingZeroCount((uint)current);
+                int linearIndex = (byteIndex << 3) + bitOffset;
+                if (linearIndex >= totalVoxelCount)
+                {
+                    yield break;
+                }
+
+                yield return linearIndex;
+                current = (byte)(current & (current - 1));
+            }
+        }
+    }
+
     public SegmentationMaskStatistics? ComputeStatistics()
     {
         int minX = int.MaxValue;

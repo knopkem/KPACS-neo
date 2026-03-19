@@ -430,12 +430,12 @@ public partial class DicomViewPanel : UserControl
         {
             ItemsSource = new Control[]
             {
-                CreateDvrCameraViewMenuItem("Front View", DvrCameraViewPreset.Front),
-                CreateDvrCameraViewMenuItem("Back View", DvrCameraViewPreset.Back),
+                CreateDvrCameraViewMenuItem("Back View", DvrCameraViewPreset.Front),
+                CreateDvrCameraViewMenuItem("Front View", DvrCameraViewPreset.Back),
                 CreateDvrCameraViewMenuItem("Left Side View", DvrCameraViewPreset.Left),
                 CreateDvrCameraViewMenuItem("Right Side View", DvrCameraViewPreset.Right),
-                CreateDvrCameraViewMenuItem("View From Above", DvrCameraViewPreset.Top),
-                CreateDvrCameraViewMenuItem("View From Below", DvrCameraViewPreset.Bottom),
+                CreateDvrCameraViewMenuItem("View From Below", DvrCameraViewPreset.Top),
+                CreateDvrCameraViewMenuItem("View From Above", DvrCameraViewPreset.Bottom),
             }
         };
     }
@@ -2346,10 +2346,20 @@ public partial class DicomViewPanel : UserControl
             ? string.Empty
             : GetDvrCameraViewBadgeLabel();
 
-        OverlayCenterRight.Text = GetHorizontalOrientationLabel(isRightEdge: true);
-        OverlayCenterLeft.Text = GetHorizontalOrientationLabel(isRightEdge: false);
-    OverlayTopCenter.Text = GetVerticalOrientationLabel(isBottomEdge: false);
-    OverlayBottomCenter.Text = string.Empty;
+        if (IsDvrMode)
+        {
+            OverlayCenterRight.Text = string.Empty;
+            OverlayCenterLeft.Text = string.Empty;
+            OverlayTopCenter.Text = string.Empty;
+            OverlayBottomCenter.Text = string.Empty;
+        }
+        else
+        {
+            OverlayCenterRight.Text = GetHorizontalOrientationLabel(isRightEdge: true);
+            OverlayCenterLeft.Text = GetHorizontalOrientationLabel(isRightEdge: false);
+            OverlayTopCenter.Text = GetVerticalOrientationLabel(isBottomEdge: false);
+            OverlayBottomCenter.Text = string.Empty;
+        }
 
         OverlayBottomLeft.Text = IsDvrMode
             ? $"TF W: {DvrTransferWidth:F0}  TF C: {DvrTransferCenter:F0}"
@@ -2437,12 +2447,12 @@ public partial class DicomViewPanel : UserControl
         rightDirection = SpatialMetadata.RowDirection;
         downDirection = SpatialMetadata.ColumnDirection;
 
-        if (_viewFlipHorizontal)
+        if (IsEffectivelyHorizontallyFlipped())
         {
             rightDirection *= -1;
         }
 
-        if (_viewFlipVertical)
+        if (IsEffectivelyVerticallyFlipped())
         {
             downDirection *= -1;
         }
@@ -3257,15 +3267,15 @@ public partial class DicomViewPanel : UserControl
             _ => new Point(x, y),
         };
 
-        double viewX = _viewFlipHorizontal ? (GetViewPixelWidth() - 1) - rotated.X : rotated.X;
-        double viewY = _viewFlipVertical ? (GetViewPixelHeight() - 1) - rotated.Y : rotated.Y;
+        double viewX = IsEffectivelyHorizontallyFlipped() ? (GetViewPixelWidth() - 1) - rotated.X : rotated.X;
+        double viewY = IsEffectivelyVerticallyFlipped() ? (GetViewPixelHeight() - 1) - rotated.Y : rotated.Y;
         return new Point(viewX, viewY);
     }
 
     private Point TransformViewPointToImage(Point viewPoint)
     {
-        double viewX = _viewFlipHorizontal ? (GetViewPixelWidth() - 1) - viewPoint.X : viewPoint.X;
-        double viewY = _viewFlipVertical ? (GetViewPixelHeight() - 1) - viewPoint.Y : viewPoint.Y;
+        double viewX = IsEffectivelyHorizontallyFlipped() ? (GetViewPixelWidth() - 1) - viewPoint.X : viewPoint.X;
+        double viewY = IsEffectivelyVerticallyFlipped() ? (GetViewPixelHeight() - 1) - viewPoint.Y : viewPoint.Y;
         int width = _imageWidth;
         int height = _imageHeight;
 
@@ -3278,7 +3288,11 @@ public partial class DicomViewPanel : UserControl
         };
     }
 
-    private bool HasViewTransform() => NormalizeQuarterTurns(_viewRotationQuarterTurns) != 0 || _viewFlipHorizontal || _viewFlipVertical;
+    private bool HasViewTransform() => NormalizeQuarterTurns(_viewRotationQuarterTurns) != 0 || IsEffectivelyHorizontallyFlipped() || IsEffectivelyVerticallyFlipped();
+
+    private bool IsEffectivelyHorizontallyFlipped() => _viewFlipHorizontal ^ IsDvrMode;
+
+    private bool IsEffectivelyVerticallyFlipped() => _viewFlipVertical;
 
     private void TransformBgraBuffer(byte[] sourceBgra, int sourceWidth, int sourceHeight, byte[] destinationBgra)
     {
@@ -3315,12 +3329,12 @@ public partial class DicomViewPanel : UserControl
                         break;
                 }
 
-                if (_viewFlipHorizontal)
+                if (IsEffectivelyHorizontallyFlipped())
                 {
                     rotatedX = destinationWidth - 1 - rotatedX;
                 }
 
-                if (_viewFlipVertical)
+                if (IsEffectivelyVerticallyFlipped())
                 {
                     rotatedY = destinationHeight - 1 - rotatedY;
                 }

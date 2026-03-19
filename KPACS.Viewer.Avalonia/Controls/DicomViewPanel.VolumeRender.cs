@@ -198,7 +198,7 @@ public partial class DicomViewPanel
         {
             _dvrVolumeCenter = ToVolumeLocalPoint(plane.Center);
             referenceSlice = VolumeReslicer.ExtractSlice(_volume, plane);
-            baseForward = ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize();
+            baseForward = ToVolumeLocalDirection(plane.RowDirection.Cross(plane.ColumnDirection)).Normalize();
             baseUp = ToVolumeLocalDirection(plane.ColumnDirection).Normalize();
             outputWidth = Math.Max(1, referenceSlice.Width);
             outputHeight = Math.Max(1, referenceSlice.Height);
@@ -293,7 +293,7 @@ public partial class DicomViewPanel
         {
             return (
                 ToVolumeLocalPoint(plane.Center),
-                ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize());
+                ToVolumeLocalDirection(plane.RowDirection.Cross(plane.ColumnDirection)).Normalize());
         }
 
         SpatialVector3D normal = _volumeOrientation switch
@@ -623,7 +623,7 @@ public partial class DicomViewPanel
         if (plane is not null)
         {
             return (
-                ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize(),
+                ToVolumeLocalDirection(plane.RowDirection.Cross(plane.ColumnDirection)).Normalize(),
                 ToVolumeLocalDirection(plane.ColumnDirection).Normalize());
         }
 
@@ -631,7 +631,7 @@ public partial class DicomViewPanel
         {
             SliceOrientation.Coronal => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
             SliceOrientation.Sagittal => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
-            _ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
+            _ => (new SpatialVector3D(0, 0, 1), new SpatialVector3D(0, 1, 0)),
         };
     }
 
@@ -721,19 +721,19 @@ public partial class DicomViewPanel
         DvrCameraViewPreset.Back => (new SpatialVector3D(0, 1, 0), new SpatialVector3D(0, 0, -1)),
         DvrCameraViewPreset.Left => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
         DvrCameraViewPreset.Right => (new SpatialVector3D(-1, 0, 0), new SpatialVector3D(0, 0, -1)),
-        DvrCameraViewPreset.Top => (new SpatialVector3D(0, 0, 1), new SpatialVector3D(0, 1, 0)),
-        DvrCameraViewPreset.Bottom => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
-        _ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
+        DvrCameraViewPreset.Top => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
+        DvrCameraViewPreset.Bottom => (new SpatialVector3D(0, 0, 1), new SpatialVector3D(0, 1, 0)),
+        _ => (new SpatialVector3D(0, 0, 1), new SpatialVector3D(0, 1, 0)),
     };
 
     private string GetDvrCameraViewBadgeLabel() => _dvrCameraViewPreset switch
     {
-        DvrCameraViewPreset.Front => "📷 Front",
-        DvrCameraViewPreset.Back => "📷 Back",
+        DvrCameraViewPreset.Front => "📷 Back",
+        DvrCameraViewPreset.Back => "📷 Front",
         DvrCameraViewPreset.Left => "📷 Left",
         DvrCameraViewPreset.Right => "📷 Right",
-        DvrCameraViewPreset.Top => "📷 Above",
-        DvrCameraViewPreset.Bottom => "📷 Below",
+        DvrCameraViewPreset.Top => "📷 Below",
+        DvrCameraViewPreset.Bottom => "📷 Above",
         DvrCameraViewPreset.Custom => "📷 Custom",
         _ => "📷 Camera",
     };

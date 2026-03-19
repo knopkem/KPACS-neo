@@ -22,6 +22,8 @@ internal static class CenterlineCurvedMprRenderer
             return CurvedMprRenderResult.Empty;
         }
 
+        CurvedMprDisplayOrientation orientation = ResolveDisplayOrientation(path);
+
         int width = Math.Max(1, path.Points.Count);
         int height = Math.Max(32, imageHeight);
         double halfFieldOfView = Math.Max(5.0, fieldOfViewMm) * 0.5;
@@ -48,7 +50,45 @@ internal static class CenterlineCurvedMprRenderer
             }
         }
 
-        return new CurvedMprRenderResult(width, height, pixelSpacingMm, pixels, centerRows);
+        return orientation == CurvedMprDisplayOrientation.Vertical
+            ? RotateVertical(width, height, pixelSpacingMm, pixels)
+            : new CurvedMprRenderResult(width, height, pixelSpacingMm, pixels, centerRows, orientation);
+    }
+
+    private static CurvedMprDisplayOrientation ResolveDisplayOrientation(CenterlinePath path)
+    {
+        if (path.Points.Count < 2)
+        {
+            return CurvedMprDisplayOrientation.Horizontal;
+        }
+
+        Vector3D first = path.Points[0].PatientPoint;
+        Vector3D last = path.Points[^1].PatientPoint;
+        Vector3D delta = last - first;
+        double absX = Math.Abs(delta.X);
+        double absY = Math.Abs(delta.Y);
+        double absZ = Math.Abs(delta.Z);
+
+        return absZ >= Math.Max(absX, absY)
+            ? CurvedMprDisplayOrientation.Vertical
+            : CurvedMprDisplayOrientation.Horizontal;
+    }
+
+    private static CurvedMprRenderResult RotateVertical(int width, int height, double pixelSpacingMm, short[] pixels)
+    {
+        short[] rotated = new short[width * height];
+        for (int y = 0; y < height; y++)
+        {
+            for (int x = 0; x < width; x++)
+            {
+                int destinationX = height - 1 - y;
+                int destinationY = x;
+                rotated[(destinationY * height) + destinationX] = pixels[(y * width) + x];
+            }
+        }
+
+        int[] centerRows = Enumerable.Repeat(height / 2, width).ToArray();
+        return new CurvedMprRenderResult(height, width, pixelSpacingMm, rotated, centerRows, CurvedMprDisplayOrientation.Vertical);
     }
 
     private static double SampleSlab(SeriesVolume volume, Vector3D sampleCenter, Vector3D slabDirection, double slabThicknessMm, int sampleCount)
@@ -173,15 +213,16 @@ internal static class CenterlineCurvedMprRenderer
 
 internal sealed class CurvedMprRenderResult
 {
-    public static CurvedMprRenderResult Empty { get; } = new(1, 1, 1.0, [0], [0]);
+    public static CurvedMprRenderResult Empty { get; } = new(1, 1, 1.0, [0], [0], CurvedMprDisplayOrientation.Horizontal);
 
-    public CurvedMprRenderResult(int width, int height, double pixelSpacingMm, short[] pixels, int[] centerRows)
+    public CurvedMprRenderResult(int width, int height, double pixelSpacingMm, short[] pixels, int[] centerRows, CurvedMprDisplayOrientation orientation)
     {
         Width = width;
         Height = height;
         PixelSpacingMm = pixelSpacingMm;
         Pixels = pixels;
         CenterRows = centerRows;
+        Orientation = orientation;
     }
 
     public int Width { get; }
@@ -193,4 +234,12 @@ internal sealed class CurvedMprRenderResult
     public short[] Pixels { get; }
 
     public int[] CenterRows { get; }
+
+    public CurvedMprDisplayOrientation Orientation { get; }
+}
+
+internal enum CurvedMprDisplayOrientation
+{
+    Horizontal,
+    Vertical,
 }

@@ -1039,14 +1039,25 @@ public partial class DicomViewPanel
 
         Dictionary<int, int> voteCounts = [];
         int successfulSeedCount = 0;
+        IEnumerable<HashSet<int>> grownSeedRegions = seedCandidates.Length >= AutoOutlineParallelCandidateThreshold &&
+            Environment.ProcessorCount >= AutoOutlineDirectionParallelismMinCpuCount
+            ? seedCandidates
+                .AsParallel()
+                .WithDegreeOfParallelism(Math.Max(1, Environment.ProcessorCount - 1))
+                .Select(seedCandidate =>
+                {
+                    Dictionary<int, double> localHomogenizedCache = [];
+                    Dictionary<int, double> localGradientCache = [];
+                    return TryGrowVolumeSeedRegion(seedCandidate, sensitivityLevel, relaxedPass, localHomogenizedCache, localGradientCache, out HashSet<int> seedRegion)
+                        ? seedRegion
+                        : null;
+                })
+                .Where(seedRegion => seedRegion is not null)
+                .Select(seedRegion => seedRegion!)
+            : GrowVolumeSeedRegionsSequentially(seedCandidates, sensitivityLevel, relaxedPass, homogenizedCache, gradientCache);
 
-        foreach (VolumeSeedCandidate seedCandidate in seedCandidates)
+        foreach (HashSet<int> seedRegion in grownSeedRegions)
         {
-            if (!TryGrowVolumeSeedRegion(seedCandidate, sensitivityLevel, relaxedPass, homogenizedCache, gradientCache, out HashSet<int> seedRegion))
-            {
-                continue;
-            }
-
             successfulSeedCount++;
             foreach (int key in seedRegion)
             {
@@ -1186,6 +1197,22 @@ public partial class DicomViewPanel
         }
 
         return region.Count >= AutoOutlineMinPixels * 2;
+    }
+
+    private IEnumerable<HashSet<int>> GrowVolumeSeedRegionsSequentially(
+        IEnumerable<VolumeSeedCandidate> seedCandidates,
+        int sensitivityLevel,
+        bool relaxedPass,
+        Dictionary<int, double> homogenizedCache,
+        Dictionary<int, double> gradientCache)
+    {
+        foreach (VolumeSeedCandidate seedCandidate in seedCandidates)
+        {
+            if (TryGrowVolumeSeedRegion(seedCandidate, sensitivityLevel, relaxedPass, homogenizedCache, gradientCache, out HashSet<int> seedRegion))
+            {
+                yield return seedRegion;
+            }
+        }
     }
 
     private bool TryComputeVolumeTolerance(
@@ -2419,11 +2446,25 @@ public partial class DicomViewPanel
         {
             case SliceOrientation.Axial:
                 mask = new bool[_volume.SizeX, _volume.SizeY];
-                for (int y = 0; y < _volume.SizeY; y++)
+                bool[,] axialMask = mask;
+                if (_volume.SizeX * _volume.SizeY >= 65536)
                 {
-                    for (int x = 0; x < _volume.SizeX; x++)
+                    Parallel.For(0, _volume.SizeY, y =>
                     {
-                        mask[x, y] = region.Contains(GetVoxelKey(x, y, sliceIndex, _volume.SizeX, _volume.SizeY));
+                        for (int x = 0; x < _volume.SizeX; x++)
+                        {
+                            axialMask[x, y] = region.Contains(GetVoxelKey(x, y, sliceIndex, _volume.SizeX, _volume.SizeY));
+                        }
+                    });
+                }
+                else
+                {
+                    for (int y = 0; y < _volume.SizeY; y++)
+                    {
+                        for (int x = 0; x < _volume.SizeX; x++)
+                        {
+                            axialMask[x, y] = region.Contains(GetVoxelKey(x, y, sliceIndex, _volume.SizeX, _volume.SizeY));
+                        }
                     }
                 }
                 break;
@@ -2433,12 +2474,27 @@ public partial class DicomViewPanel
                 double targetSpacingY = _volume.SpacingY > 0 ? _volume.SpacingY : 1.0;
                 int height = GetResampledDepth(_volume.SizeZ, _volume.SpacingZ, targetSpacingY);
                 mask = new bool[width, height];
-                for (int row = 0; row < height; row++)
+                bool[,] coronalMask = mask;
+                if (width * height >= 65536)
                 {
-                    int z = Math.Clamp((int)Math.Round(MapOutputRowToSourceZ(row, height, _volume.SizeZ)), 0, _volume.SizeZ - 1);
-                    for (int x = 0; x < width; x++)
+                    Parallel.For(0, height, row =>
                     {
-                        mask[x, row] = region.Contains(GetVoxelKey(x, sliceIndex, z, _volume.SizeX, _volume.SizeY));
+                        int z = Math.Clamp((int)Math.Round(MapOutputRowToSourceZ(row, height, _volume.SizeZ)), 0, _volume.SizeZ - 1);
+                        for (int x = 0; x < width; x++)
+                        {
+                            coronalMask[x, row] = region.Contains(GetVoxelKey(x, sliceIndex, z, _volume.SizeX, _volume.SizeY));
+                        }
+                    });
+                }
+                else
+                {
+                    for (int row = 0; row < height; row++)
+                    {
+                        int z = Math.Clamp((int)Math.Round(MapOutputRowToSourceZ(row, height, _volume.SizeZ)), 0, _volume.SizeZ - 1);
+                        for (int x = 0; x < width; x++)
+                        {
+                            coronalMask[x, row] = region.Contains(GetVoxelKey(x, sliceIndex, z, _volume.SizeX, _volume.SizeY));
+                        }
                     }
                 }
                 break;
@@ -2449,12 +2505,27 @@ public partial class DicomViewPanel
                 double targetSpacingY = _volume.SpacingY > 0 ? _volume.SpacingY : 1.0;
                 int height = GetResampledDepth(_volume.SizeZ, _volume.SpacingZ, targetSpacingY);
                 mask = new bool[width, height];
-                for (int row = 0; row < height; row++)
+                bool[,] sagittalMask = mask;
+                if (width * height >= 65536)
                 {
-                    int z = Math.Clamp((int)Math.Round(MapOutputRowToSourceZ(row, height, _volume.SizeZ)), 0, _volume.SizeZ - 1);
-                    for (int y = 0; y < width; y++)
+                    Parallel.For(0, height, row =>
                     {
-                        mask[y, row] = region.Contains(GetVoxelKey(sliceIndex, y, z, _volume.SizeX, _volume.SizeY));
+                        int z = Math.Clamp((int)Math.Round(MapOutputRowToSourceZ(row, height, _volume.SizeZ)), 0, _volume.SizeZ - 1);
+                        for (int y = 0; y < width; y++)
+                        {
+                            sagittalMask[y, row] = region.Contains(GetVoxelKey(sliceIndex, y, z, _volume.SizeX, _volume.SizeY));
+                        }
+                    });
+                }
+                else
+                {
+                    for (int row = 0; row < height; row++)
+                    {
+                        int z = Math.Clamp((int)Math.Round(MapOutputRowToSourceZ(row, height, _volume.SizeZ)), 0, _volume.SizeZ - 1);
+                        for (int y = 0; y < width; y++)
+                        {
+                            sagittalMask[y, row] = region.Contains(GetVoxelKey(sliceIndex, y, z, _volume.SizeX, _volume.SizeY));
+                        }
                     }
                 }
                 break;
@@ -2548,6 +2619,16 @@ public partial class DicomViewPanel
                     }
 
                     double supportPenalty = Math.Max(0, (isMrLike ? 5 : 7) - neighborhoodSupport);
+                    double ctHighDensityDelta = isCtLike
+                        ? Math.Max(rawValue, homogenizedValue) - Math.Max(seedValue, homogenizedSeedValue)
+                        : 0;
+                    if (isCtLike &&
+                        ctHighDensityDelta > Math.Max(28.0, tolerance * (relaxedPass ? 0.95 : 0.75)) &&
+                        neighborhoodSupport < (relaxedPass ? 10 : 12))
+                    {
+                        continue;
+                    }
+
                     double brightOutlierPenalty = isCtLike
                         ? ComputePositiveOutlierPenalty(homogenizedValue, homogenizedSeedValue, tolerance * (relaxedPass ? 0.42 : 0.32)) * 2.4
                         : 0;
@@ -2628,6 +2709,9 @@ public partial class DicomViewPanel
                 ? (isMrLike ? 4 : 5)
                 : (isMrLike ? 5 : 7);
         bool hasNeighborhoodSupport = neighborhoodSupport >= minimumSupport;
+        double ctHighDensityDelta = isCtLike
+            ? Math.Max(rawValue, homogenizedValue) - Math.Max(seedCandidate.RawValue, Math.Max(stats.Mean, stats.LocalMean))
+            : 0;
 
         if (boundaryPenalty > boundaryLimit * (isMrLike ? 2.2 : 1.8) && seedDelta > adaptiveTolerance * (isMrLike ? 0.9 : 0.55))
         {
@@ -2643,6 +2727,12 @@ public partial class DicomViewPanel
         {
             bool strongPositiveOutlier = brightOutlierPenalty > adaptiveTolerance * (relaxedPass ? 0.45 : 0.32);
             if (strongPositiveOutlier && (!hasNeighborhoodSupport || boundaryPenalty > boundaryLimit * 0.8))
+            {
+                return false;
+            }
+
+            if (ctHighDensityDelta > Math.Max(32.0, adaptiveTolerance * (relaxedPass ? 1.0 : 0.78)) &&
+                (!hasNeighborhoodSupport || boundaryPenalty > boundaryLimit * 0.72))
             {
                 return false;
             }

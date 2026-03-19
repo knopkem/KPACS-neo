@@ -30,6 +30,11 @@ public partial class StudyViewerWindow
     private int _centerlineCurvedMprRenderVersion;
     private Guid? _centerlineCurvedMprRenderedPathId;
     private int _centerlineCurvedMprRenderedStationIndex = -1;
+    private CurvedMprDisplayOrientation _centerlineCurvedMprDisplayOrientation = CurvedMprDisplayOrientation.Horizontal;
+    private const double CenterlineCurvedMprHorizontalDisplayWidth = 620;
+    private const double CenterlineCurvedMprHorizontalDisplayHeight = 240;
+    private const double CenterlineCurvedMprVerticalDisplayWidth = 240;
+    private const double CenterlineCurvedMprVerticalDisplayHeight = 620;
 
     private void RefreshCenterlineCurvedMprPanel()
     {
@@ -40,7 +45,9 @@ public partial class StudyViewerWindow
             CenterlineCurvedMprStatusText is null ||
             CenterlineCurvedMprHintText is null ||
             CenterlineCurvedMprImage is null ||
-            CenterlineCurvedMprStationIndicator is null)
+            CenterlineCurvedMprStationIndicator is null ||
+            CenterlineCurvedMprGuideCanvas is null ||
+            CenterlineCurvedMprGuideLine is null)
         {
             return;
         }
@@ -79,6 +86,8 @@ public partial class StudyViewerWindow
         CenterlineCurvedMprSummaryText.Text = string.Empty;
         CenterlineCurvedMprStatusText.Text = string.Empty;
         CenterlineCurvedMprHintText.Text = "Computed curved MPR appears here.";
+        _centerlineCurvedMprDisplayOrientation = CurvedMprDisplayOrientation.Horizontal;
+        ApplyCenterlineCurvedMprDisplayOrientation(_centerlineCurvedMprDisplayOrientation);
         CenterlineCurvedMprImage.Source = null;
         CenterlineCurvedMprStationIndicator.Margin = new Thickness(0, 0, 0, 0);
     }
@@ -143,6 +152,8 @@ public partial class StudyViewerWindow
             }
 
             RenderCenterlineCurvedMprBitmap(renderResult);
+            _centerlineCurvedMprDisplayOrientation = renderResult.Orientation;
+            ApplyCenterlineCurvedMprDisplayOrientation(_centerlineCurvedMprDisplayOrientation);
             _centerlineCurvedMprRenderedPathId = path.Id;
             _centerlineCurvedMprRenderedStationIndex = stationIndex;
             UpdateCenterlineCurvedMprStationIndicator(path, stationIndex);
@@ -223,9 +234,17 @@ public partial class StudyViewerWindow
         }
 
         double hostWidth = CenterlineCurvedMprImageHost.Bounds.Width;
-        if (hostWidth <= 1 || path.Points.Count <= 1)
+        double hostHeight = CenterlineCurvedMprImageHost.Bounds.Height;
+        if ((hostWidth <= 1 && hostHeight <= 1) || path.Points.Count <= 1)
         {
             CenterlineCurvedMprStationIndicator.Margin = new Thickness(0, 0, 0, 0);
+            return;
+        }
+
+        if (_centerlineCurvedMprDisplayOrientation == CurvedMprDisplayOrientation.Vertical)
+        {
+            double y = (stationIndex / (double)(path.Points.Count - 1)) * Math.Max(0, hostHeight - 2);
+            CenterlineCurvedMprStationIndicator.Margin = new Thickness(0, Math.Clamp(y, 0, Math.Max(0, hostHeight - 2)), 0, 0);
             return;
         }
 
@@ -310,11 +329,59 @@ public partial class StudyViewerWindow
         }
 
         Point position = e.GetPosition(CenterlineCurvedMprImageHost);
-        double width = Math.Max(1, CenterlineCurvedMprImageHost.Bounds.Width);
-        _centerlineCrossSectionStationNormalized = Math.Clamp(position.X / width, 0, 1);
+        if (_centerlineCurvedMprDisplayOrientation == CurvedMprDisplayOrientation.Vertical)
+        {
+            double height = Math.Max(1, CenterlineCurvedMprImageHost.Bounds.Height);
+            _centerlineCrossSectionStationNormalized = Math.Clamp(position.Y / height, 0, 1);
+        }
+        else
+        {
+            double width = Math.Max(1, CenterlineCurvedMprImageHost.Bounds.Width);
+            _centerlineCrossSectionStationNormalized = Math.Clamp(position.X / width, 0, 1);
+        }
+
         RefreshCenterlinePanels();
         ScheduleMeasurementSessionSave();
         e.Handled = true;
+    }
+
+    private void ApplyCenterlineCurvedMprDisplayOrientation(CurvedMprDisplayOrientation orientation)
+    {
+        if (CenterlineCurvedMprImage is null ||
+            CenterlineCurvedMprStationIndicator is null ||
+            CenterlineCurvedMprGuideCanvas is null ||
+            CenterlineCurvedMprGuideLine is null)
+        {
+            return;
+        }
+
+        bool isVertical = orientation == CurvedMprDisplayOrientation.Vertical;
+        double displayWidth = isVertical ? CenterlineCurvedMprVerticalDisplayWidth : CenterlineCurvedMprHorizontalDisplayWidth;
+        double displayHeight = isVertical ? CenterlineCurvedMprVerticalDisplayHeight : CenterlineCurvedMprHorizontalDisplayHeight;
+
+        CenterlineCurvedMprImage.Width = displayWidth;
+        CenterlineCurvedMprImage.Height = displayHeight;
+        CenterlineCurvedMprGuideCanvas.Width = displayWidth;
+        CenterlineCurvedMprGuideCanvas.Height = displayHeight;
+
+        if (isVertical)
+        {
+            CenterlineCurvedMprStationIndicator.Width = double.NaN;
+            CenterlineCurvedMprStationIndicator.Height = 2;
+            CenterlineCurvedMprStationIndicator.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Stretch;
+            CenterlineCurvedMprStationIndicator.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Top;
+            CenterlineCurvedMprGuideLine.StartPoint = new Point(displayWidth * 0.5, 0);
+            CenterlineCurvedMprGuideLine.EndPoint = new Point(displayWidth * 0.5, displayHeight);
+        }
+        else
+        {
+            CenterlineCurvedMprStationIndicator.Width = 2;
+            CenterlineCurvedMprStationIndicator.Height = double.NaN;
+            CenterlineCurvedMprStationIndicator.HorizontalAlignment = Avalonia.Layout.HorizontalAlignment.Left;
+            CenterlineCurvedMprStationIndicator.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Stretch;
+            CenterlineCurvedMprGuideLine.StartPoint = new Point(0, displayHeight * 0.5);
+            CenterlineCurvedMprGuideLine.EndPoint = new Point(displayWidth, displayHeight * 0.5);
+        }
     }
 
     private void ApplyCenterlineCurvedMprPanelOffset()
