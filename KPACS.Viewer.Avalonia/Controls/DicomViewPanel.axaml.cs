@@ -357,10 +357,12 @@ public partial class DicomViewPanel : UserControl
         ProjectionBadge.PointerMoved += OnProjectionBadgePointerMoved;
         ProjectionBadge.PointerReleased += OnProjectionBadgePointerReleased;
         ProjectionBadge.PointerCaptureLost += OnProjectionBadgePointerCaptureLost;
+        CameraViewBadge.PointerPressed += OnDvrCameraViewBadgePointerPressed;
 
         SizeChanged += OnSizeChanged;
         InitializeOrientationContextMenu();
         InitializeProjectionContextMenu();
+        InitializeDvrCameraViewContextMenu();
         UpdateInteractiveCursor();
     }
 
@@ -420,6 +422,54 @@ public partial class DicomViewPanel : UserControl
         {
             SetProjectionMode(mode);
         }
+    }
+
+    private void InitializeDvrCameraViewContextMenu()
+    {
+        CameraViewBadge.ContextMenu = new ContextMenu
+        {
+            ItemsSource = new Control[]
+            {
+                CreateDvrCameraViewMenuItem("Front View", DvrCameraViewPreset.Front),
+                CreateDvrCameraViewMenuItem("Back View", DvrCameraViewPreset.Back),
+                CreateDvrCameraViewMenuItem("Left Side View", DvrCameraViewPreset.Left),
+                CreateDvrCameraViewMenuItem("Right Side View", DvrCameraViewPreset.Right),
+                CreateDvrCameraViewMenuItem("View From Above", DvrCameraViewPreset.Top),
+                CreateDvrCameraViewMenuItem("View From Below", DvrCameraViewPreset.Bottom),
+            }
+        };
+    }
+
+    private MenuItem CreateDvrCameraViewMenuItem(string header, DvrCameraViewPreset preset)
+    {
+        var item = new MenuItem { Header = header, Tag = preset };
+        item.Click += OnDvrCameraViewMenuItemClick;
+        return item;
+    }
+
+    private void OnDvrCameraViewMenuItemClick(object? sender, RoutedEventArgs e)
+    {
+        if (sender is MenuItem { Tag: DvrCameraViewPreset preset })
+        {
+            SetDvrCameraViewPreset(preset);
+        }
+    }
+
+    private void OnDvrCameraViewBadgePointerPressed(object? sender, PointerPressedEventArgs e)
+    {
+        if (_volume is null || !IsDvrMode)
+        {
+            return;
+        }
+
+        PointerPoint point = e.GetCurrentPoint(CameraViewBadge);
+        if (!point.Properties.IsLeftButtonPressed && !point.Properties.IsRightButtonPressed)
+        {
+            return;
+        }
+
+        CameraViewBadge.ContextMenu?.Open(CameraViewBadge);
+        e.Handled = true;
     }
 
     private void UpdateInteractiveCursor(Point? pos = null)
@@ -924,6 +974,7 @@ public partial class DicomViewPanel : UserControl
 
         if (mode == VolumeProjectionMode.Dvr)
         {
+            _projectionThicknessMm = GetMaximumProjectionThicknessMm();
             // Initialise the 3D camera; first render will go through ShowVolumeSlice
             // which detects DVR mode and uses the arbitrary-view renderer.
             InitializeDvrCamera();
@@ -1076,6 +1127,11 @@ public partial class DicomViewPanel : UserControl
         _planeTiltDragStart = pos;
         _planeTiltStartAroundColumn = _planeTiltAroundColumn;
         _planeTiltStartAroundRow = _planeTiltAroundRow;
+        if (IsDvrMode && _hasExplicitDvrCameraBasis)
+        {
+            _planeTiltStartAroundColumn = _dvrAzimuth;
+            _planeTiltStartAroundRow = _dvrElevation;
+        }
         _planeTiltControlPressed = false;
         _planeOffsetMm = HasTiltedPlane
             ? GetCurrentPlaneOffsetMm()
@@ -1101,6 +1157,70 @@ public partial class DicomViewPanel : UserControl
         double dx = pos.X - _planeTiltDragStart.X;
         double dy = pos.Y - _planeTiltDragStart.Y;
         bool constrainAxis = _planeTiltConstraintModeActive || _planeTiltControlPressed || modifiers.HasFlag(KeyModifiers.Control);
+
+        if (IsDvrMode && _hasExplicitDvrCameraBasis)
+        {
+            if (constrainAxis && !_planeTiltConstraintModeActive)
+            {
+                _planeTiltConstraintModeActive = true;
+                _planeTiltConstraintAxis = PlaneTiltConstraintAxis.None;
+                _planeTiltDragStart = pos;
+                _planeTiltStartAroundColumn = _dvrAzimuth;
+                _planeTiltStartAroundRow = _dvrElevation;
+                dx = 0;
+                dy = 0;
+            }
+
+            double nextAzimuth;
+            double nextElevation;
+            if (constrainAxis)
+            {
+                if (_planeTiltConstraintAxis == PlaneTiltConstraintAxis.None)
+                {
+                    if (Math.Abs(dx) >= Math.Abs(dy) && Math.Abs(dx) > 1e-3)
+                    {
+                        _planeTiltConstraintAxis = PlaneTiltConstraintAxis.Horizontal;
+                    }
+                    else if (Math.Abs(dy) > 1e-3)
+                    {
+                        _planeTiltConstraintAxis = PlaneTiltConstraintAxis.Vertical;
+                    }
+                }
+
+                nextAzimuth = _planeTiltStartAroundColumn;
+                nextElevation = _planeTiltStartAroundRow;
+                switch (_planeTiltConstraintAxis)
+                {
+                    case PlaneTiltConstraintAxis.Horizontal:
+                        nextAzimuth = _planeTiltStartAroundColumn + dx * sensitivity;
+                        break;
+                    case PlaneTiltConstraintAxis.Vertical:
+                        nextElevation = Math.Clamp(_planeTiltStartAroundRow - dy * sensitivity, -Math.PI * 0.48, Math.PI * 0.48);
+                        break;
+                }
+            }
+            else
+            {
+                _planeTiltConstraintAxis = PlaneTiltConstraintAxis.None;
+                nextAzimuth = _planeTiltStartAroundColumn + dx * sensitivity;
+                nextElevation = Math.Clamp(_planeTiltStartAroundRow - dy * sensitivity, -Math.PI * 0.48, Math.PI * 0.48);
+            }
+
+            if (Math.Abs(nextAzimuth - _dvrAzimuth) < 1e-5 && Math.Abs(nextElevation - _dvrElevation) < 1e-5)
+            {
+                return true;
+            }
+
+            _dvrAzimuth = nextAzimuth;
+            _dvrElevation = nextElevation;
+            _dvrCameraViewPreset = DvrCameraViewPreset.Custom;
+
+            RenderDvrViewFast();
+            ScheduleDvrSharpRender();
+            UpdateOverlay();
+            NotifyViewStateChanged();
+            return true;
+        }
 
         if (constrainAxis && !_planeTiltConstraintModeActive)
         {
@@ -1774,13 +1894,12 @@ public partial class DicomViewPanel : UserControl
 
     public void SetDvrAutoColorLutEnabled(bool enabled)
     {
-        bool effectiveEnabled = enabled && SupportsDvrAutoColorLut;
-        if (_dvrAutoColorLutEnabled == effectiveEnabled)
+        if (_dvrAutoColorLutEnabled == enabled)
         {
             return;
         }
 
-        _dvrAutoColorLutEnabled = effectiveEnabled;
+        _dvrAutoColorLutEnabled = enabled;
         if (_volume is not null)
         {
             RebuildDvrTransferFunction();
@@ -1999,10 +2118,16 @@ public partial class DicomViewPanel : UserControl
         _projectionMode = state.ProjectionMode;
         _planeTiltAroundColumn = state.PlaneTiltAroundColumnRadians;
         _planeTiltAroundRow = state.PlaneTiltAroundRowRadians;
-        _projectionThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), state.ProjectionThicknessMm);
+        _projectionThicknessMm = _projectionMode == VolumeProjectionMode.Dvr
+            ? GetMaximumProjectionThicknessMm()
+            : Math.Max(GetMinimumProjectionThicknessMm(), state.ProjectionThicknessMm);
         _viewRotationQuarterTurns = NormalizeQuarterTurns(state.ViewRotationQuarterTurns);
         _viewFlipHorizontal = state.ViewFlipHorizontal;
         _viewFlipVertical = state.ViewFlipVertical;
+        if (_projectionMode == VolumeProjectionMode.Dvr)
+        {
+            InitializeDvrCamera();
+        }
         ApplyActiveColorLut();
 
         if (state.FitToWindow)
@@ -2206,6 +2331,9 @@ public partial class DicomViewPanel : UserControl
         ProjectionBadgeText.Text = _volume is null
             ? string.Empty
             : $"{GetProjectionModeLabel(_projectionMode)}  {_projectionThicknessMm:F1} mm";
+        CameraViewBadgeText.Text = _volume is null || !IsDvrMode
+            ? string.Empty
+            : GetDvrCameraViewBadgeLabel();
 
         OverlayCenterRight.Text = GetHorizontalOrientationLabel(isRightEdge: true);
         OverlayCenterLeft.Text = GetHorizontalOrientationLabel(isRightEdge: false);
@@ -2248,6 +2376,7 @@ public partial class DicomViewPanel : UserControl
         OverlayTopRight.IsVisible = visible;
         OrientationBadge.IsVisible = visible && _volume is not null;
         ProjectionBadge.IsVisible = visible && _volume is not null;
+        CameraViewBadge.IsVisible = visible && _volume is not null && IsDvrMode;
         OverlayTopCenter.IsVisible = visible && !string.IsNullOrEmpty(OverlayTopCenter.Text);
         OverlayCenterLeft.IsVisible = visible && !string.IsNullOrEmpty(OverlayCenterLeft.Text);
         OverlayCenterRight.IsVisible = visible && !string.IsNullOrEmpty(OverlayCenterRight.Text);

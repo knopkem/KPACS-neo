@@ -57,6 +57,10 @@ public partial class StudyViewerWindow : Window
     private int _selectedColorScheme = (int)ColorScheme.Grayscale;
     private bool _overlayEnabled = true;
     private bool _linkedViewSyncEnabled = true;
+    private TransferFunctionPreset _preferredDvrPreset = TransferFunctionPreset.SoftTissue;
+    private VolumeShadingPreset _preferredDvrShadingPreset = VolumeShadingPreset.SoftTissue;
+    private VolumeLightDirectionPreset _preferredDvrLightDirectionPreset = VolumeLightDirectionPreset.Headlight;
+    private bool _preferredDvrAutoColorLutEnabled = true;
     private List<int> _currentLayoutSpec = [1];
     private List<string> _savedCustomLayouts = [];
     private ViewerLayoutState? _layoutBeforeFocusedView;
@@ -562,6 +566,7 @@ public partial class StudyViewerWindow : Window
             if (!isCurrentBoundVolume)
             {
                 slot.Panel.BindVolume(slot.Volume, orientation, slot.InstanceIndex);
+                ApplyStoredDvrPreferences(slot.Panel);
             }
             else
             {
@@ -1851,6 +1856,11 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
+        if (sourceSlot.Panel.IsDvrMode)
+        {
+            return;
+        }
+
         if (!sourceSlot.Panel.TryCaptureNavigationState(out DicomViewPanel.NavigationState navigationState))
         {
             return;
@@ -1903,6 +1913,11 @@ public partial class StudyViewerWindow : Window
             foreach (ViewportSlot targetSlot in _slots)
             {
                 if (ReferenceEquals(targetSlot, sourceSlot) || targetSlot.Series is null || targetSlot.Series.Instances.Count == 0)
+                {
+                    continue;
+                }
+
+                if (targetSlot.Panel.IsDvrMode)
                 {
                     continue;
                 }
@@ -3823,6 +3838,19 @@ public partial class StudyViewerWindow : Window
                 {
                     _renderingBackendPreference = renderingBackendPreference;
                 }
+                if (Enum.TryParse(settings.PreferredDvrPreset, ignoreCase: true, out TransferFunctionPreset preferredDvrPreset))
+                {
+                    _preferredDvrPreset = preferredDvrPreset;
+                }
+                if (Enum.TryParse(settings.PreferredDvrShadingPreset, ignoreCase: true, out VolumeShadingPreset preferredDvrShadingPreset))
+                {
+                    _preferredDvrShadingPreset = preferredDvrShadingPreset;
+                }
+                if (Enum.TryParse(settings.PreferredDvrLightDirectionPreset, ignoreCase: true, out VolumeLightDirectionPreset preferredDvrLightDirectionPreset))
+                {
+                    _preferredDvrLightDirectionPreset = preferredDvrLightDirectionPreset;
+                }
+                _preferredDvrAutoColorLutEnabled = settings.PreferredDvrAutoColorLutEnabled;
                 _reportDebugEnabled = settings.ReportDebugEnabled;
                 _customAnatomyRegions.Clear();
                 if (settings.CustomAnatomyRegions is not null)
@@ -3947,6 +3975,10 @@ public partial class StudyViewerWindow : Window
                 RenderingPanelOffsetX = _renderingPanelOffset.X,
                 RenderingPanelOffsetY = _renderingPanelOffset.Y,
                 RenderingBackendPreference = _renderingBackendPreference.ToString(),
+                PreferredDvrPreset = _preferredDvrPreset.ToString(),
+                PreferredDvrShadingPreset = _preferredDvrShadingPreset.ToString(),
+                PreferredDvrLightDirectionPreset = _preferredDvrLightDirectionPreset.ToString(),
+                PreferredDvrAutoColorLutEnabled = _preferredDvrAutoColorLutEnabled,
                 ReportDebugEnabled = _reportDebugEnabled,
                 CustomAnatomyRegions = [.. _customAnatomyRegions],
                 CustomAnatomyStructuresByRegion = _customAnatomyStructuresByRegion.ToDictionary(
@@ -4193,6 +4225,10 @@ public partial class StudyViewerWindow : Window
         public double RenderingPanelOffsetX { get; init; }
         public double RenderingPanelOffsetY { get; init; }
         public string? RenderingBackendPreference { get; init; }
+        public string? PreferredDvrPreset { get; init; }
+        public string? PreferredDvrShadingPreset { get; init; }
+        public string? PreferredDvrLightDirectionPreset { get; init; }
+        public bool PreferredDvrAutoColorLutEnabled { get; init; } = true;
         public bool ReportDebugEnabled { get; init; }
         public List<string>? CustomAnatomyRegions { get; init; }
         public Dictionary<string, List<string>>? CustomAnatomyStructuresByRegion { get; init; }

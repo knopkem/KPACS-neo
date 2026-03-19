@@ -84,6 +84,27 @@ public partial class StudyViewerWindow
     private string _renderingBenchmarkSummary = string.Empty;
     private VolumeComputePreference _renderingBackendPreference = VolumeComputePreference.Auto;
 
+    private void ApplyStoredDvrPreferences(DicomViewPanel panel)
+    {
+        if (!panel.IsVolumeBound)
+        {
+            return;
+        }
+
+        panel.SetDvrPreset(_preferredDvrPreset);
+        panel.SetDvrShadingPreset(_preferredDvrShadingPreset);
+        panel.SetDvrLightDirectionPreset(_preferredDvrLightDirectionPreset);
+        panel.SetDvrAutoColorLutEnabled(_preferredDvrAutoColorLutEnabled);
+    }
+
+    private void CaptureStoredDvrPreferences(DicomViewPanel panel)
+    {
+        _preferredDvrPreset = panel.DvrPreset;
+        _preferredDvrShadingPreset = panel.DvrShadingPreset;
+        _preferredDvrLightDirectionPreset = panel.DvrLightDirectionPreset;
+        _preferredDvrAutoColorLutEnabled = panel.IsDvrAutoColorLutEnabled;
+    }
+
     private void RefreshRenderingWorkspacePanel(bool forceVisible = false)
     {
         if (forceVisible)
@@ -315,6 +336,11 @@ public partial class StudyViewerWindow
             return;
         }
 
+        if (choice.Value == VolumeProjectionMode.Dvr)
+        {
+            ApplyStoredDvrPreferences(panel);
+        }
+
         panel.SetProjectionMode(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: true);
     }
@@ -367,6 +393,7 @@ public partial class StudyViewerWindow
             RefreshRenderingWorkspacePanel(forceVisible: true);
         }
 
+        CaptureStoredDvrPreferences(panel);
         SaveViewerSettings();
     }
 
@@ -384,6 +411,7 @@ public partial class StudyViewerWindow
 
         panel.SetDvrShadingPreset(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: true);
+        CaptureStoredDvrPreferences(panel);
         SaveViewerSettings();
     }
 
@@ -401,6 +429,7 @@ public partial class StudyViewerWindow
 
         panel.SetDvrLightDirectionPreset(choice.Value);
         RefreshRenderingWorkspacePanel(forceVisible: true);
+        CaptureStoredDvrPreferences(panel);
         SaveViewerSettings();
     }
 
@@ -431,6 +460,7 @@ public partial class StudyViewerWindow
         bool enabled = RenderingWorkspaceAutoColorLutCheckBox.IsChecked == true;
         panel.SetDvrAutoColorLutEnabled(enabled);
         RefreshRenderingWorkspacePanel(forceVisible: true);
+        CaptureStoredDvrPreferences(panel);
         SaveViewerSettings();
     }
 

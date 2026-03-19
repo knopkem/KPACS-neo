@@ -236,7 +236,7 @@ public static class VolumeReslicer
     {
         y = Math.Clamp(y, 0, volume.SizeY - 1);
         int width = volume.SizeX;
-        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double targetSpacingY = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
         int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
         short[] pixels = new short[width * height];
 
@@ -268,7 +268,7 @@ public static class VolumeReslicer
     {
         x = Math.Clamp(x, 0, volume.SizeX - 1);
         int width = volume.SizeY;
-        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double targetSpacingY = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
         int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
         short[] pixels = new short[width * height];
 
@@ -319,7 +319,7 @@ public static class VolumeReslicer
     private static DicomSpatialMetadata GetCoronalSpatialMetadata(SeriesVolume volume, int sliceIndex)
     {
         sliceIndex = Math.Clamp(sliceIndex, 0, volume.SizeY - 1);
-        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double targetSpacingY = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
         int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
         Vector3D sliceOrigin = volume.Origin
             + volume.ColumnDirection * (sliceIndex * volume.SpacingY)
@@ -344,7 +344,7 @@ public static class VolumeReslicer
     private static DicomSpatialMetadata GetSagittalSpatialMetadata(SeriesVolume volume, int sliceIndex)
     {
         sliceIndex = Math.Clamp(sliceIndex, 0, volume.SizeX - 1);
-        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double targetSpacingY = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
         int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
         Vector3D sliceOrigin = volume.Origin
             + volume.RowDirection * (sliceIndex * volume.SpacingX)
@@ -805,7 +805,7 @@ public static class VolumeReslicer
         SeriesVolume volume,
         SliceOrientation orientation)
     {
-        double targetSpacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+        double targetSpacingY = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
         return orientation switch
         {
             SliceOrientation.Coronal => (volume.RowDirection, volume.Normal * -1, volume.ColumnDirection, volume.SpacingX, targetSpacingY),

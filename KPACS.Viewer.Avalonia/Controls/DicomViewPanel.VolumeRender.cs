@@ -17,6 +17,18 @@ namespace KPACS.Viewer.Controls;
 
 public partial class DicomViewPanel
 {
+    private enum DvrCameraViewPreset
+    {
+        Current,
+        Front,
+        Back,
+        Left,
+        Right,
+        Top,
+        Bottom,
+        Custom,
+    }
+
     public sealed record VolumeRenderBenchmarkResult(
         int Iterations,
         double CpuAverageMilliseconds,
@@ -36,9 +48,11 @@ public partial class DicomViewPanel
 
     private VolumeRenderState? _dvrRenderState;
     private VolumeTransferFunction? _dvrTransferFunction;
-    private TransferFunctionPreset _dvrPreset = TransferFunctionPreset.Default;
-    private VolumeShadingPreset _dvrShadingPreset = VolumeShadingPreset.Default;
+    private TransferFunctionPreset _dvrPreset = TransferFunctionPreset.SoftTissue;
+    private VolumeShadingPreset _dvrShadingPreset = VolumeShadingPreset.SoftTissue;
     private VolumeLightDirectionPreset _dvrLightDirectionPreset = VolumeLightDirectionPreset.Headlight;
+    private DvrCameraViewPreset _dvrCameraViewPreset;
+    private bool _hasExplicitDvrCameraBasis;
 
     // Camera orbit (spherical offsets from initial orientation)
     private double _dvrAzimuth;          // horizontal rotation (radians)
@@ -101,26 +115,17 @@ public partial class DicomViewPanel
         double extentZ = (_volume.SizeZ - 1) * spacingZ;
 
         VolumeSlicePlane? plane = GetCurrentSlicePlane(_volumeSliceIndex);
-        _dvrVolumeCenter = plane is not null
-            ? ToVolumeLocalPoint(plane.Center)
-            : GetDvrSliceCenterMm(_volumeSliceIndex);
+        _dvrVolumeCenter = _hasExplicitDvrCameraBasis
+            ? GetVolumeCenterMm()
+            : plane is not null
+                ? ToVolumeLocalPoint(plane.Center)
+                : GetDvrSliceCenterMm(_volumeSliceIndex);
         double diagonal = Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
         _dvrDistance = diagonal * 1.5;
 
-        // Initial view direction matches the current orientation
-        if (plane is not null)
+        if (!_hasExplicitDvrCameraBasis)
         {
-            _dvrInitialForward = ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize();
-            _dvrInitialUp = ToVolumeLocalDirection(plane.ColumnDirection).Normalize();
-        }
-        else
-        {
-            (_dvrInitialForward, _dvrInitialUp) = _volumeOrientation switch
-            {
-                SliceOrientation.Coronal => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
-                SliceOrientation.Sagittal => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
-                _ /* Axial */ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
-            };
+            (_dvrInitialForward, _dvrInitialUp) = GetDefaultDvrCameraBasis(plane);
         }
 
         _dvrAzimuth = 0;
@@ -153,17 +158,45 @@ public partial class DicomViewPanel
             return;
         }
 
-        VolumeSlicePlane? plane = GetCurrentSlicePlane(_volumeSliceIndex);
-        ReslicedImage referenceSlice;
+        VolumeSlicePlane? plane = _hasExplicitDvrCameraBasis ? null : GetCurrentSlicePlane(_volumeSliceIndex);
+        ReslicedImage? referenceSlice = null;
         SpatialVector3D baseForward;
         SpatialVector3D baseUp;
+        int outputWidth;
+        int outputHeight;
 
-        if (plane is not null)
+        if (_hasExplicitDvrCameraBasis)
+        {
+            _dvrVolumeCenter = GetVolumeCenterMm();
+            baseForward = _dvrInitialForward;
+            baseUp = _dvrInitialUp;
+
+            if (TryGetReferenceSliceForExplicitCamera(out ReslicedImage explicitReference))
+            {
+                referenceSlice = explicitReference;
+                outputWidth = Math.Max(1, explicitReference.Width);
+                outputHeight = Math.Max(1, explicitReference.Height);
+            }
+            else
+            {
+                outputWidth = Math.Max(1, _imageWidth);
+                outputHeight = Math.Max(1, _imageHeight);
+                if (outputWidth == 1 || outputHeight == 1)
+                {
+                    referenceSlice = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, _volumeSliceIndex);
+                    outputWidth = Math.Max(1, referenceSlice.Width);
+                    outputHeight = Math.Max(1, referenceSlice.Height);
+                }
+            }
+        }
+        else if (plane is not null)
         {
             _dvrVolumeCenter = ToVolumeLocalPoint(plane.Center);
             referenceSlice = VolumeReslicer.ExtractSlice(_volume, plane);
             baseForward = ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize();
             baseUp = ToVolumeLocalDirection(plane.ColumnDirection).Normalize();
+            outputWidth = Math.Max(1, referenceSlice.Width);
+            outputHeight = Math.Max(1, referenceSlice.Height);
         }
         else
         {
@@ -171,6 +204,8 @@ public partial class DicomViewPanel
             referenceSlice = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, _volumeSliceIndex);
             baseForward = _dvrInitialForward;
             baseUp = _dvrInitialUp;
+            outputWidth = Math.Max(1, referenceSlice.Width);
+            outputHeight = Math.Max(1, referenceSlice.Height);
         }
 
         // Compute rotated camera vectors via Rodrigues rotation
@@ -183,14 +218,37 @@ public partial class DicomViewPanel
         // 2. Rotate around the right vector (elevation)
         forward = RotateAroundAxis(forward, right, _dvrElevation);
         SpatialVector3D up = RotateAroundAxis(baseUp, right, _dvrElevation);
+        right = forward.Cross(up).Normalize();
 
         SpatialVector3D cameraPos = _dvrVolumeCenter - forward * _dvrDistance;
 
-        // DVR should match the current orthogonal projection geometry exactly.
-        int outputWidth = Math.Max(1, referenceSlice.Width);
-        int outputHeight = Math.Max(1, referenceSlice.Height);
-        double orthographicWidthMm = Math.Max(0, (outputWidth - 1) * referenceSlice.PixelSpacingX);
-        double orthographicHeightMm = Math.Max(0, (outputHeight - 1) * referenceSlice.PixelSpacingY);
+        double orthographicWidthMm;
+        double orthographicHeightMm;
+        if (_hasExplicitDvrCameraBasis)
+        {
+            if (referenceSlice is not null)
+            {
+                orthographicWidthMm = Math.Max(1.0, (outputWidth - 1) * referenceSlice.PixelSpacingX);
+                orthographicHeightMm = Math.Max(1.0, (outputHeight - 1) * referenceSlice.PixelSpacingY);
+            }
+            else
+            {
+                GetVolumeExtentsMm(out double extentX, out double extentY, out double extentZ);
+                orthographicWidthMm = Math.Max(1.0, ComputeProjectedExtentMm(right, extentX, extentY, extentZ));
+                orthographicHeightMm = Math.Max(1.0, ComputeProjectedExtentMm(up, extentX, extentY, extentZ));
+                (outputWidth, outputHeight) = ComputeAspectPreservingOutputSize(
+                    orthographicWidthMm,
+                    orthographicHeightMm,
+                    outputWidth,
+                    outputHeight);
+            }
+        }
+        else
+        {
+            orthographicWidthMm = Math.Max(0, (outputWidth - 1) * referenceSlice!.PixelSpacingX);
+            orthographicHeightMm = Math.Max(0, (outputHeight - 1) * referenceSlice.PixelSpacingY);
+        }
+
         VolumeShadingDefinition shading = VolumeRenderingPresetCatalog.GetShadingDefinition(_dvrShadingPreset);
         SpatialVector3D lightDirection = GetDvrLightDirection(forward, right, up);
 
@@ -294,14 +352,7 @@ public partial class DicomViewPanel
             _volume, _dvrRenderState, _dvrTransferFunction);
         _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
-        _volumeSlicePixels = resliced.Pixels;
-        _volumeSliceBgraPixels = resliced.BgraPixels;
-        _imageWidth = resliced.Width;
-        _imageHeight = resliced.Height;
-
-        // Don't call ApplyDisplayImageSize() — dimensions are stable,
-        // layout was already established by the initial DVR render.
-        // GPU renders at full quality, so use sharp display output too.
+        ApplyDvrReslicedGeometry(resliced);
         RenderImage(sharp: gpuAvailable);
     }
 
@@ -327,17 +378,34 @@ public partial class DicomViewPanel
             _volume, _dvrRenderState, _dvrTransferFunction);
         _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
+        ApplyDvrReslicedGeometry(resliced);
+        RenderImage(sharp: true);
+        UpdateOverlay();
+    }
+
+    private void ApplyDvrReslicedGeometry(ReslicedImage resliced)
+    {
+        double previousDisplayWidth = GetDisplayWidth();
+        double previousDisplayHeight = GetDisplayHeight();
+        int previousImageWidth = _imageWidth;
+        int previousImageHeight = _imageHeight;
+
         _volumeSlicePixels = resliced.Pixels;
         _volumeSliceBgraPixels = resliced.BgraPixels;
         _imageWidth = resliced.Width;
         _imageHeight = resliced.Height;
+        UpdateDisplayGeometry(resliced.PixelSpacingX, resliced.PixelSpacingY);
+        ApplyDisplayImageSize();
 
-        // Don't call ApplyDisplayImageSize() — the layout was established by
-        // the initial ShowVolumeSlice when DVR mode was activated.  Changing it
-        // here would shift/resize the image because the sharp render uses a
-        // different pixel resolution than the fast preview.
-        RenderImage(sharp: true);
-        UpdateOverlay();
+        bool geometryChanged = previousImageWidth != _imageWidth
+            || previousImageHeight != _imageHeight
+            || Math.Abs(previousDisplayWidth - GetDisplayWidth()) > 0.01
+            || Math.Abs(previousDisplayHeight - GetDisplayHeight()) > 0.01;
+
+        if (_fitToWindow && !_pendingInitialFitToWindow && geometryChanged)
+        {
+            ApplyFitToWindowLayoutWithoutRender();
+        }
     }
 
     /// <summary>
@@ -418,6 +486,11 @@ public partial class DicomViewPanel
             _dvrOrbitStartElevation - dy * sensitivity,
             -Math.PI * 0.48,
             Math.PI * 0.48);
+        if (Math.Abs(dx) > 0.5 || Math.Abs(dy) > 0.5)
+        {
+            _dvrCameraViewPreset = DvrCameraViewPreset.Custom;
+            _hasExplicitDvrCameraBasis = true;
+        }
 
         RenderDvrViewFast();
         ScheduleDvrSharpRender();
@@ -509,6 +582,148 @@ public partial class DicomViewPanel
         {
             RenderDvrViewFast();
             ScheduleDvrSharpRender();
+        }
+    }
+
+    private (SpatialVector3D Forward, SpatialVector3D Up) GetDefaultDvrCameraBasis(VolumeSlicePlane? plane)
+    {
+        if (plane is not null)
+        {
+            return (
+                ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize(),
+                ToVolumeLocalDirection(plane.ColumnDirection).Normalize());
+        }
+
+        return _volumeOrientation switch
+        {
+            SliceOrientation.Coronal => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
+            SliceOrientation.Sagittal => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
+            _ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
+        };
+    }
+
+    private void GetVolumeExtentsMm(out double extentX, out double extentY, out double extentZ)
+    {
+        if (_volume is null)
+        {
+            extentX = 0;
+            extentY = 0;
+            extentZ = 0;
+            return;
+        }
+
+        double spacingX = _volume.SpacingX > 0 ? _volume.SpacingX : 1.0;
+        double spacingY = _volume.SpacingY > 0 ? _volume.SpacingY : 1.0;
+        double spacingZ = _volume.SpacingZ > 0 ? _volume.SpacingZ : 1.0;
+        extentX = Math.Max(0, (_volume.SizeX - 1) * spacingX);
+        extentY = Math.Max(0, (_volume.SizeY - 1) * spacingY);
+        extentZ = Math.Max(0, (_volume.SizeZ - 1) * spacingZ);
+    }
+
+    private SpatialVector3D GetVolumeCenterMm()
+    {
+        GetVolumeExtentsMm(out double extentX, out double extentY, out double extentZ);
+        return new SpatialVector3D(extentX * 0.5, extentY * 0.5, extentZ * 0.5);
+    }
+
+    private static double ComputeProjectedExtentMm(SpatialVector3D axis, double extentX, double extentY, double extentZ)
+    {
+        SpatialVector3D normalized = axis.Normalize();
+        return Math.Abs(normalized.X) * extentX
+            + Math.Abs(normalized.Y) * extentY
+            + Math.Abs(normalized.Z) * extentZ;
+    }
+
+    private bool TryGetReferenceSliceForExplicitCamera(out ReslicedImage referenceSlice)
+    {
+        referenceSlice = default!;
+        if (_volume is null)
+        {
+            return false;
+        }
+
+        SliceOrientation? orientation = _dvrCameraViewPreset switch
+        {
+            DvrCameraViewPreset.Front or DvrCameraViewPreset.Back => SliceOrientation.Coronal,
+            DvrCameraViewPreset.Left or DvrCameraViewPreset.Right => SliceOrientation.Sagittal,
+            DvrCameraViewPreset.Top or DvrCameraViewPreset.Bottom => SliceOrientation.Axial,
+            _ => null,
+        };
+
+        if (orientation is null)
+        {
+            return false;
+        }
+
+        int midSlice = Math.Max(0, VolumeReslicer.GetSliceCount(_volume, orientation.Value) / 2);
+        referenceSlice = VolumeReslicer.ExtractSlice(_volume, orientation.Value, midSlice);
+        return true;
+    }
+
+    private static (int Width, int Height) ComputeAspectPreservingOutputSize(
+        double widthMm,
+        double heightMm,
+        int currentWidth,
+        int currentHeight)
+    {
+        double safeWidth = Math.Max(1.0, widthMm);
+        double safeHeight = Math.Max(1.0, heightMm);
+        int preferredLongestSide = Math.Max(256, Math.Max(currentWidth, currentHeight));
+
+        if (safeWidth >= safeHeight)
+        {
+            int width = preferredLongestSide;
+            int height = Math.Max(1, (int)Math.Round(preferredLongestSide * (safeHeight / safeWidth)));
+            return (width, height);
+        }
+
+        int outputHeight = preferredLongestSide;
+        int outputWidth = Math.Max(1, (int)Math.Round(preferredLongestSide * (safeWidth / safeHeight)));
+        return (outputWidth, outputHeight);
+    }
+
+    private static (SpatialVector3D Forward, SpatialVector3D Up) GetStandardDvrCameraBasis(DvrCameraViewPreset preset) => preset switch
+    {
+        DvrCameraViewPreset.Front => (new SpatialVector3D(0, 1, 0), new SpatialVector3D(0, 0, -1)),
+        DvrCameraViewPreset.Back => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
+        DvrCameraViewPreset.Left => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
+        DvrCameraViewPreset.Right => (new SpatialVector3D(-1, 0, 0), new SpatialVector3D(0, 0, -1)),
+        DvrCameraViewPreset.Top => (new SpatialVector3D(0, 0, 1), new SpatialVector3D(0, 1, 0)),
+        DvrCameraViewPreset.Bottom => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
+        _ => (new SpatialVector3D(0, 0, -1), new SpatialVector3D(0, 1, 0)),
+    };
+
+    private string GetDvrCameraViewBadgeLabel() => _dvrCameraViewPreset switch
+    {
+        DvrCameraViewPreset.Front => "📷 Front",
+        DvrCameraViewPreset.Back => "📷 Back",
+        DvrCameraViewPreset.Left => "📷 Left",
+        DvrCameraViewPreset.Right => "📷 Right",
+        DvrCameraViewPreset.Top => "📷 Above",
+        DvrCameraViewPreset.Bottom => "📷 Below",
+        DvrCameraViewPreset.Custom => "📷 Custom",
+        _ => "📷 Camera",
+    };
+
+    private void SetDvrCameraViewPreset(DvrCameraViewPreset preset)
+    {
+        if (_volume is null)
+        {
+            return;
+        }
+
+        _dvrCameraViewPreset = preset;
+        (_dvrInitialForward, _dvrInitialUp) = GetStandardDvrCameraBasis(preset);
+        _dvrAzimuth = 0;
+        _dvrElevation = 0;
+        _hasExplicitDvrCameraBasis = true;
+
+        if (IsDvrMode)
+        {
+            RenderDvrViewFast();
+            ScheduleDvrSharpRender();
+            UpdateOverlay();
+            NotifyViewStateChanged();
         }
     }
 
