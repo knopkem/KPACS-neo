@@ -238,9 +238,27 @@ public partial class DicomViewPanel
             }
             else
             {
+                // Use the volume half-diagonal as the orthographic frustum base.
+                // ComputeProjectedExtentMm would yield a rotation-dependent value
+                // (range: from the shortest axis up to the diagonal), causing the
+                // volume to visibly grow and shrink as the camera orbits.
+                // The half-diagonal is rotation-invariant: it is the maximum possible
+                // projected extent for any view direction, so the volume always fits.
                 GetVolumeExtentsMm(out double extentX, out double extentY, out double extentZ);
-                orthographicWidthMm = Math.Max(1.0, ComputeProjectedExtentMm(right, extentX, extentY, extentZ));
-                orthographicHeightMm = Math.Max(1.0, ComputeProjectedExtentMm(up, extentX, extentY, extentZ));
+                double halfDiag = Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ) * 0.5;
+                double frustumBase = Math.Max(1.0, 2.0 * halfDiag);
+                double aspect = outputWidth > 1 && outputHeight > 1 ? (double)outputWidth / outputHeight : 1.0;
+                if (aspect >= 1.0)
+                {
+                    orthographicWidthMm = frustumBase * aspect;
+                    orthographicHeightMm = frustumBase;
+                }
+                else
+                {
+                    orthographicWidthMm = frustumBase;
+                    orthographicHeightMm = frustumBase / aspect;
+                }
+
                 (outputWidth, outputHeight) = ComputeAspectPreservingOutputSize(
                     orthographicWidthMm,
                     orthographicHeightMm,
