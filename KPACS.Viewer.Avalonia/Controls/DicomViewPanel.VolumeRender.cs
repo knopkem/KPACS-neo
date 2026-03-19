@@ -251,6 +251,7 @@ public partial class DicomViewPanel
 
         VolumeShadingDefinition shading = VolumeRenderingPresetCatalog.GetShadingDefinition(_dvrShadingPreset);
         SpatialVector3D lightDirection = GetDvrLightDirection(forward, right, up);
+        (SpatialVector3D slabCenter, SpatialVector3D slabNormal) = GetDvrSlabDefinition();
 
         _dvrRenderState = new VolumeRenderState
         {
@@ -267,10 +268,37 @@ public partial class DicomViewPanel
             Shininess = shading.Shininess,
             OrthographicScale = 1.0,
             SlabThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), _projectionThicknessMm),
+            SlabCenter = slabCenter,
+            SlabNormal = slabNormal,
             OutputWidth = outputWidth,
             OutputHeight = outputHeight,
             SamplingStepFactor = highQuality || VolumeComputeBackend.CanUseOpenCl ? 1.0 : 3.5,
         };
+    }
+
+    private (SpatialVector3D Center, SpatialVector3D Normal) GetDvrSlabDefinition()
+    {
+        if (_volume is null)
+        {
+            return (_dvrVolumeCenter, new SpatialVector3D(0, 0, 1));
+        }
+
+        VolumeSlicePlane? plane = GetCurrentSlicePlane(_volumeSliceIndex);
+        if (plane is not null)
+        {
+            return (
+                ToVolumeLocalPoint(plane.Center),
+                ToVolumeLocalDirection(plane.ColumnDirection.Cross(plane.RowDirection)).Normalize());
+        }
+
+        SpatialVector3D normal = _volumeOrientation switch
+        {
+            SliceOrientation.Coronal => new SpatialVector3D(0, 1, 0),
+            SliceOrientation.Sagittal => new SpatialVector3D(1, 0, 0),
+            _ => new SpatialVector3D(0, 0, 1),
+        };
+
+        return (GetDvrSliceCenterMm(_volumeSliceIndex), normal);
     }
 
     private SpatialVector3D GetDvrSliceCenterMm(int sliceIndex)
@@ -684,8 +712,8 @@ public partial class DicomViewPanel
 
     private static (SpatialVector3D Forward, SpatialVector3D Up) GetStandardDvrCameraBasis(DvrCameraViewPreset preset) => preset switch
     {
-        DvrCameraViewPreset.Front => (new SpatialVector3D(0, 1, 0), new SpatialVector3D(0, 0, -1)),
-        DvrCameraViewPreset.Back => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
+        DvrCameraViewPreset.Front => (new SpatialVector3D(0, -1, 0), new SpatialVector3D(0, 0, -1)),
+        DvrCameraViewPreset.Back => (new SpatialVector3D(0, 1, 0), new SpatialVector3D(0, 0, -1)),
         DvrCameraViewPreset.Left => (new SpatialVector3D(1, 0, 0), new SpatialVector3D(0, 0, -1)),
         DvrCameraViewPreset.Right => (new SpatialVector3D(-1, 0, 0), new SpatialVector3D(0, 0, -1)),
         DvrCameraViewPreset.Top => (new SpatialVector3D(0, 0, 1), new SpatialVector3D(0, 1, 0)),

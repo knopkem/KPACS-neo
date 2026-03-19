@@ -638,6 +638,12 @@ __kernel void RenderDvr(
     float samplingStepFactor,
     float opacityTerminationThreshold,
     float slabThicknessMm,
+    float slabCenterX,
+    float slabCenterY,
+    float slabCenterZ,
+    float slabNormalX,
+    float slabNormalY,
+    float slabNormalZ,
     __global short* output,
     __global uint* colorOutput)
 {
@@ -661,6 +667,8 @@ __kernel void RenderDvr(
     float3 right = safe_normalize(cross(forward, cameraUp));
     float3 up = safe_normalize(cross(right, forward));
     float3 lightDirection = safe_normalize((float3)(lightDirectionX, lightDirectionY, lightDirectionZ));
+    float3 slabCenter = (float3)(slabCenterX, slabCenterY, slabCenterZ);
+    float3 slabNormal = safe_normalize((float3)(slabNormalX, slabNormalY, slabNormalZ));
 
     float minSpacing = fmin(spacingX, fmin(spacingY, spacingZ));
     float stepMm = minSpacing * fmax(0.25f, samplingStepFactor);
@@ -714,32 +722,38 @@ __kernel void RenderDvr(
     tNear = fmax(tNear, 0.0f);
     if (slabThicknessMm > 0.0f && !isinf(slabThicknessMm))
     {
-        float rayForwardDot = dot(rayDirection, forward);
-        if (fabs(rayForwardDot) < 1.0e-6f)
-        {
-            output[row * outputWidth + column] = (short)clamp((int)round(minValue), -32768, 32767);
-            if (useColor != 0)
-            {
-                colorOutput[row * outputWidth + column] = (uint)0xFF000000;
-            }
-            return;
-        }
-
+        float raySlabDot = dot(rayDirection, slabNormal);
+        float slabOriginDistance = dot(rayOrigin - slabCenter, slabNormal);
         float halfThickness = slabThicknessMm * 0.5f;
-        float tCenter = dot(cameraTarget - rayOrigin, forward) / rayForwardDot;
-        float tHalfSpan = halfThickness / fabs(rayForwardDot);
-        float slabNear = tCenter - tHalfSpan;
-        float slabFar = tCenter + tHalfSpan;
-        tNear = fmax(tNear, slabNear);
-        tFar = fmin(tFar, slabFar);
-        if (tFar < tNear)
+        if (fabs(raySlabDot) < 1.0e-6f)
         {
-            output[row * outputWidth + column] = (short)clamp((int)round(minValue), -32768, 32767);
-            if (useColor != 0)
+            if (fabs(slabOriginDistance) > halfThickness)
             {
-                colorOutput[row * outputWidth + column] = (uint)0xFF000000;
+                output[row * outputWidth + column] = (short)clamp((int)round(minValue), -32768, 32767);
+                if (useColor != 0)
+                {
+                    colorOutput[row * outputWidth + column] = (uint)0xFF000000;
+                }
+                return;
             }
-            return;
+        }
+        else
+        {
+            float t1 = (-halfThickness - slabOriginDistance) / raySlabDot;
+            float t2 = (halfThickness - slabOriginDistance) / raySlabDot;
+            float slabNear = fmin(t1, t2);
+            float slabFar = fmax(t1, t2);
+            tNear = fmax(tNear, slabNear);
+            tFar = fmin(tFar, slabFar);
+            if (tFar < tNear)
+            {
+                output[row * outputWidth + column] = (short)clamp((int)round(minValue), -32768, 32767);
+                if (useColor != 0)
+                {
+                    colorOutput[row * outputWidth + column] = (uint)0xFF000000;
+                }
+                return;
+            }
         }
     }
 
@@ -1402,8 +1416,14 @@ __kernel void RenderObliqueSlab(
                 SetKernelArgValue(_dvrKernel, 37, (float)state.SamplingStepFactor);
                 SetKernelArgValue(_dvrKernel, 38, (float)state.OpacityTerminationThreshold);
                 SetKernelArgValue(_dvrKernel, 39, (float)state.SlabThicknessMm);
-                SetKernelArgBuffer(_dvrKernel, 40, outputBuffer);
-                SetKernelArgBuffer(_dvrKernel, 41, colorOutputBuffer);
+                SetKernelArgValue(_dvrKernel, 40, (float)state.SlabCenter.X);
+                SetKernelArgValue(_dvrKernel, 41, (float)state.SlabCenter.Y);
+                SetKernelArgValue(_dvrKernel, 42, (float)state.SlabCenter.Z);
+                SetKernelArgValue(_dvrKernel, 43, (float)state.SlabNormal.X);
+                SetKernelArgValue(_dvrKernel, 44, (float)state.SlabNormal.Y);
+                SetKernelArgValue(_dvrKernel, 45, (float)state.SlabNormal.Z);
+                SetKernelArgBuffer(_dvrKernel, 46, outputBuffer);
+                SetKernelArgBuffer(_dvrKernel, 47, colorOutputBuffer);
 
                 Execute2D(_dvrKernel, width, height);
                 short[] pixels = ReadBuffer(outputBuffer, outputLength);

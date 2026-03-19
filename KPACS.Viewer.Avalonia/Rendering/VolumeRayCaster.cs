@@ -213,24 +213,32 @@ public static class VolumeRayCaster
 
                 if (state.SlabThicknessMm > 0.0 && !double.IsInfinity(state.SlabThicknessMm))
                 {
-                    double rayForwardDot = rayDir.Dot(forward);
-                    if (Math.Abs(rayForwardDot) < 1e-6)
-                    {
-                        pixels[row * width + column] = (short)volume.MinValue;
-                        continue;
-                    }
-
+                    Vector3D slabNormal = state.SlabNormal.Normalize();
+                    double raySlabDot = rayDir.Dot(slabNormal);
+                    double slabOriginDistance = (rayOrigin - state.SlabCenter).Dot(slabNormal);
                     double halfThicknessMm = state.SlabThicknessMm * 0.5;
-                    double tCenter = (state.CameraTarget - rayOrigin).Dot(forward) / rayForwardDot;
-                    double tHalfSpan = halfThicknessMm / Math.Abs(rayForwardDot);
-                    double slabNear = tCenter - tHalfSpan;
-                    double slabFar = tCenter + tHalfSpan;
-                    tNear = Math.Max(tNear, slabNear);
-                    tFar = Math.Min(tFar, slabFar);
-                    if (tFar < tNear)
+
+                    if (Math.Abs(raySlabDot) < 1e-6)
                     {
-                        pixels[row * width + column] = (short)volume.MinValue;
-                        continue;
+                        if (Math.Abs(slabOriginDistance) > halfThicknessMm)
+                        {
+                            pixels[row * width + column] = (short)volume.MinValue;
+                            continue;
+                        }
+                    }
+                    else
+                    {
+                        double t1 = (-halfThicknessMm - slabOriginDistance) / raySlabDot;
+                        double t2 = (halfThicknessMm - slabOriginDistance) / raySlabDot;
+                        double slabNear = Math.Min(t1, t2);
+                        double slabFar = Math.Max(t1, t2);
+                        tNear = Math.Max(tNear, slabNear);
+                        tFar = Math.Min(tFar, slabFar);
+                        if (tFar < tNear)
+                        {
+                            pixels[row * width + column] = (short)volume.MinValue;
+                            continue;
+                        }
                     }
                 }
 

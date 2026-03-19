@@ -75,6 +75,10 @@ public sealed record VolumeRenderState
 
     public double SlabThicknessMm { get; init; } = double.PositiveInfinity;
 
+    public Vector3D SlabCenter { get; init; } = new(0, 0, 0);
+
+    public Vector3D SlabNormal { get; init; } = new(0, 0, 1);
+
     public int OutputWidth { get; init; }
 
     public int OutputHeight { get; init; }
@@ -96,6 +100,13 @@ public sealed record VolumeRenderState
         {
             Projection = VolumeRenderProjection.Orthographic,
             LightDirection = viewDirection,
+            SlabNormal = orientation switch
+            {
+                SliceOrientation.Axial => new Vector3D(0, 0, 1),
+                SliceOrientation.Coronal => new Vector3D(0, 1, 0),
+                SliceOrientation.Sagittal => new Vector3D(1, 0, 0),
+                _ => new Vector3D(0, 0, 1),
+            },
             OutputWidth = outputWidth,
             OutputHeight = outputHeight,
         };

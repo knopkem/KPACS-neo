@@ -945,7 +945,10 @@ public partial class DicomViewPanel : UserControl
         _planeTiltAroundColumn = 0;
         _planeTiltAroundRow = 0;
         _planeOffsetMm = 0;
-        _projectionThicknessMm = Math.Max(_projectionThicknessMm, GetMinimumProjectionThicknessMm());
+        _projectionThicknessMm = Math.Clamp(
+            _projectionThicknessMm,
+            GetMinimumProjectionThicknessMm(),
+            GetMaximumProjectionThicknessMm());
         int midSlice = GetCurrentSliceCount() / 2;
         if (IsDvrMode)
         {
@@ -1032,18 +1035,6 @@ public partial class DicomViewPanel : UserControl
         if (_volume is null)
         {
             return 500.0;
-        }
-
-        if (IsDvrMode)
-        {
-            double spacingX = _volume.SpacingX > 0 ? _volume.SpacingX : 1.0;
-            double spacingY = _volume.SpacingY > 0 ? _volume.SpacingY : 1.0;
-            double spacingZ = _volume.SpacingZ > 0 ? _volume.SpacingZ : 1.0;
-            double extentX = Math.Max(0, (_volume.SizeX - 1) * spacingX);
-            double extentY = Math.Max(0, (_volume.SizeY - 1) * spacingY);
-            double extentZ = Math.Max(0, (_volume.SizeZ - 1) * spacingZ);
-            double diagonal = Math.Sqrt(extentX * extentX + extentY * extentY + extentZ * extentZ);
-            return Math.Max(GetMinimumProjectionThicknessMm(), diagonal);
         }
 
         VolumeSlicePlane? plane = GetCurrentSlicePlane();
@@ -2118,9 +2109,10 @@ public partial class DicomViewPanel : UserControl
         _projectionMode = state.ProjectionMode;
         _planeTiltAroundColumn = state.PlaneTiltAroundColumnRadians;
         _planeTiltAroundRow = state.PlaneTiltAroundRowRadians;
-        _projectionThicknessMm = _projectionMode == VolumeProjectionMode.Dvr
-            ? GetMaximumProjectionThicknessMm()
-            : Math.Max(GetMinimumProjectionThicknessMm(), state.ProjectionThicknessMm);
+        _projectionThicknessMm = Math.Clamp(
+            state.ProjectionThicknessMm,
+            GetMinimumProjectionThicknessMm(),
+            GetMaximumProjectionThicknessMm());
         _viewRotationQuarterTurns = NormalizeQuarterTurns(state.ViewRotationQuarterTurns);
         _viewFlipHorizontal = state.ViewFlipHorizontal;
         _viewFlipVertical = state.ViewFlipVertical;
