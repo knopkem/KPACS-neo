@@ -2,6 +2,7 @@ using Avalonia;
 using Avalonia.Input;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
+using KPACS.Viewer.Services;
 using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer.Controls;
@@ -51,6 +52,10 @@ public partial class DicomViewPanel
         AutoOutlinedMeasurementCreated?.Invoke(new AutoOutlinedMeasurementInfo(measurement.Id, MeasurementKind.PolygonRoi, ClampImagePoint(imagePoint), sensitivityLevel));
         AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.PolygonRoi, ClampImagePoint(imagePoint), sensitivityLevel, true, "2D auto-outline created."));
         UpdateMeasurementPresentation();
+        PushRoiHistory(
+            "Create auto-outlined polygon ROI",
+            () => ApplyMeasurementDeletedFromHistory(measurement.Id),
+            () => ApplyMeasurementCreatedFromHistory(measurement));
         return true;
     }
 
@@ -147,18 +152,20 @@ public partial class DicomViewPanel
             return false;
         }
 
+        VolumeRoiDraft? previousDraft = CloneVolumeRoiDraftState();
         _autoOutlineInProgress = true;
         try
         {
             Point clampedPoint = ClampImagePoint(imagePoint);
-            if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out string failureReason))
+            if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out SegmentationMask3D? segmentationMask, out string failureReason))
             {
                 AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, failureReason));
                 return false;
             }
 
-            ApplyAutoOutlinedVolumeContours(clampedPoint, sensitivityLevel, contours);
+            ApplyAutoOutlinedVolumeContours(clampedPoint, sensitivityLevel, contours, segmentationMask);
             AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, $"Auto 3D ROI created {contours.Length} contour slice(s)."));
+            RecordVolumeRoiDraftTransition("Create auto-outlined volume ROI draft", previousDraft, _volumeRoiDraft);
             return true;
         }
         catch (Exception ex)
@@ -179,9 +186,11 @@ public partial class DicomViewPanel
         Point imagePoint,
         int sensitivityLevel,
         out VolumeRoiContour[] contours,
+        out SegmentationMask3D? segmentationMask,
         out string failureReason)
     {
         contours = [];
+        segmentationMask = null;
         failureReason = "Auto 3D ROI could not isolate a stable volume around this seed.";
         string propagatedFailureReason = failureReason;
         VolumeRoiContour[] propagatedContours = [];
@@ -200,33 +209,35 @@ public partial class DicomViewPanel
             }
         }
 
-        bool skipVolumeGrow = hasPropagatedContours && propagatedContours.Length >= AutoOutlineSlicePropagationSkipVolumeGrowMinContours;
         string regionFailureReason = string.Empty;
 
-        if (!skipVolumeGrow)
+        if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, out HashSet<int> region, out regionFailureReason))
         {
-            if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, out HashSet<int> region, out regionFailureReason))
+            segmentationMask = CreateSegmentationMaskFromRegion(region);
+            VolumeRoiContour[] regionContours = BuildAutoOutlinedVolumeContours(region);
+            if (regionContours.Length > 0)
             {
-                VolumeRoiContour[] regionContours = BuildAutoOutlinedVolumeContours(region);
-                if (regionContours.Length > 0)
+                if (!hasPropagatedContours || IsVolumeContourCandidatePreferred(regionContours, propagatedContours))
                 {
-                    if (!hasPropagatedContours || IsVolumeContourCandidatePreferred(regionContours, propagatedContours))
-                    {
-                        contours = regionContours;
-                    }
-
-                    return true;
+                    contours = regionContours;
                 }
 
-                if (hasPropagatedContours)
+                if (contours.Length == 0 && hasPropagatedContours)
                 {
                     contours = propagatedContours;
-                    return true;
                 }
 
-                failureReason = "Auto 3D ROI segmented voxels, but no usable slice contours could be reconstructed.";
-                return false;
+                return true;
             }
+
+            if (hasPropagatedContours)
+            {
+                contours = propagatedContours;
+                return true;
+            }
+
+            failureReason = "Auto 3D ROI segmented voxels, but no usable slice contours could be reconstructed.";
+            return false;
         }
 
         if (hasPropagatedContours)
@@ -241,7 +252,7 @@ public partial class DicomViewPanel
         return false;
     }
 
-    private void ApplyAutoOutlinedVolumeContours(Point imagePoint, int sensitivityLevel, VolumeRoiContour[] contours)
+    private void ApplyAutoOutlinedVolumeContours(Point imagePoint, int sensitivityLevel, VolumeRoiContour[] contours, SegmentationMask3D? segmentationMask)
     {
         _measurementDraft = null;
         SetSelectedMeasurement(null);
@@ -251,6 +262,7 @@ public partial class DicomViewPanel
         if (appendToExisting)
         {
             draft = _volumeRoiDraft!;
+            draft.SegmentationMask = null;
             draft.PendingAddContour = null;
             draft.AutoOutlineState = new VolumeRoiAutoOutlineState(imagePoint, sensitivityLevel);
             Dictionary<int, int> componentMap = [];
@@ -298,6 +310,7 @@ public partial class DicomViewPanel
             {
                 AutoOutlineState = new VolumeRoiAutoOutlineState(imagePoint, sensitivityLevel),
                 AdditiveModeEnabled = _volumeRoiDraft?.AdditiveModeEnabled == true,
+                SegmentationMask = segmentationMask,
             };
 
             foreach (VolumeRoiContour contour in contours.OrderBy(contour => contour.PlanePosition))
@@ -328,6 +341,52 @@ public partial class DicomViewPanel
 
         NotifyVolumeRoiDraftChanged();
         UpdateMeasurementPresentation();
+    }
+
+    private SegmentationMask3D CreateSegmentationMaskFromRegion(HashSet<int> region)
+    {
+        if (_volume is null)
+        {
+            throw new InvalidOperationException("A 3D volume is required to create a segmentation mask.");
+        }
+
+        VolumeGridGeometry geometry = new(
+            _volume.SizeX,
+            _volume.SizeY,
+            _volume.SizeZ,
+            _volume.SpacingX > 0 ? _volume.SpacingX : 1.0,
+            _volume.SpacingY > 0 ? _volume.SpacingY : 1.0,
+            _volume.SpacingZ > 0 ? _volume.SpacingZ : 1.0,
+            _volume.Origin,
+            _volume.RowDirection.Normalize(),
+            _volume.ColumnDirection.Normalize(),
+            _volume.Normal.Normalize(),
+            _volume.FrameOfReferenceUid);
+
+        SegmentationMaskBuffer buffer = new(geometry);
+        foreach (int key in region)
+        {
+            DecodeVoxelKey(key, _volume.SizeX, _volume.SizeY, out int x, out int y, out int z);
+            buffer.Set(x, y, z, true);
+        }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        return new SegmentationMask3D(
+            Guid.NewGuid(),
+            "Auto 3D ROI",
+            _volume.SeriesInstanceUid,
+            _volume.FrameOfReferenceUid,
+            string.Empty,
+            geometry,
+            buffer.ToStorage(),
+            new SegmentationMaskMetadata(
+                SegmentationMaskSourceKind.AutoRoi,
+                now,
+                now,
+                sourceMeasurementId: null,
+                notes: "Created from auto 3D ROI volume segmentation.",
+                revision: 0,
+                buffer.ComputeStatistics()));
     }
 
     private bool TryBuildAutoOutlineMask(int seedX, int seedY, int sensitivityLevel, out AutoOutlineMask mask)

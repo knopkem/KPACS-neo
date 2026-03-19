@@ -313,6 +313,9 @@ public partial class StudyViewerWindow
             }
         }
 
+        entries.AddRange(BuildVascularPlanningReportEntries());
+        entries.AddRange(BuildValidationReportEntries());
+
         return entries
             .OrderByDescending(entry => entry.IsSelected)
             .ThenBy(entry => entry.IsFromReportStudy ? 0 : 1)
@@ -330,6 +333,142 @@ public partial class StudyViewerWindow
         return sourceWindows
             .SelectMany(window => window._studyMeasurements.Select(measurement => new ReportMeasurementContext(window, measurement, window.FindSlotForMeasurement(measurement))))
             .ToList();
+    }
+
+    private List<ReportEntry> BuildValidationReportEntries()
+    {
+        IEnumerable<StudyViewerWindow> sourceWindows = ReferenceEquals(GetSharedReportOwnerWindow(), this)
+            ? GetSharedReportWindows()
+            : [this];
+
+        return sourceWindows
+            .Select(window => new ReportEntry(
+                window,
+                MeasurementId: null,
+                Category: "Validation",
+                Title: "Phase 1 validation and guardrails",
+                Origin: $"{ResolveReportStudyLabel(window, null)} · Viewer {window._viewerNumber} · release hardening",
+                Region: "Validation",
+                AutoRegion: "Validation",
+                IsRegionManual: false,
+                Anatomy: "Vascular planning QA",
+                Details: window.BuildVascularValidationSummary(),
+                Hint: window.BuildVascularValidationHint(),
+                IsSelected: false,
+                AccentHex: "#FFF1D57A",
+                IsRegionLearned: false,
+                RegionConfidence: 0,
+                IsAnatomyLearned: false,
+                AnatomyConfidence: 0,
+                IsFromReportStudy: window._viewerNumber == 1,
+                IsRegionEditable: false,
+                IsAnatomyManual: false,
+                IsAnatomyEditable: false,
+                AnatomyOptions: [],
+                ReviewState: "Auto",
+                SortOrder: 4))
+            .ToList();
+    }
+
+    private List<ReportEntry> BuildVascularPlanningReportEntries()
+    {
+        IEnumerable<StudyViewerWindow> sourceWindows = ReferenceEquals(GetSharedReportOwnerWindow(), this)
+            ? GetSharedReportWindows()
+            : [this];
+
+        List<ReportEntry> entries = [];
+        foreach (StudyViewerWindow window in sourceWindows)
+        {
+            foreach ((Guid seedSetId, VascularPlanningBundle bundle) in window._vascularPlanningBundles.OrderBy(entry => entry.Value.CreatedUtc))
+            {
+                if (!window._centerlineSeedSets.TryGetValue(seedSetId, out CenterlineSeedSet? seedSet))
+                {
+                    continue;
+                }
+
+                if (bundle.Markers.Count == 0 && string.IsNullOrWhiteSpace(bundle.Metrics?.Summary))
+                {
+                    continue;
+                }
+
+                string details = BuildVascularPlanningDetails(bundle);
+                string markerHint = BuildVascularPlanningHint(bundle);
+                entries.Add(new ReportEntry(
+                    window,
+                    MeasurementId: null,
+                    Category: "EVAR",
+                    Title: $"EVAR planning · {seedSet.Label}",
+                    Origin: $"{ResolveReportStudyLabel(window, null)} · Viewer {window._viewerNumber} · centerline planning",
+                    Region: "Lower abdomen / pelvis",
+                    AutoRegion: "Lower abdomen / pelvis",
+                    IsRegionManual: false,
+                    Anatomy: "Aorta / iliac landing zones",
+                    Details: details,
+                    Hint: markerHint,
+                    IsSelected: window._selectedCenterlineSeedSetId == seedSetId,
+                    AccentHex: "#FF73C7FF",
+                    IsRegionLearned: false,
+                    RegionConfidence: 0,
+                    IsAnatomyLearned: false,
+                    AnatomyConfidence: 0,
+                    IsFromReportStudy: window._viewerNumber == 1,
+                    IsRegionEditable: false,
+                    IsAnatomyManual: false,
+                    IsAnatomyEditable: false,
+                    AnatomyOptions: [],
+                    ReviewState: "Auto",
+                    SortOrder: 3));
+            }
+        }
+
+        return entries;
+    }
+
+    private static string BuildVascularPlanningDetails(VascularPlanningBundle bundle)
+    {
+        if (bundle.Metrics is not VascularPlanningMetrics metrics)
+        {
+            return "Planning markers set; metrics will appear after centerline and mask refresh.";
+        }
+
+        List<string> parts = [];
+        if (metrics.ProximalNeck?.LengthMm is double neckLength)
+        {
+            string diameterText = metrics.ProximalNeck.MeanEquivalentDiameterMm is double neckDiameter
+                ? $" · mean Øeq {neckDiameter:0.0} mm"
+                : string.Empty;
+            parts.Add($"Proximal neck {neckLength:0.0} mm{diameterText}");
+        }
+
+        if (metrics.NeckAngulationDegrees is double angulation)
+        {
+            parts.Add($"Neck angulation {angulation:0.0}°");
+        }
+
+        if (metrics.DistalLanding?.LengthMm is double distalLength)
+        {
+            string distalDiameterText = metrics.DistalLanding.MeanEquivalentDiameterMm is double distalDiameter
+                ? $" · mean Øeq {distalDiameter:0.0} mm"
+                : string.Empty;
+            parts.Add($"Distal landing {distalLength:0.0} mm{distalDiameterText}");
+        }
+
+        return parts.Count == 0 ? metrics.Summary : string.Join(" · ", parts);
+    }
+
+    private static string BuildVascularPlanningHint(VascularPlanningBundle bundle)
+    {
+        string FormatMarker(VascularPlanningMarkerKind kind, string label)
+        {
+            VascularPlanningMarker? marker = bundle.GetMarker(kind);
+            return marker is null ? $"{label}: pending" : $"{label}: {marker.ArcLengthMm:0.0} mm";
+        }
+
+        return string.Join(" · ",
+            FormatMarker(VascularPlanningMarkerKind.ProximalNeckStart, "Neck start"),
+            FormatMarker(VascularPlanningMarkerKind.ProximalNeckEnd, "Neck end"),
+            FormatMarker(VascularPlanningMarkerKind.DistalLandingStart, "Distal start"),
+            FormatMarker(VascularPlanningMarkerKind.DistalLandingEnd, "Distal end"));
     }
 
     private ReportEntry BuildMeasurementReportEntry(StudyViewerWindow sourceWindow, StudyMeasurement measurement, ViewportSlot? slot)
@@ -511,6 +650,11 @@ public partial class StudyViewerWindow
 
     private Control CreateReportEntryCard(ReportEntry entry)
     {
+        if (string.Equals(entry.Category, "Validation", StringComparison.Ordinal))
+        {
+            return CreateValidationReportEntryCard(entry);
+        }
+
         Color accent = Color.Parse(entry.AccentHex);
         Control jumpButton = CreateJumpButton(entry);
         var content = new StackPanel
@@ -824,7 +968,9 @@ public partial class StudyViewerWindow
         int reviewedCount = entries.Count(entry => entry.SortOrder == 0 && entry.IsAnatomyManual);
         int confirmedCount = entries.Count(entry => entry.SortOrder == 0 && string.Equals(entry.ReviewState, "Confirmed", StringComparison.OrdinalIgnoreCase));
         int needsReviewCount = entries.Count(entry => entry.SortOrder == 0 && string.Equals(entry.ReviewState, "Needs review", StringComparison.OrdinalIgnoreCase));
-        return $"{manualCount} findings · {reviewedCount} reviewed anatomy · {confirmedCount} confirmed · {needsReviewCount} needs review · {annotationCount} annotations · {roiCount} ROIs · {recistCount} RECIST · {radiomicsCount} radiomics";
+        int vascularCount = entries.Count(entry => entry.Category == "EVAR");
+        int validationCount = entries.Count(entry => entry.Category == "Validation");
+        return $"{manualCount} findings · {reviewedCount} reviewed anatomy · {confirmedCount} confirmed · {needsReviewCount} needs review · {annotationCount} annotations · {roiCount} ROIs · {recistCount} RECIST · {radiomicsCount} radiomics · {vascularCount} EVAR · {validationCount} validation";
     }
 
     private string BuildMeasurementOriginLabel(StudyViewerWindow sourceWindow, StudyMeasurement measurement, ViewportSlot? slot)
@@ -3142,6 +3288,7 @@ public partial class StudyViewerWindow
         }
 
         SaveViewerSettings();
+        ScheduleMeasurementSessionSave();
         RefreshReportPanel(forceVisible: _reportPanelPinned);
         e.Handled = true;
     }
@@ -3214,8 +3361,10 @@ public partial class StudyViewerWindow
         double defaultLeft = Math.Max(0, hostWidth - panelWidth - margin.Right);
         double defaultTop = margin.Top;
         double defaultBottom = Math.Max(0, hostHeight - panelHeight - margin.Top);
-        double clampedX = Math.Clamp(_reportPanelOffset.X, -defaultLeft, 0);
-        double clampedY = Math.Clamp(_reportPanelOffset.Y, -defaultTop, defaultBottom);
+        double overflowX = GetFloatingPanelOverflowAllowance(panelWidth);
+        double overflowY = GetFloatingPanelOverflowAllowance(panelHeight);
+        double clampedX = Math.Clamp(_reportPanelOffset.X, -defaultLeft - overflowX, overflowX);
+        double clampedY = Math.Clamp(_reportPanelOffset.Y, -defaultTop - overflowY, defaultBottom + overflowY);
         _reportPanelOffset = new Point(clampedX, clampedY);
         transform.X = clampedX;
         transform.Y = clampedY;

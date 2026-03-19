@@ -341,8 +341,10 @@ public partial class StudyViewerWindow
 
         double defaultRight = Math.Max(0, hostWidth - panelWidth - margin.Left);
         double defaultTop = Math.Max(0, hostHeight - panelHeight - margin.Bottom);
-        double clampedX = Math.Clamp(_volumeRoiPreviewOffset.X, 0, defaultRight);
-        double clampedY = Math.Clamp(_volumeRoiPreviewOffset.Y, -defaultTop, 0);
+        double overflowX = GetFloatingPanelOverflowAllowance(panelWidth);
+        double overflowY = GetFloatingPanelOverflowAllowance(panelHeight);
+        double clampedX = Math.Clamp(_volumeRoiPreviewOffset.X, -overflowX, defaultRight + overflowX);
+        double clampedY = Math.Clamp(_volumeRoiPreviewOffset.Y, -defaultTop - overflowY, overflowY);
         _volumeRoiPreviewOffset = new Point(clampedX, clampedY);
         transform.X = clampedX;
         transform.Y = clampedY;

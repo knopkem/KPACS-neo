@@ -168,6 +168,12 @@ public partial class StudyViewerWindow : Window
         ShowWorkspaceDock(restartHideTimer: true);
     }
 
+    private static double GetFloatingPanelOverflowAllowance(double panelSize)
+    {
+        const double visiblePeek = 56;
+        return Math.Max(0, panelSize - visiblePeek);
+    }
+
     private void InitializeActionToolbar()
     {
         OverlayToggleButton.IsChecked = _overlayEnabled;
@@ -814,9 +820,11 @@ public partial class StudyViewerWindow : Window
 
         RefreshMeasurementInsightPanel();
         RefreshVolumeRoiDraftPanel();
+        RefreshCenterlinePanels();
         RefreshReportPanel();
         RefreshRenderingWorkspacePanel();
         UpdateStatus();
+        ScheduleMeasurementSessionSave();
     }
 
     private void OnPanelViewStateChanged(ViewportSlot slot, DicomViewPanel panel)
@@ -1030,9 +1038,11 @@ public partial class StudyViewerWindow : Window
         Opened -= OnViewerOpened;
         try
         {
+            EnsureMeasurementSessionPersistenceInitialized();
             await LoadAnatomyKnowledgePacksAsync();
             await LoadPriorStudiesAsync();
             await LoadVolumeRoiAnatomyPriorsAsync();
+            await SwitchMeasurementSessionAsync(_context.StudyDetails);
         }
         finally
         {
@@ -1484,7 +1494,7 @@ public partial class StudyViewerWindow : Window
         return button;
     }
 
-    private void ShowCurrentStudyThumbnails()
+    private async void ShowCurrentStudyThumbnails()
     {
         CancelPriorPreviewLoad();
         _isShowingCurrentStudy = true;
@@ -1494,7 +1504,7 @@ public partial class StudyViewerWindow : Window
         _isPriorPreviewLoading = false;
         _remoteRetrievalSession?.StartBackgroundRetrieval();
         ShowStudyLoadingToast(_context.StudyDetails, "Loading study into viewer");
-        LoadStudyIntoSlots(_context.StudyDetails);
+        await LoadStudyIntoSlotsAsync(_context.StudyDetails);
         RenderPriorStudyChips();
         RefreshThumbnailStrip(_activeSlot?.Series);
         RequestSlotPriority(_activeSlot);
@@ -1579,7 +1589,7 @@ public partial class StudyViewerWindow : Window
                     _thumbnailStripMessage = string.Empty;
                     if (populateViewer)
                     {
-                        LoadStudyIntoSlots(details);
+                        _ = LoadStudyIntoSlotsAsync(details);
                     }
                     RefreshThumbnailStrip(null);
                     StudySubtitleText.Text = BuildSubtitle();
@@ -1618,8 +1628,10 @@ public partial class StudyViewerWindow : Window
         }
     }
 
-    private void LoadStudyIntoSlots(StudyDetails study)
+    private async Task LoadStudyIntoSlotsAsync(StudyDetails study)
     {
+        await SwitchMeasurementSessionAsync(study);
+
         for (int index = 0; index < _slots.Count; index++)
         {
             ViewportSlot slot = _slots[index];
@@ -1635,7 +1647,11 @@ public partial class StudyViewerWindow : Window
             }
         }
 
-        SetActiveSlot(_slots.FirstOrDefault());
+        if (!ApplyPendingMeasurementSessionWorkspaceToSlots())
+        {
+            SetActiveSlot(_slots.FirstOrDefault());
+        }
+
         SynchronizeLinkedViews(_activeSlot);
         UpdateStatus();
     }
@@ -2302,6 +2318,11 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
+        if (TryHandleCenterlineSeedPlacement(sourceSlot, info))
+        {
+            return;
+        }
+
         if (!Is3DCursorRequested(info.Modifiers))
         {
             return;
@@ -2315,6 +2336,11 @@ public partial class StudyViewerWindow : Window
     private void OnPanelHoveredImagePointChanged(ViewportSlot sourceSlot, DicomHoverInfo? info)
     {
         if (sourceSlot.Series is null || sourceSlot.CurrentSpatialMetadata is null || info is null)
+        {
+            return;
+        }
+
+        if (_isCenterlineEditMode)
         {
             return;
         }
@@ -2902,6 +2928,25 @@ public partial class StudyViewerWindow : Window
 
     private void OnWindowKeyDown(object? sender, KeyEventArgs e)
     {
+        if (_isCenterlineEditMode && TopLevel.GetTopLevel(this)?.FocusManager?.GetFocusedElement() is not TextBox)
+        {
+            if (e.Key == Key.Escape)
+            {
+                SetCenterlineEditMode(false, showToast: true);
+                e.Handled = true;
+                return;
+            }
+
+            if (e.Key is Key.Back or Key.Delete)
+            {
+                if (TryRemoveLastCenterlineSeed())
+                {
+                    e.Handled = true;
+                    return;
+                }
+            }
+        }
+
         if (_activeSlot?.Panel is { HasVolumeRoiDraft: true } drawingPanel)
         {
             if (e.Key == Key.Enter)
@@ -3020,6 +3065,7 @@ public partial class StudyViewerWindow : Window
             ? "3D cursor: click a viewport"
             : "Hold SHIFT for 3D cursor";
         string measurementText = $"Measure: {GetMeasurementToolLabel()}";
+        string centerlineText = BuildCenterlineStatusText();
         string nudgeText = _measurementTool == MeasurementTool.Modify
             ? "   Nudge: arrows move selected measurement (SHIFT = 5 px)"
             : string.Empty;
@@ -3038,7 +3084,7 @@ public partial class StudyViewerWindow : Window
 
         if (slot?.Series is null)
         {
-            return $"{toolText}   {measurementText}{nudgeText}{ballCorrectionText}{polygonAutoOutlineText}{volumeRoiText}   {linkedText}   {cursorText}";
+            return $"{toolText}   {measurementText}{nudgeText}{ballCorrectionText}{polygonAutoOutlineText}{volumeRoiText}{centerlineText}   {linkedText}   {cursorText}";
         }
 
         int total = GetSeriesTotalCount(slot.Series);
@@ -3057,7 +3103,7 @@ public partial class StudyViewerWindow : Window
             ? $"   {slot.Panel.OrientationLabel}   {slot.Panel.ProjectionModeLabel} {slot.Panel.ProjectionThicknessMm:F1} mm"
             : string.Empty;
 
-        return $"{slot.Series.Modality}   Series {slot.Series.SeriesNumber}   Image {slot.InstanceIndex + 1}/{total}{projectionText}   {toolText}   {measurementText}{nudgeText}{ballCorrectionText}{polygonAutoOutlineText}{volumeRoiText}{retrievalText}   {linkedText}   {cursorText}";
+        return $"{slot.Series.Modality}   Series {slot.Series.SeriesNumber}   Image {slot.InstanceIndex + 1}/{total}{projectionText}   {toolText}   {measurementText}{nudgeText}{ballCorrectionText}{polygonAutoOutlineText}{volumeRoiText}{centerlineText}{retrievalText}   {linkedText}   {cursorText}";
     }
 
     private int GetLinkedViewCount(ViewportSlot sourceSlot)
@@ -3239,10 +3285,21 @@ public partial class StudyViewerWindow : Window
 
     private void OnViewerClosed(object? sender, EventArgs e)
     {
+        Closed -= OnViewerClosed;
+        _measurementSessionSaveDebounceTimer.Stop();
+        try
+        {
+            FlushMeasurementSessionSaveAsync().GetAwaiter().GetResult();
+        }
+        catch
+        {
+        }
+
         UnregisterForLinkedViewSync();
         _linkedViewSyncDebounceTimer.Stop();
         _volumeRoiDraftPanelRefreshTimer.Stop();
         _volumeRoiPreviewAutoRotateTimer.Stop();
+        _measurementSessionSaveDebounceTimer.Stop();
         _pendingLinkedSyncSourceSlot = null;
         CancelPriorPreviewLoad();
         _priorLookupCancellation.Cancel();
@@ -3256,8 +3313,6 @@ public partial class StudyViewerWindow : Window
         {
             _remoteRetrievalSession.StudyChanged -= OnRemoteStudyChanged;
         }
-
-        Closed -= OnViewerClosed;
     }
 
     private void ShowToast(string message, ToastSeverity severity, TimeSpan? duration = null)
@@ -3783,6 +3838,7 @@ public partial class StudyViewerWindow : Window
         }
 
         SaveViewerSettings();
+        ScheduleMeasurementSessionSave();
     }
 
     private void OnWorkspaceReportClick(object? sender, RoutedEventArgs e)

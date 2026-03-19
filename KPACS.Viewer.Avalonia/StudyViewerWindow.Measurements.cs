@@ -10,6 +10,7 @@ namespace KPACS.Viewer;
 public partial class StudyViewerWindow
 {
     private readonly List<StudyMeasurement> _studyMeasurements = [];
+    private readonly Dictionary<Guid, SegmentationMask3D> _segmentationMasks = [];
     private readonly Dictionary<Guid, PolygonAutoOutlineState> _polygonAutoOutlineStates = [];
     private MeasurementTool _measurementTool = MeasurementTool.None;
     private NavigationTool _navigationTool = NavigationTool.Navigate;
@@ -22,6 +23,7 @@ public partial class StudyViewerWindow
     {
         _measurementTool = MeasurementTool.None;
         UpdateMeasurementToolButtons();
+        UpdateCenterlineToolButton();
     }
 
     private void ConfigureMeasurementPanel(ViewportSlot slot, DicomViewPanel panel)
@@ -30,6 +32,8 @@ public partial class StudyViewerWindow
         panel.NavigationTool = _navigationTool;
         panel.SetMeasurementNudgeMode(false);
         panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
+        panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
+        panel.SetSegmentationMaskResolver(ResolveSegmentationMask);
         panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         panel.SetMeasurementTextSupplementProvider(GetMeasurementTextSupplement);
         panel.MeasurementCreated += OnPanelMeasurementCreated;
@@ -38,6 +42,8 @@ public partial class StudyViewerWindow
         panel.SelectedMeasurementChanged += OnPanelMeasurementSelectedChanged;
         panel.AutoOutlinedMeasurementCreated += OnPanelAutoOutlinedMeasurementCreated;
         panel.AutoOutlineAttempted += OnPanelAutoOutlineAttempted;
+        panel.SegmentationMaskCreated += OnPanelSegmentationMaskCreated;
+        panel.SegmentationMaskUpdated += OnPanelSegmentationMaskUpdated;
         panel.VolumeRoiDraftChanged += _ => ScheduleVolumeRoiDraftPanelRefresh();
     }
 
@@ -47,6 +53,7 @@ public partial class StudyViewerWindow
         slot.Panel.NavigationTool = _navigationTool;
         slot.Panel.SetMeasurementNudgeMode(false);
         slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
+        slot.Panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
         slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         RefreshMeasurementInsightPanel();
         ScheduleVolumeRoiDraftPanelRefresh();
@@ -66,6 +73,7 @@ public partial class StudyViewerWindow
             slot.Panel.NavigationTool = _navigationTool;
             slot.Panel.SetMeasurementNudgeMode(false);
             slot.Panel.SetMeasurements(_studyMeasurements, _selectedMeasurementId);
+            slot.Panel.SetCenterlineOverlays(GetCenterlineOverlaysForSlot(slot));
             slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         }
 
@@ -77,6 +85,54 @@ public partial class StudyViewerWindow
             RefreshAnatomyPanel();
         }
         UpdateStatus();
+    }
+
+    private IEnumerable<DicomViewPanel.CenterlineOverlay> GetCenterlineOverlaysForSlot(ViewportSlot slot)
+    {
+        if (slot.CurrentSpatialMetadata is not DicomSpatialMetadata metadata)
+        {
+            return [];
+        }
+
+        string seriesInstanceUid = slot.Series?.SeriesInstanceUid ?? metadata.SeriesInstanceUid;
+        string frameOfReferenceUid = metadata.FrameOfReferenceUid;
+        List<DicomViewPanel.CenterlineOverlay> overlays = [];
+
+        foreach (CenterlineSeedSet seedSet in _centerlineSeedSets.Values.OrderBy(seed => seed.CreatedUtc))
+        {
+            CenterlinePath? path = _centerlinePaths.Values
+                .Where(candidate => candidate.SeedSetId == seedSet.Id)
+                .OrderByDescending(candidate => candidate.Kind == CenterlinePathKind.Computed)
+                .ThenByDescending(candidate => candidate.UpdatedUtc)
+                .FirstOrDefault();
+            if (path is null || !path.HasRenderablePath)
+            {
+                continue;
+            }
+
+            bool seedMatchesSeries = seedSet.GetOrderedSeeds().Any(seed => string.Equals(seed.SeriesInstanceUid, seriesInstanceUid, StringComparison.Ordinal));
+            bool maskMatchesFrame = false;
+            Guid? maskId = path.SegmentationMaskId ?? seedSet.SegmentationMaskId;
+            if (maskId is Guid resolvedMaskId && _segmentationMasks.TryGetValue(resolvedMaskId, out SegmentationMask3D? mask))
+            {
+                maskMatchesFrame =
+                    (!string.IsNullOrWhiteSpace(mask.SourceSeriesInstanceUid) && string.Equals(mask.SourceSeriesInstanceUid, seriesInstanceUid, StringComparison.Ordinal)) ||
+                    (!string.IsNullOrWhiteSpace(mask.SourceFrameOfReferenceUid) && string.Equals(mask.SourceFrameOfReferenceUid, frameOfReferenceUid, StringComparison.Ordinal));
+            }
+
+            if (!seedMatchesSeries && !maskMatchesFrame)
+            {
+                continue;
+            }
+
+            overlays.Add(new DicomViewPanel.CenterlineOverlay(
+                seedSet.Id,
+                path,
+                seedSet.GetOrderedSeeds(),
+                seedSet.Id == _selectedCenterlineSeedSetId));
+        }
+
+        return overlays;
     }
 
     private void OnMeasurementToolPopupClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
@@ -104,6 +160,7 @@ public partial class StudyViewerWindow
         if (tool != MeasurementTool.None)
         {
             _navigationTool = NavigationTool.Navigate;
+            SetCenterlineEditMode(false, showToast: false);
         }
 
         if (tool != MeasurementTool.None)
@@ -136,6 +193,7 @@ public partial class StudyViewerWindow
         ToolboxBallRoiButton.IsChecked = _measurementTool == MeasurementTool.BallRoiCorrection;
         ToolboxModifyButton.IsChecked = _measurementTool == MeasurementTool.Modify;
         ToolboxEraseButton.IsChecked = _measurementTool == MeasurementTool.Erase;
+        UpdateCenterlineToolButton();
     }
 
     private bool TryNudgeSelectedMeasurement(Avalonia.Vector delta)
@@ -157,11 +215,18 @@ public partial class StudyViewerWindow
 
     private async void OnPanelMeasurementCreated(StudyMeasurement measurement)
     {
+        StudyMeasurement? existingMeasurement = _studyMeasurements.FirstOrDefault(existing => existing.Id == measurement.Id);
+        if (existingMeasurement?.SegmentationMaskId is Guid existingMaskId)
+        {
+            _segmentationMasks.Remove(existingMaskId);
+        }
+
         _studyMeasurements.RemoveAll(existing => existing.Id == measurement.Id);
         _studyMeasurements.Add(measurement);
         _selectedMeasurementId = measurement.Id;
         QueueMeasurementInsightRefresh(measurement.Id);
         RefreshMeasurementPanels();
+        ScheduleMeasurementSessionSave();
 
         if (measurement.Kind != MeasurementKind.Annotation)
         {
@@ -182,6 +247,7 @@ public partial class StudyViewerWindow
             _studyMeasurements[index] = updatedMeasurement;
             _selectedMeasurementId = updatedMeasurement.Id;
             RefreshMeasurementPanels();
+            ScheduleMeasurementSessionSave();
         }
     }
 
@@ -195,6 +261,12 @@ public partial class StudyViewerWindow
         int index = _studyMeasurements.FindIndex(existing => existing.Id == measurement.Id);
         if (index >= 0)
         {
+            if (_studyMeasurements[index].SegmentationMaskId is Guid previousMaskId &&
+                previousMaskId != measurement.SegmentationMaskId)
+            {
+                _segmentationMasks.Remove(previousMaskId);
+            }
+
             _studyMeasurements[index] = measurement;
         }
         else
@@ -205,6 +277,12 @@ public partial class StudyViewerWindow
         _selectedMeasurementId = measurement.Id;
         QueueMeasurementInsightRefresh(measurement.Id);
         RefreshMeasurementPanels();
+        ScheduleMeasurementSessionSave();
+
+        if (measurement.SegmentationMaskId is Guid updatedMaskId)
+        {
+            OnSegmentationMaskChangedForCenterline(updatedMaskId);
+        }
     }
 
     private void OnPanelMeasurementSelectedChanged(Guid? measurementId)
@@ -221,7 +299,13 @@ public partial class StudyViewerWindow
 
     private void OnPanelMeasurementDeleted(Guid measurementId)
     {
+        StudyMeasurement? removedMeasurement = _studyMeasurements.FirstOrDefault(existing => existing.Id == measurementId);
         _studyMeasurements.RemoveAll(existing => existing.Id == measurementId);
+        if (removedMeasurement?.SegmentationMaskId is Guid segmentationMaskId)
+        {
+            _segmentationMasks.Remove(segmentationMaskId);
+            OnSegmentationMaskChangedForCenterline(segmentationMaskId);
+        }
         _polygonAutoOutlineStates.Remove(measurementId);
         _reportRegionOverrides.Remove(measurementId);
         _reportAnatomyOverrides.Remove(measurementId);
@@ -233,6 +317,32 @@ public partial class StudyViewerWindow
         }
 
         RefreshMeasurementPanels();
+        ScheduleMeasurementSessionSave();
+    }
+
+    private void OnPanelSegmentationMaskCreated(SegmentationMask3D mask)
+    {
+        var stopwatch = StartVascularStopwatch();
+        _segmentationMasks[mask.Id] = mask;
+        OnSegmentationMaskChangedForCenterline(mask.Id);
+        ScheduleMeasurementSessionSave();
+        RecordVascularPerformanceMetric("mask-edit-commit", stopwatch.Elapsed.TotalMilliseconds);
+    }
+
+    private void OnPanelSegmentationMaskUpdated(SegmentationMask3D mask)
+    {
+        var stopwatch = StartVascularStopwatch();
+        _segmentationMasks[mask.Id] = mask;
+        OnSegmentationMaskChangedForCenterline(mask.Id);
+        ScheduleMeasurementSessionSave();
+        RecordVascularPerformanceMetric("mask-edit-commit", stopwatch.Elapsed.TotalMilliseconds);
+    }
+
+    private SegmentationMask3D? ResolveSegmentationMask(Guid segmentationMaskId)
+    {
+        return _segmentationMasks.TryGetValue(segmentationMaskId, out SegmentationMask3D? mask)
+            ? mask
+            : null;
     }
 
     private void OnPanelAutoOutlinedMeasurementCreated(DicomViewPanel.AutoOutlinedMeasurementInfo info)
@@ -267,6 +377,7 @@ public partial class StudyViewerWindow
 
     private string GetMeasurementToolLabel() => _measurementTool switch
     {
+        _ when _isCenterlineEditMode => "Centerline seeds",
         MeasurementTool.None => "Navigate",
         MeasurementTool.PixelLens => "Pixel lens",
         MeasurementTool.Line => "Line",

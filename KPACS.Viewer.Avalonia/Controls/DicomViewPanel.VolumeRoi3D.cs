@@ -40,6 +40,7 @@ public partial class DicomViewPanel
     private VolumeRoiDraftPreviewCache? _volumeRoiDraftPreviewCache;
 
     public event Action<VolumeRoiDraftPreview?>? VolumeRoiDraftChanged;
+    public event Action<SegmentationMask3D>? SegmentationMaskCreated;
 
     public bool HasVolumeRoiDraft => _volumeRoiDraft is not null;
 
@@ -50,7 +51,10 @@ public partial class DicomViewPanel
             return false;
         }
 
+        VolumeRoiDraft? previousDraft = CloneVolumeRoiDraftState();
+
         _volumeRoiDraft.AdditiveModeEnabled = enabled;
+        _volumeRoiDraft.SegmentationMask = null;
         if (!enabled)
         {
             _volumeRoiDraft.ActiveAddComponentId = null;
@@ -58,6 +62,7 @@ public partial class DicomViewPanel
         }
         NotifyVolumeRoiDraftChanged();
         UpdateMeasurementPresentation();
+        RecordVolumeRoiDraftTransition("Toggle volume ROI additive mode", previousDraft, _volumeRoiDraft);
         return true;
     }
 
@@ -86,6 +91,8 @@ public partial class DicomViewPanel
             return false;
         }
 
+        VolumeRoiDraft finalizedDraft = CloneVolumeRoiDraft(_volumeRoiDraft);
+
         VolumeRoiDraftContour[] closedContours = _volumeRoiDraft.Contours.Values
             .Where(contour => contour.IsClosed && contour.Anchors.Count >= 3)
             .OrderBy(contour => contour.PlanePosition)
@@ -111,11 +118,40 @@ public partial class DicomViewPanel
                 contour.ComponentId))
             .ToArray();
 
-        StudyMeasurement measurement = StudyMeasurement.CreateVolumeRoi(FilePath, SpatialMetadata, contours);
+        SegmentationMask3D? segmentationMask = _volumeRoiDraft.SegmentationMask;
+        StudyMeasurement measurement = StudyMeasurement.CreateVolumeRoi(FilePath, SpatialMetadata, contours, segmentationMask?.Id);
+        if (segmentationMask is not null)
+        {
+            segmentationMask = segmentationMask with
+            {
+                Metadata = segmentationMask.Metadata with
+                {
+                    SourceMeasurementId = measurement.Id.ToString("D"),
+                }
+            };
+        }
+
         ClearVolumeRoiDraft();
         SetSelectedMeasurement(measurement.Id);
         MeasurementCreated?.Invoke(measurement);
+        if (segmentationMask is not null)
+        {
+            SegmentationMaskCreated?.Invoke(segmentationMask);
+        }
         UpdateMeasurementPresentation();
+
+        PushRoiHistory(
+            "Finalize volume ROI draft",
+            () =>
+            {
+                ApplyMeasurementDeletedFromHistory(measurement.Id);
+                ApplyVolumeRoiDraftState(finalizedDraft);
+            },
+            () =>
+            {
+                ApplyVolumeRoiDraftState(null);
+                ApplyMeasurementCreatedFromHistory(measurement, segmentationMask);
+            });
         return true;
     }
 
@@ -207,6 +243,8 @@ public partial class DicomViewPanel
             return;
         }
 
+        VolumeRoiDraft? previousDraft = CloneVolumeRoiDraftState();
+
         Point clamped = ClampImagePoint(imagePoint);
 
         VolumeRoiDraft draft = EnsureVolumeRoiDraft();
@@ -231,6 +269,7 @@ public partial class DicomViewPanel
                 if (contour.Anchors.Count > 0 && Distance(contour.Anchors[^1].ImagePoint, clamped) > 0.5)
                 {
                     contour.Anchors.Add(new MeasurementAnchor(clamped, SpatialMetadata.PatientPointFromPixel(clamped)));
+                    draft.SegmentationMask = null;
                 }
 
                 contour.IsClosed = contour.Anchors.Count >= 3;
@@ -240,6 +279,7 @@ public partial class DicomViewPanel
             draft.CurrentHoverPoint = null;
             NotifyVolumeRoiDraftChanged();
             UpdateMeasurementPresentation();
+            RecordVolumeRoiDraftTransition("Update volume ROI draft", previousDraft, _volumeRoiDraft);
             return;
         }
 
@@ -252,11 +292,13 @@ public partial class DicomViewPanel
         else
         {
             contour.Anchors.Add(new MeasurementAnchor(clamped, SpatialMetadata.PatientPointFromPixel(clamped)));
+            draft.SegmentationMask = null;
         }
 
         draft.CurrentHoverPoint = clamped;
         NotifyVolumeRoiDraftChanged();
         UpdateMeasurementPresentation();
+        RecordVolumeRoiDraftTransition("Update volume ROI draft", previousDraft, _volumeRoiDraft);
     }
 
     private bool HandleVolumeRoiPointerMoved(Point controlPoint)
@@ -458,6 +500,7 @@ public partial class DicomViewPanel
             [],
             false);
         draft.Contours[contourKey] = contour;
+        draft.SegmentationMask = null;
         return contour;
     }
 
@@ -487,6 +530,7 @@ public partial class DicomViewPanel
             false);
         draft.Contours[contourKey] = contour;
         draft.ActiveAddComponentId = null;
+        draft.SegmentationMask = null;
         return contour;
     }
 
@@ -495,6 +539,7 @@ public partial class DicomViewPanel
         string sliceKey = GetCurrentVolumeRoiSliceKey(metadata);
         int componentId = draft.ActiveAddComponentId ?? draft.NextComponentId++;
         draft.ActiveAddComponentId = componentId;
+        draft.SegmentationMask = null;
         string contourKey = BuildVolumeRoiContourKey(sliceKey, componentId);
         draft.PendingAddContour = new VolumeRoiDraftContour(
             sliceKey,
@@ -523,6 +568,7 @@ public partial class DicomViewPanel
 
         draft.Contours[contour.ContourKey] = contour;
         draft.PendingAddContour = null;
+        draft.SegmentationMask = null;
     }
 
     private static VolumeRoiDraftContour? GetCurrentVolumeRoiContour(VolumeRoiDraft draft, DicomSpatialMetadata metadata)
@@ -540,6 +586,72 @@ public partial class DicomViewPanel
     {
         _volumeRoiDraft = null;
         NotifyVolumeRoiDraftChanged();
+    }
+
+    private VolumeRoiDraft? CloneVolumeRoiDraftState() =>
+        _volumeRoiDraft is null ? null : CloneVolumeRoiDraft(_volumeRoiDraft);
+
+    private static VolumeRoiDraft CloneVolumeRoiDraft(VolumeRoiDraft draft)
+    {
+        VolumeRoiDraft clone = new(
+            draft.SeriesInstanceUid,
+            draft.FrameOfReferenceUid,
+            draft.AcquisitionNumber,
+            draft.ReferenceNormal,
+            draft.FirstPlanePosition,
+            draft.FirstSourceFilePath,
+            draft.FirstSopInstanceUid)
+        {
+            CurrentHoverPoint = draft.CurrentHoverPoint,
+            AutoOutlineState = draft.AutoOutlineState is null ? null : new VolumeRoiAutoOutlineState(draft.AutoOutlineState.ImagePoint, draft.AutoOutlineState.SensitivityLevel),
+            AdditiveModeEnabled = draft.AdditiveModeEnabled,
+            PendingAddContour = draft.PendingAddContour is null ? null : CloneVolumeRoiDraftContour(draft.PendingAddContour),
+            SegmentationMask = draft.SegmentationMask,
+            NextComponentId = draft.NextComponentId,
+            ActiveAddComponentId = draft.ActiveAddComponentId,
+        };
+
+        foreach ((string key, VolumeRoiDraftContour contour) in draft.Contours)
+        {
+            clone.Contours[key] = CloneVolumeRoiDraftContour(contour);
+        }
+
+        return clone;
+    }
+
+    private static VolumeRoiDraftContour CloneVolumeRoiDraftContour(VolumeRoiDraftContour contour) =>
+        new(
+            contour.SliceKey,
+            contour.ContourKey,
+            contour.ComponentId,
+            contour.SourceFilePath,
+            contour.ReferencedSopInstanceUid,
+            contour.PlaneOrigin,
+            contour.RowDirection,
+            contour.ColumnDirection,
+            contour.Normal,
+            contour.PlanePosition,
+            contour.RowSpacing,
+            contour.ColumnSpacing,
+            contour.Anchors.ToList(),
+            contour.IsClosed);
+
+    private void ApplyVolumeRoiDraftState(VolumeRoiDraft? draft)
+    {
+        _volumeRoiDraft = draft is null ? null : CloneVolumeRoiDraft(draft);
+        InvalidateRoiBallProjectionCaches();
+        NotifyVolumeRoiDraftChanged();
+        UpdateMeasurementPresentation();
+    }
+
+    private void RecordVolumeRoiDraftTransition(string description, VolumeRoiDraft? beforeDraft, VolumeRoiDraft? afterDraft)
+    {
+        VolumeRoiDraft? undoDraft = beforeDraft is null ? null : CloneVolumeRoiDraft(beforeDraft);
+        VolumeRoiDraft? redoDraft = afterDraft is null ? null : CloneVolumeRoiDraft(afterDraft);
+        PushRoiHistory(
+            description,
+            () => ApplyVolumeRoiDraftState(undoDraft),
+            () => ApplyVolumeRoiDraftState(redoDraft));
     }
 
     private void NotifyVolumeRoiDraftChanged()
@@ -905,6 +1017,7 @@ public partial class DicomViewPanel
         public VolumeRoiAutoOutlineState? AutoOutlineState { get; set; }
         public bool AdditiveModeEnabled { get; set; }
         public VolumeRoiDraftContour? PendingAddContour { get; set; }
+        public SegmentationMask3D? SegmentationMask { get; set; }
         public int NextComponentId { get; set; } = 1;
         public int? ActiveAddComponentId { get; set; }
     }

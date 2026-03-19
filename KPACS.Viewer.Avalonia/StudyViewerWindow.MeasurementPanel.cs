@@ -311,8 +311,10 @@ public partial class StudyViewerWindow
 
         double defaultLeft = Math.Max(0, hostWidth - panelWidth - margin.Right);
         double defaultTop = Math.Max(0, hostHeight - panelHeight - margin.Bottom);
-        double clampedX = Math.Clamp(_measurementInsightOffset.X, -defaultLeft, 0);
-        double clampedY = Math.Clamp(_measurementInsightOffset.Y, -defaultTop, 0);
+        double overflowX = GetFloatingPanelOverflowAllowance(panelWidth);
+        double overflowY = GetFloatingPanelOverflowAllowance(panelHeight);
+        double clampedX = Math.Clamp(_measurementInsightOffset.X, -defaultLeft - overflowX, overflowX);
+        double clampedY = Math.Clamp(_measurementInsightOffset.Y, -defaultTop - overflowY, overflowY);
         _measurementInsightOffset = new Point(clampedX, clampedY);
         transform.X = clampedX;
         transform.Y = clampedY;

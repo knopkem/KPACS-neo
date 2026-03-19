@@ -40,6 +40,7 @@ public partial class DicomViewPanel
         double HistogramMaxValue);
 
     private readonly List<StudyMeasurement> _measurements = [];
+    private readonly List<CenterlineOverlay> _centerlineOverlays = [];
     private int _measurementGeometryVersion;
     private MeasurementTool _measurementTool;
     private bool _measurementNudgeMode;
@@ -47,19 +48,156 @@ public partial class DicomViewPanel
     private MeasurementDraft? _measurementDraft;
     private MeasurementEditSession? _measurementEditSession;
     private Func<StudyMeasurement, Point[], string?>? _measurementTextSupplementProvider;
+    private Func<Guid, SegmentationMask3D?>? _segmentationMaskResolver;
+    private readonly Stack<RoiHistoryEntry> _roiUndoHistory = [];
+    private readonly Stack<RoiHistoryEntry> _roiRedoHistory = [];
+    private bool _isApplyingRoiHistory;
     private readonly List<AnatomyDeveloperOverlayModel> _developerAnatomyOverlays = new();
     private readonly DispatcherTimer _developerOverlayTransitionTimer = new();
     private string _developerOverlayTransitionSignature = string.Empty;
     private double _developerOverlayTransitionProgress = 1;
 
+    public sealed record CenterlineOverlay(
+        Guid SeedSetId,
+        CenterlinePath Path,
+        IReadOnlyList<CenterlineSeed> Seeds,
+        bool IsSelected);
+
     public event Action<StudyMeasurement>? MeasurementCreated;
     public event Action<StudyMeasurement>? MeasurementUpdated;
     public event Action<Guid>? MeasurementDeleted;
     public event Action<Guid?>? SelectedMeasurementChanged;
+    public event Action<SegmentationMask3D>? SegmentationMaskUpdated;
+
+    public void SetSegmentationMaskResolver(Func<Guid, SegmentationMask3D?>? resolver)
+    {
+        _segmentationMaskResolver = resolver;
+    }
 
     public void SetMeasurementTextSupplementProvider(Func<StudyMeasurement, Point[], string?>? provider)
     {
         _measurementTextSupplementProvider = provider;
+        UpdateMeasurementPresentation();
+    }
+
+    public bool TryUndoRoiStep()
+    {
+        if (_roiUndoHistory.Count == 0)
+        {
+            return false;
+        }
+
+        RoiHistoryEntry entry = _roiUndoHistory.Pop();
+        _isApplyingRoiHistory = true;
+        try
+        {
+            entry.Undo();
+        }
+        finally
+        {
+            _isApplyingRoiHistory = false;
+        }
+
+        _roiRedoHistory.Push(entry);
+        return true;
+    }
+
+    public bool TryRedoRoiStep()
+    {
+        if (_roiRedoHistory.Count == 0)
+        {
+            return false;
+        }
+
+        RoiHistoryEntry entry = _roiRedoHistory.Pop();
+        _isApplyingRoiHistory = true;
+        try
+        {
+            entry.Redo();
+        }
+        finally
+        {
+            _isApplyingRoiHistory = false;
+        }
+
+        _roiUndoHistory.Push(entry);
+        return true;
+    }
+
+    private bool TryResolveSegmentationMask(Guid segmentationMaskId, out SegmentationMask3D segmentationMask)
+    {
+        segmentationMask = _segmentationMaskResolver?.Invoke(segmentationMaskId)!;
+        return segmentationMask is not null;
+    }
+
+    private void PushRoiHistory(string description, Action undo, Action redo)
+    {
+        if (_isApplyingRoiHistory)
+        {
+            return;
+        }
+
+        _roiUndoHistory.Push(new RoiHistoryEntry(description, undo, redo));
+        _roiRedoHistory.Clear();
+    }
+
+    private static bool IsRoiMeasurementKind(MeasurementKind kind) =>
+        kind is MeasurementKind.PolygonRoi or MeasurementKind.VolumeRoi;
+
+    private MeasurementDraft? CloneMeasurementDraftState() =>
+        _measurementDraft is null ? null : CloneMeasurementDraft(_measurementDraft);
+
+    private static MeasurementDraft CloneMeasurementDraft(MeasurementDraft draft) =>
+        new(draft.Kind, [.. draft.Points], draft.CurrentPoint, draft.IsDragBased);
+
+    private void ApplyMeasurementDraftState(MeasurementDraft? draft)
+    {
+        _measurementDraft = draft is null ? null : CloneMeasurementDraft(draft);
+        UpdateMeasurementPresentation();
+    }
+
+    private void RecordMeasurementDraftTransition(string description, MeasurementDraft? beforeDraft, MeasurementDraft? afterDraft)
+    {
+        MeasurementDraft? undoDraft = beforeDraft is null ? null : CloneMeasurementDraft(beforeDraft);
+        MeasurementDraft? redoDraft = afterDraft is null ? null : CloneMeasurementDraft(afterDraft);
+        PushRoiHistory(
+            description,
+            () => ApplyMeasurementDraftState(undoDraft),
+            () => ApplyMeasurementDraftState(redoDraft));
+    }
+
+    private void ApplyMeasurementCreatedFromHistory(StudyMeasurement measurement, SegmentationMask3D? segmentationMask = null)
+    {
+        SetSelectedMeasurement(measurement.Id);
+        MeasurementCreated?.Invoke(measurement);
+        if (segmentationMask is not null)
+        {
+            SegmentationMaskCreated?.Invoke(segmentationMask);
+        }
+
+        UpdateMeasurementPresentation();
+    }
+
+    private void ApplyMeasurementUpdatedFromHistory(StudyMeasurement measurement, SegmentationMask3D? segmentationMask = null)
+    {
+        if (segmentationMask is not null)
+        {
+            SegmentationMaskUpdated?.Invoke(segmentationMask);
+        }
+
+        SetSelectedMeasurement(measurement.Id);
+        MeasurementUpdated?.Invoke(measurement);
+        UpdateMeasurementPresentation();
+    }
+
+    private void ApplyMeasurementDeletedFromHistory(Guid measurementId)
+    {
+        if (_selectedMeasurementId == measurementId)
+        {
+            SetSelectedMeasurement(null);
+        }
+
+        MeasurementDeleted?.Invoke(measurementId);
         UpdateMeasurementPresentation();
     }
 
@@ -109,6 +247,17 @@ public partial class DicomViewPanel
         _selectedMeasurementId = _measurements.Any(measurement => measurement.Id == selectedMeasurementId)
             ? selectedMeasurementId
             : null;
+        UpdateMeasurementPresentation();
+    }
+
+    public void SetCenterlineOverlays(IEnumerable<CenterlineOverlay>? overlays)
+    {
+        _centerlineOverlays.Clear();
+        if (overlays is not null)
+        {
+            _centerlineOverlays.AddRange(overlays);
+        }
+
         UpdateMeasurementPresentation();
     }
 
@@ -488,11 +637,14 @@ public partial class DicomViewPanel
             return;
         }
 
+        MeasurementDraft? previousDraft = CloneMeasurementDraftState();
+
         if (_measurementDraft is null || _measurementDraft.Kind != MeasurementKind.PolygonRoi)
         {
             SetSelectedMeasurement(null);
             _measurementDraft = new MeasurementDraft(MeasurementKind.PolygonRoi, [clamped], clamped, false);
             UpdateMeasurementPresentation();
+            RecordMeasurementDraftTransition("Start polygon ROI draft", previousDraft, _measurementDraft);
             return;
         }
 
@@ -515,6 +667,7 @@ public partial class DicomViewPanel
         _measurementDraft.Points.Add(clamped);
         _measurementDraft.CurrentPoint = clamped;
         UpdateMeasurementPresentation();
+        RecordMeasurementDraftTransition("Add polygon ROI point", previousDraft, _measurementDraft);
     }
 
     private void FinalizeDragMeasurement()
@@ -547,6 +700,8 @@ public partial class DicomViewPanel
             return;
         }
 
+        MeasurementDraft? finalizedDraft = CloneMeasurementDraftState();
+
         StudyMeasurement measurement = StudyMeasurement.Create(
             _measurementDraft.Kind,
             FilePath,
@@ -557,6 +712,23 @@ public partial class DicomViewPanel
         SetSelectedMeasurement(measurement.Id);
         MeasurementCreated?.Invoke(measurement);
         UpdateMeasurementPresentation();
+
+        if (finalizedDraft is not null && IsRoiMeasurementKind(measurement.Kind))
+        {
+            MeasurementDraft restoredDraft = CloneMeasurementDraft(finalizedDraft);
+            PushRoiHistory(
+                $"Finalize {measurement.Kind}",
+                () =>
+                {
+                    ApplyMeasurementDeletedFromHistory(measurement.Id);
+                    ApplyMeasurementDraftState(restoredDraft);
+                },
+                () =>
+                {
+                    ApplyMeasurementDraftState(null);
+                    ApplyMeasurementCreatedFromHistory(measurement);
+                });
+        }
     }
 
     private bool TryBeginMeasurementEdit(Point controlPoint, IPointer pointer)
@@ -592,6 +764,13 @@ public partial class DicomViewPanel
             return false;
         }
 
+        SegmentationMask3D? segmentationMask = null;
+        if (hit.Measurement.Kind == MeasurementKind.VolumeRoi &&
+            hit.Measurement.SegmentationMaskId is Guid segmentationMaskId)
+        {
+            TryResolveSegmentationMask(segmentationMaskId, out segmentationMask);
+        }
+
         if (_selectedMeasurementId == hit.Measurement.Id)
         {
             SetSelectedMeasurement(null);
@@ -599,6 +778,15 @@ public partial class DicomViewPanel
 
         MeasurementDeleted?.Invoke(hit.Measurement.Id);
         UpdateMeasurementPresentation();
+
+        if (IsRoiMeasurementKind(hit.Measurement.Kind))
+        {
+            PushRoiHistory(
+                $"Delete {hit.Measurement.Kind}",
+                () => ApplyMeasurementCreatedFromHistory(hit.Measurement, segmentationMask),
+                () => ApplyMeasurementDeletedFromHistory(hit.Measurement.Id));
+        }
+
         return true;
     }
 
@@ -768,6 +956,7 @@ public partial class DicomViewPanel
         MeasurementOverlay.Children.Clear();
 
         DrawDeveloperAnatomyOverlays();
+        DrawCenterlineOverlays();
 
         foreach (RenderedMeasurement rendered in GetRenderedMeasurements())
         {
@@ -777,6 +966,105 @@ public partial class DicomViewPanel
         DrawMeasurementDraft();
         DrawVolumeRoiDraftOverlay();
         DrawBallRoiBrushOverlay();
+    }
+
+    private void DrawCenterlineOverlays()
+    {
+        if (SpatialMetadata is null || _centerlineOverlays.Count == 0)
+        {
+            return;
+        }
+
+        foreach (CenterlineOverlay overlay in _centerlineOverlays.OrderBy(candidate => candidate.IsSelected))
+        {
+            DrawCenterlineOverlay(overlay);
+        }
+    }
+
+    private void DrawCenterlineOverlay(CenterlineOverlay overlay)
+    {
+        if (SpatialMetadata is null || overlay.Path.Points.Count == 0)
+        {
+            return;
+        }
+
+        Point[] controlPoints = overlay.Path.Points
+            .Select(pathPoint => SpatialMetadata.PixelPointFromPatient(pathPoint.PatientPoint))
+            .Where(imagePoint => SpatialMetadata.ContainsImagePoint(imagePoint))
+            .Select(ImageToControlPoint)
+            .ToArray();
+
+        if (controlPoints.Length >= 2)
+        {
+            bool isComputed = overlay.Path.Kind == CenterlinePathKind.Computed;
+            bool isSelected = overlay.IsSelected;
+            Color pathColor = isSelected
+                ? (isComputed ? Color.Parse("#FFFFD54F") : Color.Parse("#FFF4E28A"))
+                : (isComputed ? Color.Parse("#FF7FDFA2") : Color.Parse("#FF73C7FF"));
+
+            var pathPolyline = new Polyline
+            {
+                Points = new Points(controlPoints),
+                Stroke = new SolidColorBrush(pathColor),
+                StrokeThickness = isSelected ? 2.4 : 1.7,
+                IsHitTestVisible = false,
+                Opacity = isComputed ? 0.95 : 0.85,
+            };
+
+            if (!isComputed)
+            {
+                pathPolyline.StrokeDashArray = new AvaloniaList<double> { 6, 4 };
+            }
+
+            MeasurementOverlay.Children.Add(pathPolyline);
+        }
+
+        foreach (CenterlineSeed seed in overlay.Seeds)
+        {
+            Point imagePoint = SpatialMetadata.PixelPointFromPatient(seed.PatientPoint);
+            if (!SpatialMetadata.ContainsImagePoint(imagePoint, tolerance: 2.0))
+            {
+                continue;
+            }
+
+            Point controlPoint = ImageToControlPoint(imagePoint);
+            DrawCenterlineSeedMarker(seed, overlay.IsSelected, controlPoint);
+        }
+    }
+
+    private void DrawCenterlineSeedMarker(CenterlineSeed seed, bool isSelected, Point controlPoint)
+    {
+        Color color = seed.Kind switch
+        {
+            CenterlineSeedKind.Start => Color.Parse("#FF7FDFA2"),
+            CenterlineSeedKind.End => Color.Parse("#FFFF8A8A"),
+            _ => Color.Parse("#FF73C7FF"),
+        };
+
+        double radius = isSelected ? 5.0 : 4.0;
+        var halo = new Ellipse
+        {
+            Width = radius * 3.0,
+            Height = radius * 3.0,
+            Fill = new SolidColorBrush(Color.FromArgb(isSelected ? (byte)76 : (byte)52, color.R, color.G, color.B)),
+            IsHitTestVisible = false,
+        };
+        Canvas.SetLeft(halo, controlPoint.X - (halo.Width * 0.5));
+        Canvas.SetTop(halo, controlPoint.Y - (halo.Height * 0.5));
+        MeasurementOverlay.Children.Add(halo);
+
+        var marker = new Ellipse
+        {
+            Width = radius * 2.0,
+            Height = radius * 2.0,
+            Stroke = Brushes.Black,
+            StrokeThickness = 1,
+            Fill = new SolidColorBrush(color),
+            IsHitTestVisible = false,
+        };
+        Canvas.SetLeft(marker, controlPoint.X - (marker.Width * 0.5));
+        Canvas.SetTop(marker, controlPoint.Y - (marker.Height * 0.5));
+        MeasurementOverlay.Children.Add(marker);
     }
 
     private void DrawDeveloperAnatomyOverlays()
@@ -2102,6 +2390,8 @@ public partial class DicomViewPanel
         public Point CurrentPoint { get; set; } = currentPoint;
         public bool IsDragBased { get; } = isDragBased;
     }
+
+    private sealed record RoiHistoryEntry(string Description, Action Undo, Action Redo);
 
     private sealed class MeasurementEditSession(
         StudyMeasurement measurement,

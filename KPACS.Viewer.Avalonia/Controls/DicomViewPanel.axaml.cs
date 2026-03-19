@@ -1298,6 +1298,25 @@ public partial class DicomViewPanel : UserControl
 
     private void OnPanelKeyDown(object? sender, KeyEventArgs e)
     {
+        bool controlPressed = e.KeyModifiers.HasFlag(KeyModifiers.Control);
+        bool shiftPressed = e.KeyModifiers.HasFlag(KeyModifiers.Shift);
+        if (controlPressed)
+        {
+            bool handled = e.Key switch
+            {
+                Key.Z when shiftPressed => TryRedoRoiStep(),
+                Key.Z => TryUndoRoiStep(),
+                Key.Y => TryRedoRoiStep(),
+                _ => false,
+            };
+
+            if (handled)
+            {
+                e.Handled = true;
+                return;
+            }
+        }
+
         if (!_isPlaneTiltDragging)
         {
             return;

@@ -62,7 +62,8 @@ public sealed record StudyMeasurement(
     string AnnotationText = "",
     MeasurementTrackingMetadata? Tracking = null,
     Point? LabelOffset = null,
-    VolumeRoiContour[]? VolumeContours = null)
+    VolumeRoiContour[]? VolumeContours = null,
+    Guid? SegmentationMaskId = null)
 {
     public static StudyMeasurement Create(
         MeasurementKind kind,
@@ -111,10 +112,14 @@ public sealed record StudyMeasurement(
             Anchors = volumeContours.SelectMany(contour => contour.Anchors).ToArray(),
         };
 
+    public StudyMeasurement WithSegmentationMask(Guid? segmentationMaskId) =>
+        this with { SegmentationMaskId = segmentationMaskId };
+
     public static StudyMeasurement CreateVolumeRoi(
         string sourceFilePath,
         DicomSpatialMetadata? metadata,
-        IEnumerable<VolumeRoiContour> volumeContours)
+        IEnumerable<VolumeRoiContour> volumeContours,
+        Guid? segmentationMaskId = null)
     {
         VolumeRoiContour[] contours = volumeContours.ToArray();
         VolumeRoiContour? firstContour = contours.FirstOrDefault();
@@ -128,7 +133,8 @@ public sealed record StudyMeasurement(
             metadata?.AcquisitionNumber ?? string.Empty,
             contours.SelectMany(contour => contour.Anchors).ToArray(),
             LabelOffset: new Point(10, 10),
-            VolumeContours: contours);
+                VolumeContours: contours,
+                SegmentationMaskId: segmentationMaskId);
     }
 
     public bool TryGetPatientCenter(out Vector3D center)

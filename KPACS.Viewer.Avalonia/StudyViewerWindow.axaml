@@ -703,6 +703,225 @@
                 </StackPanel>
             </Border>
 
+            <Border x:Name="CenterlineCrossSectionPanel"
+                    IsVisible="False"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,72,452,0"
+                    Padding="12"
+                    MaxWidth="340"
+                    MinWidth="300"
+                    Background="#E6141820"
+                    BorderBrush="#80B6A06A"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    ZIndex="4">
+                <Border.RenderTransform>
+                    <TranslateTransform />
+                </Border.RenderTransform>
+                <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <StackPanel x:Name="CenterlineCrossSectionDragHandle"
+                                    Spacing="2"
+                                    Cursor="SizeAll"
+                                    PointerPressed="OnCenterlineCrossSectionHeaderPointerPressed"
+                                    PointerMoved="OnCenterlineCrossSectionHeaderPointerMoved"
+                                    PointerReleased="OnCenterlineCrossSectionHeaderPointerReleased">
+                            <TextBlock x:Name="CenterlineCrossSectionTitleText"
+                                       Text="Centerline cross-section"
+                                       Foreground="#FFF6FBFF"
+                                       FontWeight="SemiBold"
+                                       FontSize="13" />
+                            <TextBlock x:Name="CenterlineCrossSectionSummaryText"
+                                       Foreground="#FF9DB3C7"
+                                       FontSize="11"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleButton x:Name="CenterlineCrossSectionPinButton"
+                                      Grid.Column="1"
+                                      Classes="iconToggle"
+                                      Width="30"
+                                      Height="30"
+                                      MinWidth="30"
+                                      Click="OnCenterlineCrossSectionPinClick"
+                                      ToolTip.Tip="Pin the centerline cross-section panel." />
+                    </Grid>
+
+                    <Border Height="1" Background="#334D5F74" />
+
+                    <TextBlock x:Name="CenterlineCrossSectionStatusText"
+                               Foreground="#FFDCE9F7"
+                               FontSize="10"
+                               TextWrapping="Wrap" />
+
+                    <Grid ColumnDefinitions="Auto,*,Auto" ColumnSpacing="8">
+                        <Button x:Name="CenterlineCrossSectionPreviousButton"
+                                Classes="previewOrbitButton"
+                                Content="←"
+                                Click="OnCenterlineCrossSectionPreviousClick"
+                                ToolTip.Tip="Move to the previous centerline station." />
+                        <Slider x:Name="CenterlineCrossSectionSlider"
+                                Grid.Column="1"
+                                Minimum="0"
+                                Maximum="1"
+                                Value="0"
+                                PropertyChanged="OnCenterlineCrossSectionSliderChanged" />
+                        <Button x:Name="CenterlineCrossSectionNextButton"
+                                Grid.Column="2"
+                                Classes="previewOrbitButton"
+                                Content="→"
+                                Click="OnCenterlineCrossSectionNextClick"
+                                ToolTip.Tip="Move to the next centerline station." />
+                    </Grid>
+
+                            <Grid ColumnDefinitions="Auto,Auto,Auto,Auto,Auto" ColumnSpacing="6">
+                            <Button Content="Neck start"
+                                MinWidth="72"
+                                Click="OnSetProximalNeckStartClick"
+                                ToolTip.Tip="Set the proximal neck start marker at the current centerline station." />
+                            <Button Grid.Column="1"
+                                Content="Neck end"
+                                MinWidth="72"
+                                Click="OnSetProximalNeckEndClick"
+                                ToolTip.Tip="Set the proximal neck end marker at the current centerline station." />
+                            <Button Grid.Column="2"
+                                Content="Distal start"
+                                MinWidth="76"
+                                Click="OnSetDistalLandingStartClick"
+                                ToolTip.Tip="Set the distal landing start marker at the current centerline station." />
+                            <Button Grid.Column="3"
+                                Content="Distal end"
+                                MinWidth="76"
+                                Click="OnSetDistalLandingEndClick"
+                                ToolTip.Tip="Set the distal landing end marker at the current centerline station." />
+                            <Button Grid.Column="4"
+                                Content="Clear"
+                                MinWidth="54"
+                                Click="OnClearVascularPlanningClick"
+                                ToolTip.Tip="Clear EVAR planning markers for the selected centerline." />
+                            </Grid>
+
+                    <Border Background="#20000000"
+                            BorderBrush="#33394B61"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="6">
+                        <Grid>
+                            <Image x:Name="CenterlineCrossSectionImage"
+                                   Width="220"
+                                   Height="220"
+                                   HorizontalAlignment="Center"
+                                   VerticalAlignment="Center"
+                                   Stretch="Uniform" />
+                            <Canvas Width="220"
+                                    Height="220"
+                                    IsHitTestVisible="False"
+                                    HorizontalAlignment="Center"
+                                    VerticalAlignment="Center">
+                                <Line StartPoint="110,0" EndPoint="110,220" Stroke="#66FFD56B" StrokeThickness="1" />
+                                <Line StartPoint="0,110" EndPoint="220,110" Stroke="#66FFD56B" StrokeThickness="1" />
+                            </Canvas>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock x:Name="CenterlineCrossSectionHintText"
+                               Foreground="#FFD3E5F5"
+                               FontSize="10"
+                               TextWrapping="Wrap"
+                               Text="Computed centerline sections appear here." />
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="CenterlineCurvedMprPanel"
+                    IsVisible="False"
+                    HorizontalAlignment="Left"
+                    VerticalAlignment="Top"
+                    Margin="18,72,0,0"
+                    Padding="12"
+                    MaxWidth="660"
+                    MinWidth="420"
+                    Background="#E6141820"
+                    BorderBrush="#8098B5D8"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    ZIndex="4">
+                <Border.RenderTransform>
+                    <TranslateTransform />
+                </Border.RenderTransform>
+                <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <StackPanel x:Name="CenterlineCurvedMprDragHandle"
+                                    Spacing="2"
+                                    Cursor="SizeAll"
+                                    PointerPressed="OnCenterlineCurvedMprHeaderPointerPressed"
+                                    PointerMoved="OnCenterlineCurvedMprHeaderPointerMoved"
+                                    PointerReleased="OnCenterlineCurvedMprHeaderPointerReleased">
+                            <TextBlock x:Name="CenterlineCurvedMprTitleText"
+                                       Text="Curved MPR"
+                                       Foreground="#FFF6FBFF"
+                                       FontWeight="SemiBold"
+                                       FontSize="13" />
+                            <TextBlock x:Name="CenterlineCurvedMprSummaryText"
+                                       Foreground="#FF9DB3C7"
+                                       FontSize="11"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleButton x:Name="CenterlineCurvedMprPinButton"
+                                      Grid.Column="1"
+                                      Classes="iconToggle"
+                                      Width="30"
+                                      Height="30"
+                                      MinWidth="30"
+                                      Click="OnCenterlineCurvedMprPinClick"
+                                      ToolTip.Tip="Pin the curved MPR panel." />
+                    </Grid>
+
+                    <Border Height="1" Background="#334D5F74" />
+
+                    <TextBlock x:Name="CenterlineCurvedMprStatusText"
+                               Foreground="#FFDCE9F7"
+                               FontSize="10"
+                               TextWrapping="Wrap" />
+
+                    <Border Background="#20000000"
+                            BorderBrush="#33394B61"
+                            BorderThickness="1"
+                            CornerRadius="8"
+                            Padding="6">
+                        <Grid x:Name="CenterlineCurvedMprImageHost"
+                              PointerPressed="OnCenterlineCurvedMprImagePointerPressed"
+                              PointerMoved="OnCenterlineCurvedMprImagePointerMoved">
+                            <Image x:Name="CenterlineCurvedMprImage"
+                                   Width="620"
+                                   Height="240"
+                                   HorizontalAlignment="Stretch"
+                                   VerticalAlignment="Center"
+                                   Stretch="Fill" />
+                            <Border x:Name="CenterlineCurvedMprStationIndicator"
+                                    Width="2"
+                                    Background="#B8FFD56B"
+                                    HorizontalAlignment="Left"
+                                    VerticalAlignment="Stretch"
+                                    Margin="0,0,0,0"
+                                    IsHitTestVisible="False" />
+                            <Canvas Width="620"
+                                    Height="240"
+                                    IsHitTestVisible="False"
+                                    HorizontalAlignment="Stretch"
+                                    VerticalAlignment="Center">
+                                <Line StartPoint="0,120" EndPoint="620,120" Stroke="#44FFD56B" StrokeThickness="1" />
+                            </Canvas>
+                        </Grid>
+                    </Border>
+
+                    <TextBlock x:Name="CenterlineCurvedMprHintText"
+                               Foreground="#FFD3E5F5"
+                               FontSize="10"
+                               TextWrapping="Wrap"
+                               Text="Computed curved MPR appears here." />
+                </StackPanel>
+            </Border>
+
             <Border x:Name="AnatomyPanel"
                     IsVisible="False"
                     HorizontalAlignment="Right"
@@ -962,6 +1181,7 @@
                             <ToggleButton x:Name="ToolboxBallRoiButton" Classes="toolboxChip" Content="ROI ball" Tag="BallRoiCorrection" Click="OnMeasurementToolPopupClick" ToolTip.Tip="Sculpt polygon or 3D ROI edges with a circular brush. Drag from inside for dents, from outside for bulges. Use CTRL+wheel or [ and ] to change the radius." />
                             <ToggleButton x:Name="ToolboxModifyButton" Classes="toolboxChip" Content="Modify" Tag="Modify" Click="OnMeasurementToolPopupClick" ToolTip.Tip="Select and edit measurements. Arrow keys nudge the selected measurement; hold SHIFT for larger steps." />
                             <ToggleButton x:Name="ToolboxEraseButton" Classes="toolboxChip" Content="Erase" Tag="Erase" Click="OnMeasurementToolPopupClick" />
+                            <ToggleButton x:Name="ToolboxCenterlineButton" Classes="toolboxChip" Content="Centerline" Click="OnToolboxCenterlineClick" ToolTip.Tip="Place vascular centerline seeds. Click start then end; CTRL-click adds guide points, SHIFT-click redefines start, ALT-click redefines end." />
                         </WrapPanel>
 
                         <Border Height="1" Background="#334D5F74" />
@@ -1090,6 +1310,7 @@
                         <Button Classes="popupAction" Content="Pixel lens" Tag="PixelLens" Click="OnMeasurementToolPopupClick" />
                         <Button Classes="popupAction" Content="Modify" Tag="Modify" Click="OnMeasurementToolPopupClick" />
                         <Button Classes="popupAction" Content="Erase" Tag="Erase" Click="OnMeasurementToolPopupClick" />
+                        <Button Classes="popupAction" Content="Centerline" Click="OnCenterlinePopupClick" />
                     </StackPanel>
                 </Border>
             </Popup>

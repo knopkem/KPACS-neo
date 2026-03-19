@@ -1,6 +1,8 @@
 using Avalonia;
 using Avalonia.Input;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.Services;
+using SpatialVector3D = KPACS.Viewer.Models.Vector3D;
 
 namespace KPACS.Viewer.Controls;
 
@@ -207,11 +209,22 @@ public partial class DicomViewPanel
         InvalidateRoiBallProjectionCaches();
         MeasurementUpdated?.Invoke(updated);
         UpdateMeasurementPresentation();
+        PushRoiHistory(
+            "Apply polygon ROI ball correction",
+            () => ApplyMeasurementUpdatedFromHistory(measurement),
+            () => ApplyMeasurementUpdatedFromHistory(updated));
         return true;
     }
 
     private bool TryApplyBallCorrectionToVolumeMeasurement(StudyMeasurement measurement, Point imagePoint, bool? forcedAddRegion, int radiusPixels, bool requireEdgeCollision)
     {
+        if (measurement.SegmentationMaskId is Guid segmentationMaskId &&
+            TryResolveSegmentationMask(segmentationMaskId, out SegmentationMask3D segmentationMask) &&
+            TryApplyBallCorrectionToVolumeMeasurementMask(measurement, segmentationMask, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision))
+        {
+            return true;
+        }
+
         if (!TryGetVolumeMeasurementProjectedContours(measurement, out VolumeRoiContour[] currentSliceContours, out Point[][] projectedContours, out bool usesInterpolatedContours))
         {
             return false;
@@ -238,6 +251,10 @@ public partial class DicomViewPanel
             InvalidateRoiBallProjectionCaches();
             MeasurementUpdated?.Invoke(updatedMeasurement);
             UpdateMeasurementPresentation();
+            PushRoiHistory(
+                "Apply volume ROI contour correction",
+                () => ApplyMeasurementUpdatedFromHistory(measurement),
+                () => ApplyMeasurementUpdatedFromHistory(updatedMeasurement));
             return true;
         }
 
@@ -257,11 +274,23 @@ public partial class DicomViewPanel
         InvalidateRoiBallProjectionCaches();
         MeasurementUpdated?.Invoke(updated);
         UpdateMeasurementPresentation();
+        PushRoiHistory(
+            "Insert interpolated volume ROI contour",
+            () => ApplyMeasurementUpdatedFromHistory(measurement),
+            () => ApplyMeasurementUpdatedFromHistory(updated));
         return true;
     }
 
     private bool TryApplyBallCorrectionToVolumeDraft(Point imagePoint, bool? forcedAddRegion, int radiusPixels, bool requireEdgeCollision)
     {
+        VolumeRoiDraft? previousDraft = CloneVolumeRoiDraftState();
+
+        if (_volumeRoiDraft?.SegmentationMask is SegmentationMask3D segmentationMask &&
+            TryApplyBallCorrectionToVolumeDraftMask(segmentationMask, previousDraft, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision))
+        {
+            return true;
+        }
+
         if (!TryGetVolumeDraftProjectedContours(out VolumeRoiDraftContour[] currentContours, out Point[][] projectedContours))
         {
             return false;
@@ -278,7 +307,274 @@ public partial class DicomViewPanel
         target.Anchors.AddRange(updatedPoints.Select(point => new MeasurementAnchor(point, metadata.PatientPointFromPixel(point))));
         NotifyVolumeRoiDraftChanged();
         UpdateMeasurementPresentation();
+        RecordVolumeRoiDraftTransition("Apply volume ROI draft correction", previousDraft, _volumeRoiDraft);
         return true;
+    }
+
+    private bool TryApplyBallCorrectionToVolumeMeasurementMask(
+        StudyMeasurement measurement,
+        SegmentationMask3D segmentationMask,
+        Point imagePoint,
+        bool? forcedAddRegion,
+        int radiusPixels,
+        bool requireEdgeCollision)
+    {
+        if (!TryGetVolumeMeasurementProjectedContours(measurement, out _, out Point[][] projectedContours, out _))
+        {
+            return false;
+        }
+
+        if (!TryApplySphereEditToSegmentationMask(segmentationMask, projectedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out SegmentationMask3D updatedMask, out VolumeRoiContour[] updatedContours))
+        {
+            return false;
+        }
+
+        StudyMeasurement updatedMeasurement = measurement.WithVolumeContours(updatedContours);
+        InvalidateRoiBallProjectionCaches();
+        SegmentationMaskUpdated?.Invoke(updatedMask);
+        MeasurementUpdated?.Invoke(updatedMeasurement);
+        UpdateMeasurementPresentation();
+        PushRoiHistory(
+            "Apply 3D segmentation mask correction",
+            () => ApplyMeasurementUpdatedFromHistory(measurement, segmentationMask),
+            () => ApplyMeasurementUpdatedFromHistory(updatedMeasurement, updatedMask));
+        return true;
+    }
+
+    private bool TryApplyBallCorrectionToVolumeDraftMask(
+        SegmentationMask3D segmentationMask,
+        VolumeRoiDraft? previousDraft,
+        Point imagePoint,
+        bool? forcedAddRegion,
+        int radiusPixels,
+        bool requireEdgeCollision)
+    {
+        if (_volumeRoiDraft is null || !TryGetVolumeDraftProjectedContours(out _, out Point[][] projectedContours))
+        {
+            return false;
+        }
+
+        if (!TryApplySphereEditToSegmentationMask(segmentationMask, projectedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out SegmentationMask3D updatedMask, out VolumeRoiContour[] updatedContours))
+        {
+            return false;
+        }
+
+        ReplaceVolumeRoiDraftFromMaskContours(_volumeRoiDraft, updatedContours, updatedMask);
+        InvalidateRoiBallProjectionCaches();
+        NotifyVolumeRoiDraftChanged();
+        UpdateMeasurementPresentation();
+        RecordVolumeRoiDraftTransition("Apply 3D volume ROI draft mask correction", previousDraft, _volumeRoiDraft);
+        return true;
+    }
+
+    private bool TryApplySphereEditToSegmentationMask(
+        SegmentationMask3D segmentationMask,
+        Point[][] projectedContours,
+        Point imagePoint,
+        bool? forcedAddRegion,
+        int radiusPixels,
+        bool requireEdgeCollision,
+        out SegmentationMask3D updatedMask,
+        out VolumeRoiContour[] updatedContours)
+    {
+        updatedMask = segmentationMask;
+        updatedContours = [];
+
+        if (_volume is null || SpatialMetadata is null || projectedContours.Length == 0)
+        {
+            return false;
+        }
+
+        if (!TryResolveBallEditMode(projectedContours, imagePoint, forcedAddRegion, radiusPixels, requireEdgeCollision, out bool addRegion))
+        {
+            return false;
+        }
+
+        SegmentationMaskBuffer buffer = SegmentationMaskBuffer.FromStorage(segmentationMask.Geometry, segmentationMask.Storage);
+        Point clamped = ClampImagePoint(imagePoint);
+        SpatialVector3D centerPatientPoint = SpatialMetadata.PatientPointFromPixel(clamped);
+        double radiusMillimeters = GetBallCorrectionRadiusMillimeters(radiusPixels);
+        if (!ApplySphereEditToMaskBuffer(buffer, centerPatientPoint, radiusMillimeters, addRegion))
+        {
+            return false;
+        }
+
+        HashSet<int> region = BuildRegionFromSegmentationMaskBuffer(buffer);
+        if (region.Count == 0)
+        {
+            return false;
+        }
+
+        updatedContours = BuildAutoOutlinedVolumeContours(region);
+        if (updatedContours.Length == 0)
+        {
+            return false;
+        }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        updatedMask = segmentationMask with
+        {
+            Storage = buffer.ToStorage(),
+            Metadata = segmentationMask.Metadata with
+            {
+                SourceKind = SegmentationMaskSourceKind.ManualEdit,
+                ModifiedUtc = now,
+                Revision = segmentationMask.Metadata.Revision + 1,
+                Statistics = buffer.ComputeStatistics(),
+            }
+        };
+
+        return true;
+    }
+
+    private bool TryResolveBallEditMode(
+        Point[][] projectedContours,
+        Point imagePoint,
+        bool? forcedAddRegion,
+        int radiusPixels,
+        bool requireEdgeCollision,
+        out bool addRegion)
+    {
+        addRegion = forcedAddRegion ?? !projectedContours.Any(contour => IsPointInsidePolygon(imagePoint, contour));
+        if (!requireEdgeCollision)
+        {
+            return true;
+        }
+
+        double bestDistance = double.MaxValue;
+        foreach (Point[] contour in projectedContours)
+        {
+            if (TryGetBrushCollision(contour, imagePoint, radiusPixels, out _, out double distance) && distance < bestDistance)
+            {
+                bestDistance = distance;
+            }
+        }
+
+        return bestDistance <= radiusPixels;
+    }
+
+    private double GetBallCorrectionRadiusMillimeters(int radiusPixels)
+    {
+        if (SpatialMetadata is null)
+        {
+            return Math.Max(1.0, radiusPixels);
+        }
+
+        double pixelSpacing = Math.Max(0.1, (SpatialMetadata.RowSpacing + SpatialMetadata.ColumnSpacing) * 0.5);
+        return Math.Max(pixelSpacing, radiusPixels * pixelSpacing);
+    }
+
+    private bool ApplySphereEditToMaskBuffer(
+        SegmentationMaskBuffer buffer,
+        SpatialVector3D centerPatientPoint,
+        double radiusMillimeters,
+        bool addRegion)
+    {
+        VolumeGridGeometry geometry = buffer.Geometry;
+        (double centerX, double centerY, double centerZ) = PatientPointToMaskVoxel(geometry, centerPatientPoint);
+
+        int minX = Math.Max(0, (int)Math.Floor(centerX - (radiusMillimeters / geometry.SpacingX) - 1));
+        int maxX = Math.Min(geometry.SizeX - 1, (int)Math.Ceiling(centerX + (radiusMillimeters / geometry.SpacingX) + 1));
+        int minY = Math.Max(0, (int)Math.Floor(centerY - (radiusMillimeters / geometry.SpacingY) - 1));
+        int maxY = Math.Min(geometry.SizeY - 1, (int)Math.Ceiling(centerY + (radiusMillimeters / geometry.SpacingY) + 1));
+        int minZ = Math.Max(0, (int)Math.Floor(centerZ - (radiusMillimeters / geometry.SpacingZ) - 1));
+        int maxZ = Math.Min(geometry.SizeZ - 1, (int)Math.Ceiling(centerZ + (radiusMillimeters / geometry.SpacingZ) + 1));
+
+        double radiusSquared = radiusMillimeters * radiusMillimeters;
+        bool changed = false;
+        for (int z = minZ; z <= maxZ; z++)
+        {
+            for (int y = minY; y <= maxY; y++)
+            {
+                for (int x = minX; x <= maxX; x++)
+                {
+                    SpatialVector3D voxelPatientPoint = MaskVoxelToPatientPoint(geometry, x, y, z);
+                    SpatialVector3D delta = voxelPatientPoint - centerPatientPoint;
+                    double distanceSquared = delta.Dot(delta);
+                    if (distanceSquared > radiusSquared)
+                    {
+                        continue;
+                    }
+
+                    if (buffer.Get(x, y, z) == addRegion)
+                    {
+                        continue;
+                    }
+
+                    buffer.Set(x, y, z, addRegion);
+                    changed = true;
+                }
+            }
+        }
+
+        return changed;
+    }
+
+    private HashSet<int> BuildRegionFromSegmentationMaskBuffer(SegmentationMaskBuffer buffer)
+    {
+        HashSet<int> region = [];
+        for (int z = 0; z < buffer.SizeZ; z++)
+        {
+            for (int y = 0; y < buffer.SizeY; y++)
+            {
+                for (int x = 0; x < buffer.SizeX; x++)
+                {
+                    if (buffer.Get(x, y, z))
+                    {
+                        region.Add(GetVoxelKey(x, y, z, buffer.SizeX, buffer.SizeY));
+                    }
+                }
+            }
+        }
+
+        return region;
+    }
+
+    private static (double X, double Y, double Z) PatientPointToMaskVoxel(VolumeGridGeometry geometry, SpatialVector3D patientPoint)
+    {
+        SpatialVector3D relative = patientPoint - geometry.Origin;
+        double x = relative.Dot(geometry.RowDirection) / geometry.SpacingX;
+        double y = relative.Dot(geometry.ColumnDirection) / geometry.SpacingY;
+        double z = relative.Dot(geometry.Normal) / geometry.SpacingZ;
+        return (x, y, z);
+    }
+
+    private static SpatialVector3D MaskVoxelToPatientPoint(VolumeGridGeometry geometry, int x, int y, int z)
+    {
+        return geometry.Origin
+            + (geometry.RowDirection * (x * geometry.SpacingX))
+            + (geometry.ColumnDirection * (y * geometry.SpacingY))
+            + (geometry.Normal * (z * geometry.SpacingZ));
+    }
+
+    private void ReplaceVolumeRoiDraftFromMaskContours(VolumeRoiDraft draft, IEnumerable<VolumeRoiContour> contours, SegmentationMask3D segmentationMask)
+    {
+        draft.Contours.Clear();
+        foreach (VolumeRoiContour contour in contours.OrderBy(candidate => candidate.PlanePosition).ThenBy(candidate => candidate.ComponentId))
+        {
+            string sliceKey = BuildVolumeRoiSliceKey(draft.SeriesInstanceUid, draft.FrameOfReferenceUid, contour.PlanePosition);
+            string contourKey = BuildVolumeRoiContourKey(sliceKey, contour.ComponentId);
+            draft.Contours[contourKey] = new VolumeRoiDraftContour(
+                sliceKey,
+                contourKey,
+                contour.ComponentId,
+                contour.SourceFilePath,
+                contour.ReferencedSopInstanceUid,
+                contour.PlaneOrigin,
+                contour.RowDirection,
+                contour.ColumnDirection,
+                contour.Normal,
+                contour.PlanePosition,
+                contour.RowSpacing,
+                contour.ColumnSpacing,
+                contour.Anchors.ToList(),
+                contour.IsClosed);
+        }
+
+        draft.PendingAddContour = null;
+        draft.ActiveAddComponentId = null;
+        draft.NextComponentId = Math.Max(1, draft.Contours.Values.Select(contour => contour.ComponentId).DefaultIfEmpty(0).Max() + 1);
+        draft.SegmentationMask = segmentationMask;
     }
 
     private bool TryBuildVolumeDraftSliceMask(VolumeRoiDraftContour[] contours, out RoiMask mask)

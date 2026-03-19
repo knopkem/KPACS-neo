@@ -590,8 +590,10 @@ public partial class StudyViewerWindow
         double defaultLeft = Math.Max(0, hostWidth - panelWidth - margin.Right);
         double defaultTop = margin.Top;
         double defaultBottom = Math.Max(0, hostHeight - panelHeight - margin.Top);
-        double clampedX = Math.Clamp(_renderingPanelOffset.X, -defaultLeft, 0);
-        double clampedY = Math.Clamp(_renderingPanelOffset.Y, -defaultTop, defaultBottom);
+        double overflowX = GetFloatingPanelOverflowAllowance(panelWidth);
+        double overflowY = GetFloatingPanelOverflowAllowance(panelHeight);
+        double clampedX = Math.Clamp(_renderingPanelOffset.X, -defaultLeft - overflowX, overflowX);
+        double clampedY = Math.Clamp(_renderingPanelOffset.Y, -defaultTop - overflowY, defaultBottom + overflowY);
         _renderingPanelOffset = new Point(clampedX, clampedY);
         transform.X = clampedX;
         transform.Y = clampedY;
