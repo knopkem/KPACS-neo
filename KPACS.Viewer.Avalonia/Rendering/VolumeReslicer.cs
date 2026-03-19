@@ -235,6 +235,11 @@ public static class VolumeReslicer
     private static ReslicedImage ExtractCoronal(SeriesVolume volume, int y)
     {
         y = Math.Clamp(y, 0, volume.SizeY - 1);
+        if (TryGpuExtractOrthogonalSlice(volume, SliceOrientation.Coronal, y, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
         int width = volume.SizeX;
         double targetSpacingY = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
         int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
@@ -267,6 +272,11 @@ public static class VolumeReslicer
     private static ReslicedImage ExtractSagittal(SeriesVolume volume, int x)
     {
         x = Math.Clamp(x, 0, volume.SizeX - 1);
+        if (TryGpuExtractOrthogonalSlice(volume, SliceOrientation.Sagittal, x, out ReslicedImage gpuImage))
+        {
+            return gpuImage;
+        }
+
         int width = volume.SizeY;
         double targetSpacingY = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
         int height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, targetSpacingY);
@@ -799,6 +809,74 @@ public static class VolumeReslicer
             PixelSpacingY = plane.PixelSpacingY,
             SpatialMetadata = plane.CreateSpatialMetadata(volume),
         };
+    }
+
+    /// <summary>
+    /// Attempts to extract a coronal or sagittal slice via the GPU oblique-slab kernel.
+    /// Constructs the equivalent <see cref="VolumeSlicePlane"/> geometry and delegates to
+    /// <see cref="VolumeComputeBackend.TryRenderObliqueProjection"/>. Returns <c>false</c>
+    /// when OpenCL is unavailable or for axial slices (which are already O(1) via Array.Copy).
+    /// </summary>
+    private static bool TryGpuExtractOrthogonalSlice(
+        SeriesVolume volume,
+        SliceOrientation orientation,
+        int sliceIndex,
+        out ReslicedImage image)
+    {
+        image = new ReslicedImage();
+        if (orientation == SliceOrientation.Axial)
+        {
+            return false;
+        }
+
+        (Vector3D row, Vector3D col, Vector3D normal, double spacingX, double spacingY) = GetPlaneBasis(volume, orientation);
+
+        int width, height;
+        double sliceSpacingMm, currentOffsetMm;
+        switch (orientation)
+        {
+            case SliceOrientation.Coronal:
+                sliceIndex = Math.Clamp(sliceIndex, 0, volume.SizeY - 1);
+                width = volume.SizeX;
+                height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, spacingY);
+                sliceSpacingMm = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+                currentOffsetMm = (sliceIndex - (volume.SizeY - 1) * 0.5) * sliceSpacingMm;
+                break;
+            case SliceOrientation.Sagittal:
+                sliceIndex = Math.Clamp(sliceIndex, 0, volume.SizeX - 1);
+                width = volume.SizeY;
+                height = GetResampledDepth(volume.SizeZ, volume.SpacingZ, spacingY);
+                sliceSpacingMm = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
+                currentOffsetMm = (sliceIndex - (volume.SizeX - 1) * 0.5) * sliceSpacingMm;
+                break;
+            default:
+                return false;
+        }
+
+        Vector3D volumeCenter = volume.VoxelToPatient(
+            (volume.SizeX - 1) * 0.5,
+            (volume.SizeY - 1) * 0.5,
+            (volume.SizeZ - 1) * 0.5);
+
+        var plane = new VolumeSlicePlane
+        {
+            VolumeCenter = volumeCenter,
+            RowDirection = row,
+            ColumnDirection = col,
+            Normal = normal,
+            PixelSpacingX = spacingX,
+            PixelSpacingY = spacingY,
+            SliceSpacingMm = sliceSpacingMm,
+            ScrollStepMm = sliceSpacingMm,
+            MinOffsetMm = currentOffsetMm,
+            MaxOffsetMm = currentOffsetMm,
+            CurrentOffsetMm = currentOffsetMm,
+            SliceCount = 1,
+            Width = width,
+            Height = height,
+        };
+
+        return VolumeComputeBackend.TryRenderObliqueProjection(volume, plane, 0, VolumeProjectionMode.Mpr, out image);
     }
 
     private static (Vector3D Row, Vector3D Column, Vector3D Normal, double PixelSpacingX, double PixelSpacingY) GetPlaneBasis(
