@@ -44,7 +44,11 @@ public partial class StudyViewerWindow
         panel.AutoOutlineAttempted += OnPanelAutoOutlineAttempted;
         panel.SegmentationMaskCreated += OnPanelSegmentationMaskCreated;
         panel.SegmentationMaskUpdated += OnPanelSegmentationMaskUpdated;
-        panel.VolumeRoiDraftChanged += _ => ScheduleVolumeRoiDraftPanelRefresh();
+        panel.VolumeRoiDraftChanged += _ =>
+        {
+            ScheduleVolumeRoiDraftPanelRefresh();
+            RefreshVolumeRoiDeveloperWorkspacePanel(forceVisible: _volumeRoiDeveloperPanelVisible || _volumeRoiDeveloperPanelPinned);
+        };
     }
 
     private void ApplyMeasurementContext(ViewportSlot slot)
@@ -57,6 +61,7 @@ public partial class StudyViewerWindow
         slot.Panel.SetDeveloperAnatomyOverlays(GetDeveloperAnatomyOverlaysForSlot(slot));
         RefreshMeasurementInsightPanel();
         ScheduleVolumeRoiDraftPanelRefresh();
+        RefreshVolumeRoiDeveloperWorkspacePanel(forceVisible: _volumeRoiDeveloperPanelVisible || _volumeRoiDeveloperPanelPinned);
         RefreshReportPanel();
         if (_anatomyPanelVisible || _anatomyPanelPinned)
         {

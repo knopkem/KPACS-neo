@@ -313,6 +313,12 @@
                                 <TextBlock Text="Rendering" FontSize="11" />
                             </StackPanel>
                         </Button>
+                        <Button x:Name="WorkspaceVolumeRoiDeveloperButton" Classes="workspaceAction" Click="OnWorkspaceVolumeRoiDeveloperClick" ToolTip.Tip="Open the 3D ROI developer workspace to test auto-outline sensitivity, homogenization, and contour-detail parameters.">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <TextBlock Text="ROI" FontWeight="SemiBold" FontSize="11" />
+                                <TextBlock Text="3D Dev" FontSize="11" />
+                            </StackPanel>
+                        </Button>
                         <Button x:Name="WorkspaceReportButton" Classes="workspaceAction" Click="OnWorkspaceReportClick" ToolTip.Tip="Open the floating report panel with created findings, source provenance, and anatomy hints.">
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <TextBlock Text="RP" FontWeight="SemiBold" FontSize="11" />
@@ -1158,6 +1164,134 @@
                                            FontSize="10"
                                            TextWrapping="Wrap" />
                             </StackPanel>
+                        </StackPanel>
+                    </ScrollViewer>
+                </StackPanel>
+            </Border>
+
+            <Border x:Name="VolumeRoiDeveloperPanel"
+                    IsVisible="False"
+                    HorizontalAlignment="Right"
+                    VerticalAlignment="Top"
+                    Margin="0,72,548,0"
+                    Padding="12"
+                    MaxWidth="380"
+                    MinWidth="320"
+                    Background="#E6141820"
+                    BorderBrush="#80D89E73"
+                    BorderThickness="1"
+                    CornerRadius="12"
+                    ZIndex="4">
+                <Border.RenderTransform>
+                    <TranslateTransform />
+                </Border.RenderTransform>
+                <StackPanel Spacing="8">
+                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                        <StackPanel x:Name="VolumeRoiDeveloperPanelDragHandle"
+                                    Spacing="2"
+                                    Cursor="SizeAll"
+                                    PointerPressed="OnVolumeRoiDeveloperPanelHeaderPointerPressed"
+                                    PointerMoved="OnVolumeRoiDeveloperPanelHeaderPointerMoved"
+                                    PointerReleased="OnVolumeRoiDeveloperPanelHeaderPointerReleased">
+                            <TextBlock Text="3D ROI Developer"
+                                       Foreground="#FFF6FBFF"
+                                       FontWeight="SemiBold"
+                                       FontSize="13" />
+                            <TextBlock x:Name="VolumeRoiDeveloperPanelSummaryText"
+                                       Foreground="#FF9DB3C7"
+                                       FontSize="11"
+                                       TextWrapping="Wrap" />
+                        </StackPanel>
+                        <ToggleButton x:Name="VolumeRoiDeveloperPanelPinButton"
+                                      Grid.Column="1"
+                                      Classes="iconToggle"
+                                      Width="30"
+                                      Height="30"
+                                      MinWidth="30"
+                                      Click="OnVolumeRoiDeveloperPanelPinClick"
+                                      ToolTip.Tip="Pin the 3D ROI developer workspace and keep it open for tuning." />
+                    </Grid>
+
+                    <Border Height="1" Background="#334D5F74" />
+
+                    <TextBlock x:Name="VolumeRoiDeveloperPanelHintText"
+                               Foreground="#FFD3E5F5"
+                               FontSize="10"
+                               TextWrapping="Wrap" />
+
+                    <ScrollViewer MaxHeight="520"
+                                  HorizontalScrollBarVisibility="Disabled"
+                                  VerticalScrollBarVisibility="Auto">
+                        <StackPanel Spacing="10">
+                            <Border Background="#1F7AA6D9" BorderBrush="#337AA6D9" BorderThickness="1" CornerRadius="10" Padding="10,8">
+                                <TextBlock x:Name="VolumeRoiDeveloperTargetText"
+                                           Foreground="#FFEAF3FB"
+                                           FontSize="11"
+                                           TextWrapping="Wrap" />
+                            </Border>
+
+                            <WrapPanel Orientation="Horizontal" ItemWidth="92">
+                                <Button x:Name="VolumeRoiDeveloperFastPresetButton"
+                                        Classes="workspaceAction"
+                                        Content="Fast"
+                                        Click="OnVolumeRoiDeveloperFastPresetClick" />
+                                <Button x:Name="VolumeRoiDeveloperBalancedPresetButton"
+                                        Classes="workspaceAction"
+                                        Content="Balanced"
+                                        Click="OnVolumeRoiDeveloperBalancedPresetClick" />
+                                <Button x:Name="VolumeRoiDeveloperRobustPresetButton"
+                                        Classes="workspaceAction"
+                                        Content="Robust"
+                                        Click="OnVolumeRoiDeveloperRobustPresetClick" />
+                                <Button x:Name="VolumeRoiDeveloperResetPresetButton"
+                                        Classes="workspaceAction"
+                                        Content="Reset"
+                                        Click="OnVolumeRoiDeveloperResetPresetClick" />
+                            </WrapPanel>
+
+                            <CheckBox x:Name="VolumeRoiDeveloperUseRobustFilterCheckBox"
+                                      Content="Use robust homogenization filter"
+                                      Foreground="#FFF0F6FC" />
+                            <CheckBox x:Name="VolumeRoiDeveloperAutoRerunCheckBox"
+                                      Content="Re-run latest 3D ROI automatically on apply"
+                                      IsChecked="True"
+                                      Foreground="#FFD5E7F5" />
+
+                            <Grid ColumnDefinitions="Auto,*" RowDefinitions="Auto,Auto,Auto,Auto,Auto,Auto" ColumnSpacing="10" RowSpacing="8">
+                                <TextBlock Grid.Row="0" Text="2D tolerance" Foreground="#FFF0F6FC" VerticalAlignment="Center" />
+                                <TextBox x:Name="VolumeRoiDeveloper2dToleranceTextBox" Grid.Row="0" Grid.Column="1" Watermark="2.6" />
+
+                                <TextBlock Grid.Row="1" Text="3D tolerance" Foreground="#FFF0F6FC" VerticalAlignment="Center" />
+                                <TextBox x:Name="VolumeRoiDeveloper3dToleranceTextBox" Grid.Row="1" Grid.Column="1" Watermark="2.6" />
+
+                                <TextBlock Grid.Row="2" Text="Signature tolerance" Foreground="#FFF0F6FC" VerticalAlignment="Center" />
+                                <TextBox x:Name="VolumeRoiDeveloperSignatureToleranceTextBox" Grid.Row="2" Grid.Column="1" Watermark="1.0" />
+
+                                <TextBlock Grid.Row="3" Text="Seed radius mm" Foreground="#FFF0F6FC" VerticalAlignment="Center" />
+                                <TextBox x:Name="VolumeRoiDeveloperSeedRadiusTextBox" Grid.Row="3" Grid.Column="1" Watermark="4.5" />
+
+                                <TextBlock Grid.Row="4" Text="2D outline points" Foreground="#FFF0F6FC" VerticalAlignment="Center" />
+                                <TextBox x:Name="VolumeRoiDeveloperPolygonBudgetTextBox" Grid.Row="4" Grid.Column="1" Watermark="48" />
+
+                                <TextBlock Grid.Row="5" Text="3D contour points" Foreground="#FFF0F6FC" VerticalAlignment="Center" />
+                                <TextBox x:Name="VolumeRoiDeveloperVolumeBudgetTextBox" Grid.Row="5" Grid.Column="1" Watermark="40" />
+                            </Grid>
+
+                            <TextBlock x:Name="VolumeRoiDeveloperPanelDetailsText"
+                                       Foreground="#FF9DB3C7"
+                                       FontSize="10"
+                                       TextWrapping="Wrap" />
+
+                            <WrapPanel Orientation="Horizontal" ItemWidth="150">
+                                <Button x:Name="VolumeRoiDeveloperApplyButton"
+                                        Classes="workspaceAction"
+                                        Content="Apply to active viewport"
+                                        Click="OnVolumeRoiDeveloperApplyClick" />
+                                <Button x:Name="VolumeRoiDeveloperRerunButton"
+                                        Classes="workspaceAction"
+                                        Content="Re-run latest 3D ROI"
+                                        Click="OnVolumeRoiDeveloperRerunClick" />
+                            </WrapPanel>
                         </StackPanel>
                     </ScrollViewer>
                 </StackPanel>
