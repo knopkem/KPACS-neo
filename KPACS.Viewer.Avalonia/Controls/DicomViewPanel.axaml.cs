@@ -434,8 +434,8 @@ public partial class DicomViewPanel : UserControl
                 CreateDvrCameraViewMenuItem("Front View", DvrCameraViewPreset.Back),
                 CreateDvrCameraViewMenuItem("Left Side View", DvrCameraViewPreset.Left),
                 CreateDvrCameraViewMenuItem("Right Side View", DvrCameraViewPreset.Right),
-                CreateDvrCameraViewMenuItem("View From Below", DvrCameraViewPreset.Top),
-                CreateDvrCameraViewMenuItem("View From Above", DvrCameraViewPreset.Bottom),
+                CreateDvrCameraViewMenuItem("View From Above", DvrCameraViewPreset.Top),
+                CreateDvrCameraViewMenuItem("View From Below", DvrCameraViewPreset.Bottom),
             }
         };
     }
@@ -977,7 +977,15 @@ public partial class DicomViewPanel : UserControl
 
         if (mode == VolumeProjectionMode.Dvr)
         {
+            _volumeOrientation = SliceOrientation.Axial;
+            _planeTiltAroundColumn = 0;
+            _planeTiltAroundRow = 0;
+            _planeOffsetMm = 0;
+            _volumeSliceIndex = Math.Max(0, VolumeReslicer.GetSliceCount(_volume, SliceOrientation.Axial) / 2);
             _projectionThicknessMm = GetMaximumProjectionThicknessMm();
+            _dvrCameraViewPreset = DvrCameraViewPreset.Bottom;
+            (_dvrInitialForward, _dvrInitialUp) = GetStandardDvrCameraBasis(_dvrCameraViewPreset);
+            _hasExplicitDvrCameraBasis = true;
             // Initialise the 3D camera; first render will go through ShowVolumeSlice
             // which detects DVR mode and uses the arbitrary-view renderer.
             InitializeDvrCamera(resetTransferWindow: true);

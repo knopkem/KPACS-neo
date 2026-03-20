@@ -750,8 +750,8 @@ public partial class DicomViewPanel
         DvrCameraViewPreset.Back => "📷 Front",
         DvrCameraViewPreset.Left => "📷 Left",
         DvrCameraViewPreset.Right => "📷 Right",
-        DvrCameraViewPreset.Top => "📷 Below",
-        DvrCameraViewPreset.Bottom => "📷 Above",
+        DvrCameraViewPreset.Top => "📷 Above",
+        DvrCameraViewPreset.Bottom => "📷 Below",
         DvrCameraViewPreset.Custom => "📷 Custom",
         _ => "📷 Camera",
     };
