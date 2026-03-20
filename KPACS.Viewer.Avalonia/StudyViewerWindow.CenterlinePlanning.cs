@@ -1,9 +1,11 @@
+using Avalonia;
 using Avalonia.Interactivity;
 using Avalonia.Input;
 using Avalonia.Threading;
 using System.Diagnostics;
 using KPACS.Viewer.Controls;
 using KPACS.Viewer.Models;
+using KPACS.Viewer.Rendering;
 using KPACS.Viewer.Services;
 
 namespace KPACS.Viewer;
@@ -257,7 +259,7 @@ public partial class StudyViewerWindow
     private async Task ComputeCenterlineAsync(CenterlineSeedSet seedSet, int version, bool showSuccessToast, CancellationToken cancellationToken)
     {
         Stopwatch stopwatch = Stopwatch.StartNew();
-        if (!TryResolveCenterlineMask(seedSet, out CenterlineSeedSet resolvedSeedSet, out SegmentationMask3D mask))
+        if (!TryResolveCenterlineMask(seedSet, out CenterlineSeedSet resolvedSeedSet, out SegmentationMask3D mask, allowMeasurementMaskReconstruction: true))
         {
             await Dispatcher.UIThread.InvokeAsync(() =>
             {
@@ -331,7 +333,11 @@ public partial class StudyViewerWindow
         });
     }
 
-    private bool TryResolveCenterlineMask(CenterlineSeedSet seedSet, out CenterlineSeedSet resolvedSeedSet, out SegmentationMask3D mask)
+    private bool TryResolveCenterlineMask(
+        CenterlineSeedSet seedSet,
+        out CenterlineSeedSet resolvedSeedSet,
+        out SegmentationMask3D mask,
+        bool allowMeasurementMaskReconstruction = false)
     {
         resolvedSeedSet = seedSet;
         mask = null!;
@@ -353,6 +359,18 @@ public partial class StudyViewerWindow
                 mask = selectedMask;
                 return true;
             }
+
+            if (allowMeasurementMaskReconstruction &&
+                TryResolveMaskFromVolumeRoiMeasurement(selectedMeasurement, seedSet, out resolvedSeedSet, out mask))
+            {
+                return true;
+            }
+        }
+
+        if (allowMeasurementMaskReconstruction &&
+            TryResolveMaskFromAnyCompatibleVolumeRoiMeasurement(seedSet, out resolvedSeedSet, out mask))
+        {
+            return true;
         }
 
         string seedSeriesInstanceUid = seedSet.StartSeed?.SeriesInstanceUid
@@ -372,6 +390,239 @@ public partial class StudyViewerWindow
         resolvedSeedSet = seedSet.BindSegmentationMask(matchedMask.Id);
         mask = matchedMask;
         return true;
+    }
+
+    private bool TryResolveMaskFromVolumeRoiMeasurement(
+        StudyMeasurement? measurement,
+        CenterlineSeedSet seedSet,
+        out CenterlineSeedSet resolvedSeedSet,
+        out SegmentationMask3D mask)
+    {
+        resolvedSeedSet = seedSet;
+        mask = null!;
+
+        if (measurement is null ||
+            measurement.Kind != MeasurementKind.VolumeRoi ||
+            measurement.VolumeContours is not { Length: > 0 } ||
+            !TryResolveSeriesVolumeForCenterlineMeasurement(measurement, out SeriesVolume volume) ||
+            !TryEnsureMeasurementSegmentationMask(measurement, volume, out StudyMeasurement updatedMeasurement, out mask))
+        {
+            return false;
+        }
+
+        resolvedSeedSet = seedSet.BindSegmentationMask(mask.Id);
+        if (_selectedMeasurementId == measurement.Id)
+        {
+            _selectedMeasurementId = updatedMeasurement.Id;
+        }
+
+        return true;
+    }
+
+    private bool TryResolveMaskFromAnyCompatibleVolumeRoiMeasurement(
+        CenterlineSeedSet seedSet,
+        out CenterlineSeedSet resolvedSeedSet,
+        out SegmentationMask3D mask)
+    {
+        resolvedSeedSet = seedSet;
+        mask = null!;
+
+        foreach (StudyMeasurement measurement in _studyMeasurements
+            .Where(candidate => candidate.Kind == MeasurementKind.VolumeRoi && candidate.VolumeContours is { Length: > 0 })
+            .Reverse())
+        {
+            if (!TryResolveMaskFromVolumeRoiMeasurement(measurement, seedSet, out resolvedSeedSet, out mask))
+            {
+                continue;
+            }
+
+            return true;
+        }
+
+        return false;
+    }
+
+    private bool TryResolveSeriesVolumeForCenterlineMeasurement(StudyMeasurement measurement, out SeriesVolume volume)
+    {
+        ViewportSlot? slot = _slots
+            .Where(candidate => candidate.Volume is not null)
+            .OrderByDescending(candidate => ReferenceEquals(candidate, _activeSlot))
+            .FirstOrDefault(candidate => IsMeasurementCompatibleWithVolume(measurement, candidate.Volume!));
+
+        if (slot?.Volume is null)
+        {
+            volume = null!;
+            return false;
+        }
+
+        volume = slot.Volume;
+        return true;
+    }
+
+    private static bool IsMeasurementCompatibleWithVolume(StudyMeasurement measurement, SeriesVolume volume)
+    {
+        if (string.IsNullOrWhiteSpace(measurement.FrameOfReferenceUid) ||
+            !string.Equals(measurement.FrameOfReferenceUid, volume.FrameOfReferenceUid, StringComparison.Ordinal))
+        {
+            return false;
+        }
+
+        return string.IsNullOrWhiteSpace(measurement.AcquisitionNumber) ||
+            string.IsNullOrWhiteSpace(volume.AcquisitionNumber) ||
+            string.Equals(measurement.AcquisitionNumber, volume.AcquisitionNumber, StringComparison.Ordinal);
+    }
+
+    private bool TryEnsureMeasurementSegmentationMask(
+        StudyMeasurement measurement,
+        SeriesVolume volume,
+        out StudyMeasurement updatedMeasurement,
+        out SegmentationMask3D mask)
+    {
+        updatedMeasurement = measurement;
+        mask = null!;
+
+        if (measurement.SegmentationMaskId is Guid existingMaskId &&
+            _segmentationMasks.TryGetValue(existingMaskId, out SegmentationMask3D? existingMask))
+        {
+            mask = existingMask;
+            return true;
+        }
+
+        if (!TryCreateSegmentationMaskFromVolumeRoiMeasurement(measurement, volume, out mask))
+        {
+            return false;
+        }
+
+        updatedMeasurement = measurement.WithSegmentationMask(mask.Id);
+        int measurementIndex = _studyMeasurements.FindIndex(candidate => candidate.Id == measurement.Id);
+        if (measurementIndex >= 0)
+        {
+            _studyMeasurements[measurementIndex] = updatedMeasurement;
+        }
+
+        _segmentationMasks[mask.Id] = mask;
+        return true;
+    }
+
+    private static bool TryCreateSegmentationMaskFromVolumeRoiMeasurement(
+        StudyMeasurement measurement,
+        SeriesVolume volume,
+        out SegmentationMask3D mask)
+    {
+        mask = null!;
+        if (measurement.VolumeContours is not { Length: > 0 } contours)
+        {
+            return false;
+        }
+
+        VolumeGridGeometry geometry = new(
+            volume.SizeX,
+            volume.SizeY,
+            volume.SizeZ,
+            volume.SpacingX > 0 ? volume.SpacingX : 1.0,
+            volume.SpacingY > 0 ? volume.SpacingY : 1.0,
+            volume.SpacingZ > 0 ? volume.SpacingZ : 1.0,
+            volume.Origin,
+            volume.RowDirection.Normalize(),
+            volume.ColumnDirection.Normalize(),
+            volume.Normal.Normalize(),
+            volume.FrameOfReferenceUid);
+
+        SegmentationMaskBuffer buffer = new(geometry);
+        bool wroteForeground = false;
+
+        foreach (VolumeRoiContour contour in contours.Where(candidate => candidate.IsClosed && candidate.Anchors.Length >= 3))
+        {
+            Point[] voxelPolygon = contour.Anchors
+                .Where(anchor => anchor.PatientPoint is not null)
+                .Select(anchor => volume.PatientToVoxel(anchor.PatientPoint!.Value))
+                .Select(voxel => new Point(voxel.X, voxel.Y))
+                .ToArray();
+            if (voxelPolygon.Length < 3)
+            {
+                continue;
+            }
+
+            double[] voxelZs = contour.Anchors
+                .Where(anchor => anchor.PatientPoint is not null)
+                .Select(anchor => volume.PatientToVoxel(anchor.PatientPoint!.Value).Z)
+                .ToArray();
+            if (voxelZs.Length == 0)
+            {
+                continue;
+            }
+
+            int z = (int)Math.Round(voxelZs.Average());
+            if (z < 0 || z >= geometry.SizeZ)
+            {
+                continue;
+            }
+
+            int minX = Math.Max(0, (int)Math.Floor(voxelPolygon.Min(point => point.X)));
+            int maxX = Math.Min(geometry.SizeX - 1, (int)Math.Ceiling(voxelPolygon.Max(point => point.X)));
+            int minY = Math.Max(0, (int)Math.Floor(voxelPolygon.Min(point => point.Y)));
+            int maxY = Math.Min(geometry.SizeY - 1, (int)Math.Ceiling(voxelPolygon.Max(point => point.Y)));
+            if (minX > maxX || minY > maxY)
+            {
+                continue;
+            }
+
+            for (int y = minY; y <= maxY; y++)
+            {
+                for (int x = minX; x <= maxX; x++)
+                {
+                    if (!IsPointInsideVoxelPolygon(new Point(x + 0.5, y + 0.5), voxelPolygon))
+                    {
+                        continue;
+                    }
+
+                    buffer.Set(x, y, z, true);
+                    wroteForeground = true;
+                }
+            }
+        }
+
+        if (!wroteForeground)
+        {
+            return false;
+        }
+
+        DateTimeOffset now = DateTimeOffset.UtcNow;
+        mask = new SegmentationMask3D(
+            Guid.NewGuid(),
+            "3D ROI vessel mask",
+            volume.SeriesInstanceUid,
+            volume.FrameOfReferenceUid,
+            string.Empty,
+            geometry,
+            buffer.ToStorage(),
+            new SegmentationMaskMetadata(
+                SegmentationMaskSourceKind.AutoRoi,
+                now,
+                now,
+                sourceMeasurementId: measurement.Id.ToString("D"),
+                notes: "Reconstructed from finalized 3D ROI contours for centerline extraction.",
+                revision: 0,
+                buffer.ComputeStatistics()));
+        return true;
+    }
+
+    private static bool IsPointInsideVoxelPolygon(Point point, IReadOnlyList<Point> polygon)
+    {
+        bool inside = false;
+        for (int index = 0, previous = polygon.Count - 1; index < polygon.Count; previous = index++)
+        {
+            Point currentPoint = polygon[index];
+            Point previousPoint = polygon[previous];
+            bool intersects = ((currentPoint.Y > point.Y) != (previousPoint.Y > point.Y)) &&
+                              (point.X < ((previousPoint.X - currentPoint.X) * (point.Y - currentPoint.Y) / ((previousPoint.Y - currentPoint.Y) + double.Epsilon)) + currentPoint.X);
+            if (intersects)
+            {
+                inside = !inside;
+            }
+        }
+
+        return inside;
     }
 
     private void OnSegmentationMaskChangedForCenterline(Guid segmentationMaskId)

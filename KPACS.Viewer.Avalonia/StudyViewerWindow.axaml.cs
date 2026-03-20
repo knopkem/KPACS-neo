@@ -823,6 +823,7 @@ public partial class StudyViewerWindow : Window
         RefreshCenterlinePanels();
         RefreshReportPanel();
         RefreshRenderingWorkspacePanel();
+        RefreshVolumeRoiDeveloperWorkspacePanel();
         UpdateStatus();
         ScheduleMeasurementSessionSave();
     }
