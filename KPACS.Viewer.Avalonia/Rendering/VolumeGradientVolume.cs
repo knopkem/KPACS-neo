@@ -26,6 +26,13 @@ public sealed class VolumeGradientVolume
 
     public static VolumeGradientVolume Create(SeriesVolume volume)
     {
+        // Try GPU-accelerated gradient computation first.
+        if (VolumeComputeBackend.TryComputeGradientVolume(volume, out float[] gpuGradients))
+        {
+            return new VolumeGradientVolume(volume.SizeX, volume.SizeY, volume.SizeZ, gpuGradients);
+        }
+
+        // CPU fallback with Parallel.For.
         float[] gradients = new float[volume.SizeX * volume.SizeY * volume.SizeZ * 3];
         double spacingX = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
         double spacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;

@@ -1,3 +1,4 @@
+using System.Diagnostics;
 using System.Runtime.CompilerServices;
 using System.Threading;
 using KPACS.Viewer.Models;
@@ -47,6 +48,27 @@ public static class VolumeComputeBackend
     private static readonly AsyncLocal<VolumeComputePreference?> CurrentPreferenceOverride = new();
     private static readonly Lazy<RuntimeState> Runtime = new(CreateRuntime, LazyThreadSafetyMode.ExecutionAndPublication);
     private static VolumeComputePreference _defaultPreference = VolumeComputePreference.Auto;
+
+    /// <summary>
+    /// Raised on the calling thread whenever an OpenCL kernel dispatch fails and the CPU fallback is used.
+    /// Subscribers can use this to surface diagnostics in the UI.
+    /// The string argument contains the error detail.
+    /// </summary>
+    public static event Action<string>? GpuFallbackOccurred;
+
+    /// <summary>
+    /// When <c>true</c>, callers must NOT fall back to CPU rendering when GPU dispatch
+    /// returns <c>false</c>. This forces blank output, making silent GPU failures immediately visible.
+    /// </summary>
+    public static bool CpuFallbackDisabled { get; set; }
+
+    private static int _consecutiveGpuFailures;
+
+    /// <summary>
+    /// Number of consecutive GPU dispatch failures since the last successful GPU render.
+    /// Resets to zero on any successful GPU dispatch.
+    /// </summary>
+    public static int ConsecutiveGpuFailures => _consecutiveGpuFailures;
 
     public static VolumeComputeBackendStatus CurrentStatus => Runtime.Value.Status;
 
@@ -150,6 +172,12 @@ public static class VolumeComputeBackend
         catch { return default!; }
     }
 
+    private static string FormatKernelTime()
+    {
+        double? ms = LastKernelTimeMs;
+        return ms.HasValue ? $" kernel={ms.Value:0.000}ms" : " kernel=N/A";
+    }
+
     public static bool TryRenderProjection(
         SeriesVolume volume,
         SliceOrientation orientation,
@@ -161,18 +189,23 @@ public static class VolumeComputeBackend
     {
         if (Preference == VolumeComputePreference.CpuOnly)
         {
+            Console.Error.WriteLine($"[GPU·Projection] SKIPPED — preference is CpuOnly");
             image = new ReslicedImage();
             return false;
         }
 
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
-        if (renderer is not null && renderer.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, mode, out image))
+        if (renderer is null)
         {
-            return true;
+            Console.Error.WriteLine($"[GPU·Projection] SKIPPED — renderer is null");
+            image = new ReslicedImage();
+            return false;
         }
 
-        image = new ReslicedImage();
-        return false;
+        bool success = renderer.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, mode, out image);
+        if (!success)
+            Console.Error.WriteLine($"[GPU·Projection] FAILED mode={mode} size={reference.Width}×{reference.Height} slices={startSlice}–{endSlice}");
+        return success;
     }
 
     public static bool TryRenderDvrView(
@@ -183,18 +216,23 @@ public static class VolumeComputeBackend
     {
         if (Preference == VolumeComputePreference.CpuOnly)
         {
+            Console.Error.WriteLine($"[GPU·DVR] SKIPPED — preference is CpuOnly");
             image = new ReslicedImage();
             return false;
         }
 
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
-        if (renderer is not null && renderer.TryRenderDvrView(volume, state, transferFunction, out image))
+        if (renderer is null)
         {
-            return true;
+            Console.Error.WriteLine($"[GPU·DVR] SKIPPED — renderer is null");
+            image = new ReslicedImage();
+            return false;
         }
 
-        image = new ReslicedImage();
-        return false;
+        bool success = renderer.TryRenderDvrView(volume, state, transferFunction, out image);
+        if (!success)
+            Console.Error.WriteLine($"[GPU·DVR] FAILED size={state.OutputWidth}×{state.OutputHeight}");
+        return success;
     }
 
     public static bool TryRenderObliqueProjection(
@@ -206,18 +244,175 @@ public static class VolumeComputeBackend
     {
         if (Preference == VolumeComputePreference.CpuOnly)
         {
+            Console.Error.WriteLine($"[GPU·Oblique] SKIPPED — preference is CpuOnly");
             image = new ReslicedImage();
             return false;
         }
 
         OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
-        if (renderer is not null && renderer.TryRenderObliqueProjection(volume, plane, thicknessMm, mode, out image))
+        if (renderer is null)
         {
-            return true;
+            Console.Error.WriteLine($"[GPU·Oblique] SKIPPED — renderer is null");
+            image = new ReslicedImage();
+            return false;
         }
 
-        image = new ReslicedImage();
-        return false;
+        bool success = renderer.TryRenderObliqueProjection(volume, plane, thicknessMm, mode, out image);
+        if (!success)
+            Console.Error.WriteLine($"[GPU·Oblique] FAILED mode={mode} size={plane.Width}×{plane.Height} slab={thicknessMm:0.0}mm");
+        return success;
+    }
+
+    /// <summary>
+    /// Attempts to render a curved MPR image on the GPU.
+    /// Each column corresponds to a centerline station; each row samples perpendicular to the path.
+    /// Returns <c>false</c> if OpenCL is unavailable, letting the caller fall back to CPU.
+    /// </summary>
+    public static bool TryRenderCurvedMpr(
+        SeriesVolume volume,
+        ReadOnlySpan<float> frameData,
+        int pathPointCount,
+        int imageHeight,
+        double pixelSpacingMm,
+        int slabSampleCount,
+        double slabThicknessMm,
+        out short[] pixels)
+    {
+        pixels = [];
+        if (Preference == VolumeComputePreference.CpuOnly)
+        {
+            Console.Error.WriteLine($"[GPU·CurvedMPR] SKIPPED — preference is CpuOnly");
+            return false;
+        }
+
+        OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
+        if (renderer is null)
+        {
+            Console.Error.WriteLine($"[GPU·CurvedMPR] SKIPPED — renderer is null");
+            return false;
+        }
+
+        bool success = renderer.TryRenderCurvedMpr(volume, frameData, pathPointCount, imageHeight, pixelSpacingMm, slabSampleCount, slabThicknessMm, out pixels);
+        if (!success)
+            Console.Error.WriteLine($"[GPU·CurvedMPR] FAILED stations={pathPointCount} height={imageHeight} slab={slabThicknessMm:0.0}mm");
+        return success;
+    }
+
+    /// <summary>
+    /// Attempts to compute the 3D gradient volume on the GPU.
+    /// Returns <c>false</c> if OpenCL is unavailable.
+    /// </summary>
+    public static bool TryComputeGradientVolume(SeriesVolume volume, out float[] gradients)
+    {
+        gradients = [];
+        if (Preference == VolumeComputePreference.CpuOnly)
+        {
+            Console.Error.WriteLine($"[GPU·Gradient] SKIPPED — preference is CpuOnly");
+            return false;
+        }
+
+        OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
+        if (renderer is null)
+        {
+            Console.Error.WriteLine($"[GPU·Gradient] SKIPPED — renderer is null");
+            return false;
+        }
+
+        bool success = renderer.TryComputeGradientVolume(volume, out gradients);
+        if (!success)
+            Console.Error.WriteLine($"[GPU·Gradient] FAILED volume={volume.SizeX}×{volume.SizeY}×{volume.SizeZ}");
+        return success;
+    }
+
+    /// <summary>
+    /// Attempts to render a single cross-section image at a centerline station on the GPU.
+    /// The plane is defined by center point, normal (tangent), and two perpendicular axes.
+    /// </summary>
+    public static bool TryRenderCrossSection(
+        SeriesVolume volume,
+        Models.Vector3D center,
+        Models.Vector3D rowDir,
+        Models.Vector3D colDir,
+        double fieldOfViewMm,
+        int outputSize,
+        out short[] pixels)
+    {
+        pixels = [];
+        if (Preference == VolumeComputePreference.CpuOnly)
+        {
+            Console.Error.WriteLine($"[GPU·CrossSection] SKIPPED — preference is CpuOnly");
+            return false;
+        }
+
+        OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
+        if (renderer is null)
+        {
+            Console.Error.WriteLine($"[GPU·CrossSection] SKIPPED — renderer is null");
+            return false;
+        }
+
+        bool success = renderer.TryRenderCrossSection(volume, center, rowDir, colDir, fieldOfViewMm, outputSize, out pixels);
+        if (!success)
+            Console.Error.WriteLine($"[GPU·CrossSection] FAILED size={outputSize} fov={fieldOfViewMm:0.0}mm");
+        return success;
+    }
+
+    /// <summary>
+    /// Attempts GPU-accelerated 3D region growing from a seed voxel.
+    /// The GPU pre-computes a robust homogenised sub-volume, then runs iterative
+    /// parallel flood-fill until convergence.
+    /// Returns the accepted voxel set as a <see cref="HashSet{T}"/> of linear
+    /// voxel keys (z * sizeY * sizeX + y * sizeX + x).
+    /// </summary>
+    public static bool TryGpuSegmentRegion(
+        SeriesVolume volume,
+        int seedX, int seedY, int seedZ,
+        float seedHomogenizedValue,
+        float tolerance,
+        float gradientLimit,
+        int maxRadiusX, int maxRadiusY, int maxRadiusZ,
+        int maxVoxels,
+        out HashSet<int> region,
+        out int iterationCount)
+    {
+        region = [];
+        iterationCount = 0;
+
+        if (Preference == VolumeComputePreference.CpuOnly)
+        {
+            return false;
+        }
+
+        OpenClVolumeRenderer? renderer = Runtime.Value.Renderer;
+        if (renderer is null)
+        {
+            return false;
+        }
+
+        bool success = renderer.TrySegmentRegion(
+            volume, seedX, seedY, seedZ,
+            seedHomogenizedValue, tolerance, gradientLimit,
+            maxRadiusX, maxRadiusY, maxRadiusZ,
+            maxVoxels, out region, out iterationCount);
+        if (!success)
+            Console.Error.WriteLine($"[GPU·SegmentRegion] FAILED seed=({seedX},{seedY},{seedZ}) tol={tolerance:0.0}");
+        return success;
+    }
+
+    /// <summary>Logs the GPU failure and notifies subscribers. Called from every GPU catch block.</summary>
+    internal static void NotifyGpuFallback(string errorDetail)
+    {
+        int count = Interlocked.Increment(ref _consecutiveGpuFailures);
+        string message = $"[VolumeComputeBackend] GPU fallback #{count}: {errorDetail}";
+        Trace.TraceWarning(message);
+        Console.Error.WriteLine(message);
+        try { GpuFallbackOccurred?.Invoke(errorDetail); } catch { /* subscriber fault isolation */ }
+    }
+
+    /// <summary>Resets the consecutive failure counter. Called from every successful GPU dispatch.</summary>
+    internal static void ResetGpuFailureCount()
+    {
+        Interlocked.Exchange(ref _consecutiveGpuFailures, 0);
     }
 
     private static RuntimeState CreateRuntime()
@@ -227,13 +422,22 @@ public static class VolumeComputeBackend
             OpenClVolumeRenderer? renderer = OpenClVolumeRenderer.TryCreate(out string detail);
             if (renderer is not null)
             {
+                string msg = $"[VolumeComputeBackend] OpenCL initialized: {renderer.Status.DeviceName} — {renderer.Status.Detail}";
+                Trace.TraceInformation(msg);
+                Console.Error.WriteLine(msg);
                 return new RuntimeState(renderer, renderer.Status);
             }
 
+            string noRendererMsg = $"[VolumeComputeBackend] OpenCL initialization returned no renderer: {detail}";
+            Trace.TraceWarning(noRendererMsg);
+            Console.Error.WriteLine(noRendererMsg);
             return new RuntimeState(null, VolumeComputeBackendStatus.Cpu(detail));
         }
         catch (Exception ex)
         {
+            string failMsg = $"[VolumeComputeBackend] OpenCL initialization failed: {ex}";
+            Trace.TraceError(failMsg);
+            Console.Error.WriteLine(failMsg);
             return new RuntimeState(null, VolumeComputeBackendStatus.Cpu($"OpenCL initialization failed: {ex.Message}"));
         }
     }
@@ -983,6 +1187,300 @@ __kernel void RenderObliqueSlab(
 
     output[y * outputWidth + x] = (short)clamp((int)round(finalValue), -32768, 32767);
 }
+
+// ===========================================================================================
+// Curved MPR kernel — renders a straightened MPR along a centerline path.
+// Each work-item produces one pixel at (pathIndex, rowIndex).
+// frameData layout per station (12 floats):
+//   [0..2]  patientPoint (x, y, z)
+//   [3..5]  normal (perpendicular-up direction)
+//   [6..8]  binormal (MIP slab direction)
+//   [9..11] (reserved / padding)
+// ===========================================================================================
+__kernel void RenderCurvedMpr(
+    __global const short* volume,
+    int sizeX, int sizeY, int sizeZ,
+    float spacingX, float spacingY, float spacingZ,
+    float originX, float originY, float originZ,
+    float rowDirX, float rowDirY, float rowDirZ,
+    float colDirX, float colDirY, float colDirZ,
+    float nrmDirX, float nrmDirY, float nrmDirZ,
+    __global const float* frameData,
+    int pathPointCount,
+    int imageHeight,
+    float pixelSpacingMm,
+    int slabSampleCount,
+    float slabHalfThicknessMm,
+    __global short* output)
+{
+    int x = get_global_id(0); // path station index
+    int y = get_global_id(1); // row index in cross-section
+    if (x >= pathPointCount || y >= imageHeight) return;
+
+    int frameOffset = x * 12;
+    float3 patientPt = (float3)(frameData[frameOffset], frameData[frameOffset + 1], frameData[frameOffset + 2]);
+    float3 normalDir = (float3)(frameData[frameOffset + 3], frameData[frameOffset + 4], frameData[frameOffset + 5]);
+    float3 binormalDir = (float3)(frameData[frameOffset + 6], frameData[frameOffset + 7], frameData[frameOffset + 8]);
+
+    float halfHeight = ((float)(imageHeight - 1)) * 0.5f;
+    float offsetMm = (halfHeight - (float)y) * pixelSpacingMm;
+    float3 sampleCenter = patientPt + normalDir * offsetMm;
+
+    // Patient-to-voxel inverse transform
+    float3 origin = (float3)(originX, originY, originZ);
+    float3 volRow = (float3)(rowDirX, rowDirY, rowDirZ);
+    float3 volCol = (float3)(colDirX, colDirY, colDirZ);
+    float3 volNrm = (float3)(nrmDirX, nrmDirY, nrmDirZ);
+    float invSX = native_recip(fmax(spacingX, 1.0e-6f));
+    float invSY = native_recip(fmax(spacingY, 1.0e-6f));
+    float invSZ = native_recip(fmax(spacingZ, 1.0e-6f));
+
+    float maxVal = -MAXFLOAT;
+
+    if (slabSampleCount <= 1 || slabHalfThicknessMm <= 0.125f)
+    {
+        float3 rel = sampleCenter - origin;
+        float vx = dot(rel, volRow) * invSX;
+        float vy = dot(rel, volCol) * invSY;
+        float vz = dot(rel, volNrm) * invSZ;
+        int valid = 0;
+        maxVal = sample_trilinear(volume, sizeX, sizeY, sizeZ, vx, vy, vz, &valid);
+        if (valid == 0) maxVal = 0.0f;
+    }
+    else
+    {
+        for (int si = 0; si < slabSampleCount; si++)
+        {
+            float t = (slabSampleCount == 1) ? 0.0f : (float)si / (float)(slabSampleCount - 1);
+            float slabOffset = -slabHalfThicknessMm + t * 2.0f * slabHalfThicknessMm;
+            float3 pt = sampleCenter + binormalDir * slabOffset;
+            float3 rel = pt - origin;
+            float vx = dot(rel, volRow) * invSX;
+            float vy = dot(rel, volCol) * invSY;
+            float vz = dot(rel, volNrm) * invSZ;
+            int valid = 0;
+            float val = sample_trilinear(volume, sizeX, sizeY, sizeZ, vx, vy, vz, &valid);
+            if (valid != 0 && val > maxVal) maxVal = val;
+        }
+        if (maxVal <= -MAXFLOAT + 1.0f) maxVal = 0.0f;
+    }
+
+    output[y * pathPointCount + x] = (short)clamp((int)round(maxVal), -32768, 32767);
+}
+
+// ===========================================================================================
+// Gradient volume kernel — computes central-difference gradient for every voxel.
+// Output: float buffer with 3 components per voxel (gx, gy, gz) in row-major order.
+// ===========================================================================================
+__kernel void ComputeGradientVolume(
+    __global const short* volume,
+    int sizeX, int sizeY, int sizeZ,
+    float invSpacing2X, float invSpacing2Y, float invSpacing2Z,
+    __global float* gradients)
+{
+    int x = get_global_id(0);
+    int y = get_global_id(1);
+    int z = get_global_id(2);
+    if (x >= sizeX || y >= sizeY || z >= sizeZ) return;
+
+    int xm = max(x - 1, 0);
+    int xp = min(x + 1, sizeX - 1);
+    int ym = max(y - 1, 0);
+    int yp = min(y + 1, sizeY - 1);
+    int zm = max(z - 1, 0);
+    int zp = min(z + 1, sizeZ - 1);
+
+    float gx = ((float)volume[z * sizeY * sizeX + y * sizeX + xp] - (float)volume[z * sizeY * sizeX + y * sizeX + xm]) * invSpacing2X;
+    float gy = ((float)volume[z * sizeY * sizeX + yp * sizeX + x] - (float)volume[z * sizeY * sizeX + ym * sizeX + x]) * invSpacing2Y;
+    float gz = ((float)volume[zp * sizeY * sizeX + y * sizeX + x] - (float)volume[zm * sizeY * sizeX + y * sizeX + x]) * invSpacing2Z;
+
+    int offset = ((z * sizeY + y) * sizeX + x) * 3;
+    gradients[offset]     = gx;
+    gradients[offset + 1] = gy;
+    gradients[offset + 2] = gz;
+}
+
+// ===========================================================================================
+// Cross-section kernel — renders a single perpendicular slice at a centerline station.
+// Plane defined by center, row direction, column direction, field-of-view, output size.
+// Single-slice (no slab) for speed — used for the cross-section navigator.
+// ===========================================================================================
+__kernel void RenderCrossSection(
+    __global const short* volume,
+    int sizeX, int sizeY, int sizeZ,
+    float originX, float originY, float originZ,
+    float volRowX, float volRowY, float volRowZ,
+    float volColX, float volColY, float volColZ,
+    float volNrmX, float volNrmY, float volNrmZ,
+    float invSX, float invSY, float invSZ,
+    float centerX, float centerY, float centerZ,
+    float planeRowX, float planeRowY, float planeRowZ,
+    float planeColX, float planeColY, float planeColZ,
+    float halfFovMm,
+    int outputSize,
+    __global short* output)
+{
+    int col = get_global_id(0);
+    int row = get_global_id(1);
+    if (col >= outputSize || row >= outputSize) return;
+
+    float u = -halfFovMm + ((float)col + 0.5f) * (2.0f * halfFovMm / (float)outputSize);
+    float v = -halfFovMm + ((float)row + 0.5f) * (2.0f * halfFovMm / (float)outputSize);
+
+    float3 pt = (float3)(centerX + planeRowX * u + planeColX * v,
+                         centerY + planeRowY * u + planeColY * v,
+                         centerZ + planeRowZ * u + planeColZ * v);
+
+    float3 origin = (float3)(originX, originY, originZ);
+    float3 volRow = (float3)(volRowX, volRowY, volRowZ);
+    float3 volCol = (float3)(volColX, volColY, volColZ);
+    float3 volNrm = (float3)(volNrmX, volNrmY, volNrmZ);
+    float3 rel = pt - origin;
+    float vx = dot(rel, volRow) * invSX;
+    float vy = dot(rel, volCol) * invSY;
+    float vz = dot(rel, volNrm) * invSZ;
+
+    int valid = 0;
+    float val = sample_trilinear(volume, sizeX, sizeY, sizeZ, vx, vy, vz, &valid);
+    output[row * outputSize + col] = valid != 0 ? (short)clamp((int)round(val), -32768, 32767) : (short)0;
+}
+
+// ── GPU-accelerated region growing ──────────────────────────────────────────
+// Kernel 1: Compute a robust homogenised value (median + MAD filter) for every
+//           voxel inside the supplied bounding box.  Runs once before the
+//           iterative flood fill.
+__kernel void HomogenizeVolume(
+    __global const short* volume,
+    __global float* homogenized,
+    int sizeX, int sizeY, int sizeZ,
+    int boxMinX, int boxMinY, int boxMinZ,
+    int boxSizeX, int boxSizeY, int boxSizeZ)
+{
+    int lx = get_global_id(0);
+    int ly = get_global_id(1);
+    int lz = get_global_id(2);
+    if (lx >= boxSizeX || ly >= boxSizeY || lz >= boxSizeZ) return;
+
+    int gx = boxMinX + lx;
+    int gy = boxMinY + ly;
+    int gz = boxMinZ + lz;
+
+    // Read 3x3x3 neighbourhood.
+    float samples[27];
+    int n = 0;
+    for (int dz = -1; dz <= 1; dz++)
+    {
+        int sz = clamp_int(gz + dz, 0, sizeZ - 1);
+        for (int dy = -1; dy <= 1; dy++)
+        {
+            int sy = clamp_int(gy + dy, 0, sizeY - 1);
+            for (int dx = -1; dx <= 1; dx++)
+            {
+                int sx = clamp_int(gx + dx, 0, sizeX - 1);
+                samples[n++] = (float)volume[volume_index(sx, sy, sz, sizeX, sizeY)];
+            }
+        }
+    }
+
+    // Insertion sort (fast for n=27 in registers).
+    for (int i = 1; i < 27; i++)
+    {
+        float key = samples[i];
+        int j = i - 1;
+        while (j >= 0 && samples[j] > key) { samples[j + 1] = samples[j]; j--; }
+        samples[j + 1] = key;
+    }
+
+    float median = samples[13];
+
+    // Compute MAD (median absolute deviation).
+    float dev[27];
+    for (int i = 0; i < 27; i++) dev[i] = fabs(samples[i] - median);
+    for (int i = 1; i < 27; i++)
+    {
+        float key = dev[i];
+        int j = i - 1;
+        while (j >= 0 && dev[j] > key) { dev[j + 1] = dev[j]; j--; }
+        dev[j + 1] = key;
+    }
+    float mad = dev[13];
+    float clampRange = fmax(mad * 3.0f, 1.0f);
+    float lo = median - clampRange;
+    float hi = median + clampRange;
+
+    // Average within robust bounds.
+    float sum = 0.0f;
+    int cnt = 0;
+    for (int i = 0; i < 27; i++)
+    {
+        if (samples[i] >= lo && samples[i] <= hi) { sum += samples[i]; cnt++; }
+    }
+
+    int localIdx = (lz * boxSizeY + ly) * boxSizeX + lx;
+    homogenized[localIdx] = cnt > 0 ? sum / (float)cnt : median;
+}
+
+// Kernel 2: One iteration of parallel 6-connected flood fill.
+//   mask values:  0 = unvisited,  1 = accepted,  2 = rejected.
+//   Each work-item that is unvisited and has an accepted 6-neighbour tests the
+//   tolerance / gradient criteria and transitions to accepted or rejected.
+__kernel void FloodFillStep(
+    __global const float* homogenized,
+    __global int* mask,
+    __global int* changedCount,
+    int boxSizeX, int boxSizeY, int boxSizeZ,
+    float seedValue,
+    float tolerance,
+    float gradientLimit)
+{
+    int lx = get_global_id(0);
+    int ly = get_global_id(1);
+    int lz = get_global_id(2);
+    if (lx >= boxSizeX || ly >= boxSizeY || lz >= boxSizeZ) return;
+
+    int planeSize = boxSizeX * boxSizeY;
+    int localIdx = lz * planeSize + ly * boxSizeX + lx;
+
+    if (mask[localIdx] != 0) return;
+
+    // Check 6-connected neighbours for an accepted voxel.
+    int ok = 0;
+    if (!ok && lx > 0            && mask[localIdx - 1]         == 1) ok = 1;
+    if (!ok && lx < boxSizeX - 1 && mask[localIdx + 1]         == 1) ok = 1;
+    if (!ok && ly > 0            && mask[localIdx - boxSizeX]   == 1) ok = 1;
+    if (!ok && ly < boxSizeY - 1 && mask[localIdx + boxSizeX]   == 1) ok = 1;
+    if (!ok && lz > 0            && mask[localIdx - planeSize]  == 1) ok = 1;
+    if (!ok && lz < boxSizeZ - 1 && mask[localIdx + planeSize]  == 1) ok = 1;
+    if (!ok) return;
+
+    float value = homogenized[localIdx];
+
+    // Tolerance test.
+    if (fabs(value - seedValue) > tolerance)
+    {
+        mask[localIdx] = 2;
+        return;
+    }
+
+    // Gradient boundary test (central differences on homogenised volume).
+    float gx = 0.0f, gy = 0.0f, gz = 0.0f;
+    if (lx > 0 && lx < boxSizeX - 1)
+        gx = homogenized[localIdx + 1] - homogenized[localIdx - 1];
+    if (ly > 0 && ly < boxSizeY - 1)
+        gy = homogenized[localIdx + boxSizeX] - homogenized[localIdx - boxSizeX];
+    if (lz > 0 && lz < boxSizeZ - 1)
+        gz = homogenized[localIdx + planeSize] - homogenized[localIdx - planeSize];
+    float gradMag = native_sqrt(gx * gx + gy * gy + gz * gz);
+
+    if (gradMag > gradientLimit)
+    {
+        mask[localIdx] = 2;
+        return;
+    }
+
+    mask[localIdx] = 1;
+    atomic_inc(changedCount);
+}
 ";
 
     private readonly object _sync = new();
@@ -992,6 +1490,11 @@ __kernel void RenderObliqueSlab(
     private readonly OpenClKernel _projectionKernel;
     private readonly OpenClKernel _dvrKernel;
     private readonly OpenClKernel _obliqueKernel;
+    private readonly OpenClKernel _curvedMprKernel;
+    private readonly OpenClKernel _gradientKernel;
+    private readonly OpenClKernel _crossSectionKernel;
+    private readonly OpenClKernel _homogenizeKernel;
+    private readonly OpenClKernel _floodFillKernel;
     private readonly OpenClDevice _device;
     private readonly int _projLocalX;
     private readonly int _projLocalY;
@@ -999,6 +1502,10 @@ __kernel void RenderObliqueSlab(
     private readonly int _dvrLocalY;
     private readonly int _obliqueLocalX;
     private readonly int _obliqueLocalY;
+    private readonly int _curvedMprLocalX;
+    private readonly int _curvedMprLocalY;
+    private readonly int _crossSectionLocalX;
+    private readonly int _crossSectionLocalY;
     private readonly uint _computeUnits;
     private string? _lastError;
     private OpenClEvent _lastKernelEvent;
@@ -1020,6 +1527,19 @@ __kernel void RenderObliqueSlab(
     private float[]? _cachedColorLutGData;
     private IMem<float>? _cachedColorLutBBuffer;
     private float[]? _cachedColorLutBData;
+    private IMem<float>? _cachedCurvedMprFrameBuffer;
+    private int _cachedCurvedMprFrameLength;
+    private IMem<short>? _cachedCurvedMprOutputBuffer;
+    private int _cachedCurvedMprOutputLength;
+    private IMem<float>? _cachedGradientOutputBuffer;
+    private int _cachedGradientOutputLength;
+    private IMem<short>? _cachedCrossSectionOutputBuffer;
+    private int _cachedCrossSectionOutputLength;
+    private IMem<float>? _cachedHomogenizeOutputBuffer;
+    private int _cachedHomogenizeOutputLength;
+    private IMem<int>? _cachedFloodFillMaskBuffer;
+    private int _cachedFloodFillMaskLength;
+    private IMem<int>? _cachedFloodFillChangedBuffer;
 
     private OpenClVolumeRenderer(
         OpenClContext context,
@@ -1028,6 +1548,11 @@ __kernel void RenderObliqueSlab(
         OpenClKernel projectionKernel,
         OpenClKernel dvrKernel,
         OpenClKernel obliqueKernel,
+        OpenClKernel curvedMprKernel,
+        OpenClKernel gradientKernel,
+        OpenClKernel crossSectionKernel,
+        OpenClKernel homogenizeKernel,
+        OpenClKernel floodFillKernel,
         OpenClDevice device,
         VolumeComputeBackendStatus status,
         uint computeUnits,
@@ -1039,12 +1564,19 @@ __kernel void RenderObliqueSlab(
         _projectionKernel = projectionKernel;
         _dvrKernel = dvrKernel;
         _obliqueKernel = obliqueKernel;
+        _curvedMprKernel = curvedMprKernel;
+        _gradientKernel = gradientKernel;
+        _crossSectionKernel = crossSectionKernel;
+        _homogenizeKernel = homogenizeKernel;
+        _floodFillKernel = floodFillKernel;
         _device = device;
         Status = status;
         _computeUnits = computeUnits;
         (_projLocalX, _projLocalY) = ComputeKernelLocalSize(projectionKernel, device, maxWorkGroupSize);
         (_dvrLocalX, _dvrLocalY) = ComputeKernelLocalSize(dvrKernel, device, maxWorkGroupSize);
         (_obliqueLocalX, _obliqueLocalY) = ComputeKernelLocalSize(obliqueKernel, device, maxWorkGroupSize);
+        (_curvedMprLocalX, _curvedMprLocalY) = ComputeKernelLocalSize(curvedMprKernel, device, maxWorkGroupSize);
+        (_crossSectionLocalX, _crossSectionLocalY) = ComputeKernelLocalSize(crossSectionKernel, device, maxWorkGroupSize);
     }
 
     /// <summary>
@@ -1145,6 +1677,21 @@ __kernel void RenderObliqueSlab(
                         OpenClKernel obliqueKernel = Cl.CreateKernel(program, "RenderObliqueSlab", out error);
                         ThrowOnError(error, "Failed to create OpenCL oblique slab kernel.");
 
+                        OpenClKernel curvedMprKernel = Cl.CreateKernel(program, "RenderCurvedMpr", out error);
+                        ThrowOnError(error, "Failed to create OpenCL curved MPR kernel.");
+
+                        OpenClKernel gradientKernel = Cl.CreateKernel(program, "ComputeGradientVolume", out error);
+                        ThrowOnError(error, "Failed to create OpenCL gradient volume kernel.");
+
+                        OpenClKernel crossSectionKernel = Cl.CreateKernel(program, "RenderCrossSection", out error);
+                        ThrowOnError(error, "Failed to create OpenCL cross-section kernel.");
+
+                        OpenClKernel homogenizeKernel = Cl.CreateKernel(program, "HomogenizeVolume", out error);
+                        ThrowOnError(error, "Failed to create OpenCL homogenize kernel.");
+
+                        OpenClKernel floodFillKernel = Cl.CreateKernel(program, "FloodFillStep", out error);
+                        ThrowOnError(error, "Failed to create OpenCL flood-fill kernel.");
+
                         uint computeUnits = SafeCast<uint>(Cl.GetDeviceInfo(device, DeviceInfo.MaxComputeUnits, out _));
                         ulong maxWorkGroupSize = SafeCast<ulong>(Cl.GetDeviceInfo(device, DeviceInfo.MaxWorkGroupSize, out _));
                         ulong globalMem = SafeCast<ulong>(Cl.GetDeviceInfo(device, DeviceInfo.GlobalMemSize, out _));
@@ -1157,6 +1704,11 @@ __kernel void RenderObliqueSlab(
                             projectionKernel,
                             dvrKernel,
                             obliqueKernel,
+                            curvedMprKernel,
+                            gradientKernel,
+                            crossSectionKernel,
+                            homogenizeKernel,
+                            floodFillKernel,
                             device,
                             new VolumeComputeBackendStatus(
                                 VolumeComputeBackendKind.OpenCl,
@@ -1249,11 +1801,13 @@ __kernel void RenderObliqueSlab(
                     RenderBackendLabel = Status.DisplayName,
                 };
                 _lastError = null;
+                VolumeComputeBackend.ResetGpuFailureCount();
                 return true;
             }
             catch (Exception ex)
             {
                 _lastError = $"OpenCL projection failed: {ex.Message}";
+                VolumeComputeBackend.NotifyGpuFallback(_lastError);
                 image = new ReslicedImage();
                 return false;
             }
@@ -1373,11 +1927,13 @@ __kernel void RenderObliqueSlab(
                     RenderBackendLabel = Status.DisplayName,
                 };
                 _lastError = null;
+                VolumeComputeBackend.ResetGpuFailureCount();
                 return true;
             }
             catch (Exception ex)
             {
                 _lastError = $"OpenCL oblique projection failed: {ex.Message}";
+                VolumeComputeBackend.NotifyGpuFallback(_lastError);
                 image = new ReslicedImage();
                 return false;
             }
@@ -1485,12 +2041,380 @@ __kernel void RenderObliqueSlab(
                     RenderBackendLabel = Status.DisplayName,
                 };
                 _lastError = null;
+                VolumeComputeBackend.ResetGpuFailureCount();
                 return true;
             }
             catch (Exception ex)
             {
                 _lastError = $"OpenCL DVR failed: {ex.Message}";
+                VolumeComputeBackend.NotifyGpuFallback(_lastError);
                 image = new ReslicedImage();
+                return false;
+            }
+        }
+    }
+
+    public bool TryRenderCurvedMpr(
+        SeriesVolume volume,
+        ReadOnlySpan<float> frameData,
+        int pathPointCount,
+        int imageHeight,
+        double pixelSpacingMm,
+        int slabSampleCount,
+        double slabThicknessMm,
+        out short[] pixels)
+    {
+        pixels = [];
+        lock (_sync)
+        {
+            try
+            {
+                EnsureVolumeBuffer(volume);
+                if (_cachedVolumeBuffer is null)
+                {
+                    _lastError = "Volume buffer allocation returned null.";
+                    return false;
+                }
+
+                int frameFloatCount = pathPointCount * 12;
+                IMem<float> frameBuffer = EnsureCurvedMprFrameBuffer(frameFloatCount);
+                // Upload frame data
+                float[] frameArray = frameData.ToArray();
+                ErrorCode writeErr = Cl.EnqueueWriteBuffer(_queue, frameBuffer, Bool.True, frameArray, 0, null!, out _);
+                ThrowOnError(writeErr, "Failed to upload curved MPR frame data.");
+
+                int outputLength = pathPointCount * imageHeight;
+                IMem<short> outputBuffer = EnsureCurvedMprOutputBuffer(outputLength);
+
+                Models.Vector3D volOrigin = volume.Origin;
+                Models.Vector3D volRow = volume.RowDirection;
+                Models.Vector3D volCol = volume.ColumnDirection;
+                Models.Vector3D volNrm = volume.Normal;
+
+                uint a = 0;
+                SetKernelArgBuffer(_curvedMprKernel, a++, _cachedVolumeBuffer);
+                SetKernelArgValue(_curvedMprKernel, a++, volume.SizeX);
+                SetKernelArgValue(_curvedMprKernel, a++, volume.SizeY);
+                SetKernelArgValue(_curvedMprKernel, a++, volume.SizeZ);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volume.SpacingX);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volume.SpacingY);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volume.SpacingZ);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volOrigin.X);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volOrigin.Y);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volOrigin.Z);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volRow.X);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volRow.Y);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volRow.Z);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volCol.X);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volCol.Y);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volCol.Z);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volNrm.X);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volNrm.Y);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)volNrm.Z);
+                SetKernelArgBuffer(_curvedMprKernel, a++, frameBuffer);
+                SetKernelArgValue(_curvedMprKernel, a++, pathPointCount);
+                SetKernelArgValue(_curvedMprKernel, a++, imageHeight);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)pixelSpacingMm);
+                SetKernelArgValue(_curvedMprKernel, a++, slabSampleCount);
+                SetKernelArgValue(_curvedMprKernel, a++, (float)(slabThicknessMm * 0.5));
+                SetKernelArgBuffer(_curvedMprKernel, a++, outputBuffer);
+
+                Execute2D(_curvedMprKernel, pathPointCount, imageHeight, _curvedMprLocalX, _curvedMprLocalY);
+                pixels = ReadBuffer(outputBuffer, outputLength);
+                UpdateKernelProfilingTime();
+                _lastError = null;
+                VolumeComputeBackend.ResetGpuFailureCount();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _lastError = $"OpenCL curved MPR failed: {ex.Message}";
+                VolumeComputeBackend.NotifyGpuFallback(_lastError);
+                pixels = [];
+                return false;
+            }
+        }
+    }
+
+    public bool TryComputeGradientVolume(SeriesVolume volume, out float[] gradients)
+    {
+        gradients = [];
+        lock (_sync)
+        {
+            try
+            {
+                EnsureVolumeBuffer(volume);
+                if (_cachedVolumeBuffer is null)
+                {
+                    _lastError = "Volume buffer allocation returned null.";
+                    return false;
+                }
+
+                int gradientLength = volume.SizeX * volume.SizeY * volume.SizeZ * 3;
+                IMem<float> gradientBuffer = EnsureGradientOutputBuffer(gradientLength);
+
+                double spacingX = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
+                double spacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+                double spacingZ = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
+
+                uint a = 0;
+                SetKernelArgBuffer(_gradientKernel, a++, _cachedVolumeBuffer);
+                SetKernelArgValue(_gradientKernel, a++, volume.SizeX);
+                SetKernelArgValue(_gradientKernel, a++, volume.SizeY);
+                SetKernelArgValue(_gradientKernel, a++, volume.SizeZ);
+                SetKernelArgValue(_gradientKernel, a++, (float)(1.0 / (2.0 * spacingX)));
+                SetKernelArgValue(_gradientKernel, a++, (float)(1.0 / (2.0 * spacingY)));
+                SetKernelArgValue(_gradientKernel, a++, (float)(1.0 / (2.0 * spacingZ)));
+                SetKernelArgBuffer(_gradientKernel, a++, gradientBuffer);
+
+                Execute3D(_gradientKernel, volume.SizeX, volume.SizeY, volume.SizeZ);
+                gradients = ReadBuffer(gradientBuffer, gradientLength);
+                UpdateKernelProfilingTime();
+                _lastError = null;
+                VolumeComputeBackend.ResetGpuFailureCount();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _lastError = $"OpenCL gradient volume failed: {ex.Message}";
+                VolumeComputeBackend.NotifyGpuFallback(_lastError);
+                gradients = [];
+                return false;
+            }
+        }
+    }
+
+    public bool TryRenderCrossSection(
+        SeriesVolume volume,
+        Models.Vector3D center,
+        Models.Vector3D rowDir,
+        Models.Vector3D colDir,
+        double fieldOfViewMm,
+        int outputSize,
+        out short[] pixels)
+    {
+        pixels = [];
+        lock (_sync)
+        {
+            try
+            {
+                EnsureVolumeBuffer(volume);
+                if (_cachedVolumeBuffer is null)
+                {
+                    _lastError = "Volume buffer allocation returned null.";
+                    return false;
+                }
+
+                int outputLength = outputSize * outputSize;
+                IMem<short> outputBuffer = EnsureCrossSectionOutputBuffer(outputLength);
+
+                double spacingX = volume.SpacingX > 0 ? volume.SpacingX : 1.0;
+                double spacingY = volume.SpacingY > 0 ? volume.SpacingY : 1.0;
+                double spacingZ = volume.SpacingZ > 0 ? volume.SpacingZ : 1.0;
+                Models.Vector3D volOrigin = volume.Origin;
+                Models.Vector3D volRow = volume.RowDirection;
+                Models.Vector3D volCol = volume.ColumnDirection;
+                Models.Vector3D volNrm = volume.Normal;
+
+                uint a = 0;
+                SetKernelArgBuffer(_crossSectionKernel, a++, _cachedVolumeBuffer);
+                SetKernelArgValue(_crossSectionKernel, a++, volume.SizeX);
+                SetKernelArgValue(_crossSectionKernel, a++, volume.SizeY);
+                SetKernelArgValue(_crossSectionKernel, a++, volume.SizeZ);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volOrigin.X);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volOrigin.Y);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volOrigin.Z);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volRow.X);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volRow.Y);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volRow.Z);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volCol.X);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volCol.Y);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volCol.Z);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volNrm.X);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volNrm.Y);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)volNrm.Z);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)(1.0 / spacingX));
+                SetKernelArgValue(_crossSectionKernel, a++, (float)(1.0 / spacingY));
+                SetKernelArgValue(_crossSectionKernel, a++, (float)(1.0 / spacingZ));
+                SetKernelArgValue(_crossSectionKernel, a++, (float)center.X);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)center.Y);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)center.Z);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)rowDir.X);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)rowDir.Y);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)rowDir.Z);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)colDir.X);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)colDir.Y);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)colDir.Z);
+                SetKernelArgValue(_crossSectionKernel, a++, (float)(fieldOfViewMm * 0.5));
+                SetKernelArgValue(_crossSectionKernel, a++, outputSize);
+                SetKernelArgBuffer(_crossSectionKernel, a++, outputBuffer);
+
+                Execute2D(_crossSectionKernel, outputSize, outputSize, _crossSectionLocalX, _crossSectionLocalY);
+                pixels = ReadBuffer(outputBuffer, outputLength);
+                UpdateKernelProfilingTime();
+                _lastError = null;
+                VolumeComputeBackend.ResetGpuFailureCount();
+                return true;
+            }
+            catch (Exception ex)
+            {
+                _lastError = $"OpenCL cross-section failed: {ex.Message}";
+                VolumeComputeBackend.NotifyGpuFallback(_lastError);
+                pixels = [];
+                return false;
+            }
+        }
+    }
+
+    /// <summary>
+    /// GPU-accelerated region growing.  Computes a robust homogenised sub-volume
+    /// then runs iterative parallel flood-fill until convergence.
+    /// Returns the accepted voxel set as a <see cref="HashSet{T}"/> of linear
+    /// voxel keys (z * sizeY * sizeX + y * sizeX + x).
+    /// </summary>
+    public bool TrySegmentRegion(
+        SeriesVolume volume,
+        int seedX, int seedY, int seedZ,
+        float seedHomogenizedValue,
+        float tolerance,
+        float gradientLimit,
+        int maxRadiusX, int maxRadiusY, int maxRadiusZ,
+        int maxVoxels,
+        out HashSet<int> region,
+        out int iterationCount)
+    {
+        region = [];
+        iterationCount = 0;
+        const int maxIterations = 500;
+
+        lock (_sync)
+        {
+            try
+            {
+                EnsureVolumeBuffer(volume);
+                if (_cachedVolumeBuffer is null)
+                {
+                    _lastError = "Volume buffer allocation returned null.";
+                    return false;
+                }
+
+                // Compute bounding box clamped to volume.
+                int boxMinX = Math.Max(0, seedX - maxRadiusX);
+                int boxMinY = Math.Max(0, seedY - maxRadiusY);
+                int boxMinZ = Math.Max(0, seedZ - maxRadiusZ);
+                int boxMaxX = Math.Min(volume.SizeX - 1, seedX + maxRadiusX);
+                int boxMaxY = Math.Min(volume.SizeY - 1, seedY + maxRadiusY);
+                int boxMaxZ = Math.Min(volume.SizeZ - 1, seedZ + maxRadiusZ);
+                int boxSizeX = boxMaxX - boxMinX + 1;
+                int boxSizeY = boxMaxY - boxMinY + 1;
+                int boxSizeZ = boxMaxZ - boxMinZ + 1;
+                int boxVoxelCount = boxSizeX * boxSizeY * boxSizeZ;
+
+                if (boxVoxelCount < 8)
+                {
+                    _lastError = "Bounding box too small for GPU segmentation.";
+                    return false;
+                }
+
+                // ── Step 1: Homogenise the sub-volume on GPU ─────────────────
+                IMem<float> homogenizeBuffer = EnsureHomogenizeOutputBuffer(boxVoxelCount);
+
+                uint a = 0;
+                SetKernelArgBuffer(_homogenizeKernel, a++, _cachedVolumeBuffer);
+                SetKernelArgBuffer(_homogenizeKernel, a++, homogenizeBuffer);
+                SetKernelArgValue(_homogenizeKernel, a++, volume.SizeX);
+                SetKernelArgValue(_homogenizeKernel, a++, volume.SizeY);
+                SetKernelArgValue(_homogenizeKernel, a++, volume.SizeZ);
+                SetKernelArgValue(_homogenizeKernel, a++, boxMinX);
+                SetKernelArgValue(_homogenizeKernel, a++, boxMinY);
+                SetKernelArgValue(_homogenizeKernel, a++, boxMinZ);
+                SetKernelArgValue(_homogenizeKernel, a++, boxSizeX);
+                SetKernelArgValue(_homogenizeKernel, a++, boxSizeY);
+                SetKernelArgValue(_homogenizeKernel, a++, boxSizeZ);
+
+                Execute3D(_homogenizeKernel, boxSizeX, boxSizeY, boxSizeZ);
+                // No read-back needed — stays on GPU for flood fill.
+                // Blocking synchronisation happens via the in-order queue.
+
+                // ── Step 2: Initialise the flood-fill mask ───────────────────
+                int[] maskHost = new int[boxVoxelCount]; // 0 = unvisited
+                int seedLocalX = seedX - boxMinX;
+                int seedLocalY = seedY - boxMinY;
+                int seedLocalZ = seedZ - boxMinZ;
+                int seedLocalIdx = (seedLocalZ * boxSizeY * boxSizeX) + (seedLocalY * boxSizeX) + seedLocalX;
+                maskHost[seedLocalIdx] = 1; // seed is accepted
+
+                IMem<int> maskBuffer = EnsureFloodFillMaskBuffer(boxVoxelCount);
+                WriteBuffer(maskBuffer, maskHost);
+
+                IMem<int> changedBuffer = EnsureFloodFillChangedBuffer();
+
+                // ── Step 3: Iterative flood fill ─────────────────────────────
+                for (int iteration = 0; iteration < maxIterations; iteration++)
+                {
+                    // Reset changed counter to 0.
+                    WriteBuffer(changedBuffer, [0]);
+
+                    a = 0;
+                    SetKernelArgBuffer(_floodFillKernel, a++, homogenizeBuffer);
+                    SetKernelArgBuffer(_floodFillKernel, a++, maskBuffer);
+                    SetKernelArgBuffer(_floodFillKernel, a++, changedBuffer);
+                    SetKernelArgValue(_floodFillKernel, a++, boxSizeX);
+                    SetKernelArgValue(_floodFillKernel, a++, boxSizeY);
+                    SetKernelArgValue(_floodFillKernel, a++, boxSizeZ);
+                    SetKernelArgValue(_floodFillKernel, a++, seedHomogenizedValue);
+                    SetKernelArgValue(_floodFillKernel, a++, tolerance);
+                    SetKernelArgValue(_floodFillKernel, a++, gradientLimit);
+
+                    Execute3D(_floodFillKernel, boxSizeX, boxSizeY, boxSizeZ);
+
+                    int[] changedHost = ReadBuffer(changedBuffer, 1);
+                    iterationCount = iteration + 1;
+                    if (changedHost[0] == 0)
+                    {
+                        break; // converged
+                    }
+                }
+
+                // ── Step 4: Read mask back and convert to voxel-key set ──────
+                int[] resultMask = ReadBuffer(maskBuffer, boxVoxelCount);
+                UpdateKernelProfilingTime();
+
+                for (int lz = 0; lz < boxSizeZ; lz++)
+                {
+                    int gz = boxMinZ + lz;
+                    for (int ly = 0; ly < boxSizeY; ly++)
+                    {
+                        int gy = boxMinY + ly;
+                        int baseLocal = (lz * boxSizeY + ly) * boxSizeX;
+                        int baseGlobal = (gz * volume.SizeY + gy) * volume.SizeX;
+                        for (int lx = 0; lx < boxSizeX; lx++)
+                        {
+                            if (resultMask[baseLocal + lx] == 1)
+                            {
+                                region.Add(baseGlobal + boxMinX + lx);
+                            }
+                        }
+                    }
+                }
+
+                // Enforce hard voxel cap.
+                if (region.Count > maxVoxels)
+                {
+                    region.Clear();
+                    _lastError = "GPU region exceeded maximum voxel count.";
+                    return false;
+                }
+
+                _lastError = null;
+                VolumeComputeBackend.ResetGpuFailureCount();
+                return region.Count > 0;
+            }
+            catch (Exception ex)
+            {
+                _lastError = $"OpenCL region growing failed: {ex.Message}";
+                VolumeComputeBackend.NotifyGpuFallback(_lastError);
+                region = [];
                 return false;
             }
         }
@@ -1498,6 +2422,13 @@ __kernel void RenderObliqueSlab(
 
     public void Dispose()
     {
+        ReleaseMem(_cachedFloodFillChangedBuffer);
+        ReleaseMem(_cachedFloodFillMaskBuffer);
+        ReleaseMem(_cachedHomogenizeOutputBuffer);
+        ReleaseMem(_cachedCrossSectionOutputBuffer);
+        ReleaseMem(_cachedGradientOutputBuffer);
+        ReleaseMem(_cachedCurvedMprOutputBuffer);
+        ReleaseMem(_cachedCurvedMprFrameBuffer);
         ReleaseMem(_cachedColorLutBBuffer);
         ReleaseMem(_cachedColorLutGBuffer);
         ReleaseMem(_cachedColorLutRBuffer);
@@ -1506,12 +2437,24 @@ __kernel void RenderObliqueSlab(
         ReleaseMem(_cachedDvrOutputBuffer);
         ReleaseMem(_cachedProjectionOutputBuffer);
         ReleaseMem(_cachedVolumeBuffer);
+        Cl.ReleaseKernel(_floodFillKernel);
+        Cl.ReleaseKernel(_homogenizeKernel);
+        Cl.ReleaseKernel(_crossSectionKernel);
+        Cl.ReleaseKernel(_gradientKernel);
+        Cl.ReleaseKernel(_curvedMprKernel);
         Cl.ReleaseKernel(_obliqueKernel);
         Cl.ReleaseKernel(_dvrKernel);
         Cl.ReleaseKernel(_projectionKernel);
         Cl.ReleaseProgram(_program);
         Cl.ReleaseCommandQueue(_queue);
         Cl.ReleaseContext(_context);
+        _cachedFloodFillChangedBuffer = null;
+        _cachedFloodFillMaskBuffer = null;
+        _cachedHomogenizeOutputBuffer = null;
+        _cachedCrossSectionOutputBuffer = null;
+        _cachedGradientOutputBuffer = null;
+        _cachedCurvedMprOutputBuffer = null;
+        _cachedCurvedMprFrameBuffer = null;
         _cachedColorLutBBuffer = null;
         _cachedColorLutBData = null;
         _cachedColorLutGBuffer = null;
@@ -1679,6 +2622,108 @@ __kernel void RenderObliqueSlab(
         return buffer;
     }
 
+    private IMem<float> EnsureCurvedMprFrameBuffer(int length)
+    {
+        if (_cachedCurvedMprFrameBuffer is not null && _cachedCurvedMprFrameLength == length)
+        {
+            return _cachedCurvedMprFrameBuffer;
+        }
+
+        ReleaseMem(_cachedCurvedMprFrameBuffer);
+        _cachedCurvedMprFrameBuffer = CreateBuffer<float>(MemFlags.ReadOnly, length);
+        _cachedCurvedMprFrameLength = length;
+        return _cachedCurvedMprFrameBuffer;
+    }
+
+    private IMem<short> EnsureCurvedMprOutputBuffer(int length)
+    {
+        if (_cachedCurvedMprOutputBuffer is not null && _cachedCurvedMprOutputLength == length)
+        {
+            return _cachedCurvedMprOutputBuffer;
+        }
+
+        ReleaseMem(_cachedCurvedMprOutputBuffer);
+        _cachedCurvedMprOutputBuffer = CreateBuffer<short>(MemFlags.WriteOnly, length);
+        _cachedCurvedMprOutputLength = length;
+        return _cachedCurvedMprOutputBuffer;
+    }
+
+    private IMem<float> EnsureGradientOutputBuffer(int length)
+    {
+        if (_cachedGradientOutputBuffer is not null && _cachedGradientOutputLength == length)
+        {
+            return _cachedGradientOutputBuffer;
+        }
+
+        ReleaseMem(_cachedGradientOutputBuffer);
+        _cachedGradientOutputBuffer = CreateBuffer<float>(MemFlags.WriteOnly, length);
+        _cachedGradientOutputLength = length;
+        return _cachedGradientOutputBuffer;
+    }
+
+    private IMem<short> EnsureCrossSectionOutputBuffer(int length)
+    {
+        if (_cachedCrossSectionOutputBuffer is not null && _cachedCrossSectionOutputLength == length)
+        {
+            return _cachedCrossSectionOutputBuffer;
+        }
+
+        ReleaseMem(_cachedCrossSectionOutputBuffer);
+        _cachedCrossSectionOutputBuffer = CreateBuffer<short>(MemFlags.WriteOnly, length);
+        _cachedCrossSectionOutputLength = length;
+        return _cachedCrossSectionOutputBuffer;
+    }
+
+    private IMem<float> EnsureHomogenizeOutputBuffer(int length)
+    {
+        if (_cachedHomogenizeOutputBuffer is not null && _cachedHomogenizeOutputLength == length)
+        {
+            return _cachedHomogenizeOutputBuffer;
+        }
+
+        ReleaseMem(_cachedHomogenizeOutputBuffer);
+        _cachedHomogenizeOutputBuffer = CreateBuffer<float>(MemFlags.ReadWrite, length);
+        _cachedHomogenizeOutputLength = length;
+        return _cachedHomogenizeOutputBuffer;
+    }
+
+    private IMem<int> EnsureFloodFillMaskBuffer(int length)
+    {
+        if (_cachedFloodFillMaskBuffer is not null && _cachedFloodFillMaskLength == length)
+        {
+            return _cachedFloodFillMaskBuffer;
+        }
+
+        ReleaseMem(_cachedFloodFillMaskBuffer);
+        _cachedFloodFillMaskBuffer = CreateBuffer<int>(MemFlags.ReadWrite, length);
+        _cachedFloodFillMaskLength = length;
+        return _cachedFloodFillMaskBuffer;
+    }
+
+    private IMem<int> EnsureFloodFillChangedBuffer()
+    {
+        if (_cachedFloodFillChangedBuffer is not null)
+        {
+            return _cachedFloodFillChangedBuffer;
+        }
+
+        _cachedFloodFillChangedBuffer = CreateBuffer<int>(MemFlags.ReadWrite, 1);
+        return _cachedFloodFillChangedBuffer;
+    }
+
+    private void WriteBuffer<T>(IMem<T> buffer, T[] data) where T : struct
+    {
+        ErrorCode error = Cl.EnqueueWriteBuffer(
+            _queue,
+            buffer,
+            Bool.True,
+            data,
+            0,
+            null!,
+            out _);
+        ThrowOnError(error, "Failed to write OpenCL buffer.");
+    }
+
     private static bool LutsEqual(float[] left, float[] right)
     {
         if (left.Length != right.Length)
@@ -1747,6 +2792,36 @@ __kernel void RenderObliqueSlab(
         _hasKernelEvent = true;
         // No Cl.Finish() — the subsequent blocking EnqueueReadBuffer
         // implicitly waits for all prior commands on this in-order queue.
+    }
+
+    /// <summary>
+    /// Enqueues a 3D NDRange kernel (e.g. gradient volume: sizeX × sizeY × sizeZ).
+    /// Uses a fixed 4×4×4 local work-group size, which balances occupancy across all three dimensions.
+    /// </summary>
+    private void Execute3D(OpenClKernel kernel, int sizeX, int sizeY, int sizeZ)
+    {
+        if (_hasKernelEvent)
+        {
+            try { Cl.ReleaseEvent(_lastKernelEvent); } catch { /* best-effort cleanup */ }
+            _hasKernelEvent = false;
+        }
+
+        const int local = 4;
+        int globalX = RoundUpToMultiple(sizeX, local);
+        int globalY = RoundUpToMultiple(sizeY, local);
+        int globalZ = RoundUpToMultiple(sizeZ, local);
+        ErrorCode error = Cl.EnqueueNDRangeKernel(
+            _queue,
+            kernel,
+            3,
+            null!,
+            [new IntPtr(globalX), new IntPtr(globalY), new IntPtr(globalZ)],
+            [new IntPtr(local), new IntPtr(local), new IntPtr(local)],
+            0,
+            null!,
+            out _lastKernelEvent);
+        ThrowOnError(error, "Failed to execute OpenCL 3D kernel.");
+        _hasKernelEvent = true;
     }
 
     /// <summary>

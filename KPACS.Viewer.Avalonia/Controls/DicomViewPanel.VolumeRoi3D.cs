@@ -1063,14 +1063,27 @@ public partial class DicomViewPanel
                 return false;
             }
 
+            // Quick reject on first anchor — all anchors share the same geometric plane.
             double planeTolerance = Math.Max(0.75, Math.Min(metadata.RowSpacing, metadata.ColumnSpacing));
-            if (Anchors.Any(anchor => anchor.PatientPoint is null || metadata.DistanceToPlane(anchor.PatientPoint.Value) > planeTolerance))
+            if (Anchors[0].PatientPoint is not { } firstPatientPoint ||
+                metadata.DistanceToPlane(firstPatientPoint) > planeTolerance)
             {
                 return false;
             }
 
-            imagePoints = Anchors.Select(anchor => metadata.PixelPointFromPatient(anchor.PatientPoint!.Value)).ToArray();
-            return imagePoints.Length > 0;
+            Point[] points = new Point[Anchors.Count];
+            for (int i = 0; i < Anchors.Count; i++)
+            {
+                if (Anchors[i].PatientPoint is null)
+                {
+                    return false;
+                }
+
+                points[i] = metadata.PixelPointFromPatient(Anchors[i].PatientPoint!.Value);
+            }
+
+            imagePoints = points;
+            return true;
         }
     }
 }

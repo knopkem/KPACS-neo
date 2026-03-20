@@ -1,5 +1,6 @@
 using Avalonia;
 using Avalonia.Input;
+using Avalonia.Threading;
 using KPACS.Viewer.Models;
 using KPACS.Viewer.Rendering;
 using KPACS.Viewer.Services;
@@ -12,7 +13,7 @@ public partial class DicomViewPanel
     public sealed record AutoOutlinedMeasurementInfo(Guid MeasurementId, MeasurementKind Kind, Point SeedPoint, int SensitivityLevel);
     public sealed record AutoOutlineAttemptInfo(MeasurementKind Kind, Point SeedPoint, int SensitivityLevel, bool Succeeded, string Message);
     public sealed record AutoOutlineDeveloperSettings(
-        bool UseRobustHomogenization = false,
+        bool UseRobustHomogenization = true,
         double TwoDimensionalToleranceScale = 2.6,
         double VolumeToleranceScale = 2.6,
         double SliceSignatureToleranceScale = 1.0,
@@ -46,6 +47,132 @@ public partial class DicomViewPanel
     public event Action<AutoOutlinedMeasurementInfo>? AutoOutlinedMeasurementCreated;
     public event Action<AutoOutlineAttemptInfo>? AutoOutlineAttempted;
     private bool _autoOutlineInProgress;
+    private bool? _cachedIsMrLike;
+    private bool? _cachedIsCtLike;
+
+    /// <summary>
+    /// Result of a headless auto-segmentation run (no draft, no finalization).
+    /// Used by the centerline pipeline to create a 3D vessel mask programmatically.
+    /// </summary>
+    public sealed record AutoSegmentResult(bool Succeeded, VolumeRoiContour[] Contours, SegmentationMask3D? Mask, string Message);
+
+    /// <summary>
+    /// Runs GPU/CPU 3D auto-segmentation from each of the <paramref name="seedPatientPoints"/>
+    /// (the centerline start and end positions in patient space), unions their
+    /// voxel regions, builds contours and a <see cref="SegmentationMask3D"/>, then
+    /// finalizes a <see cref="StudyMeasurement"/> without touching the draft UI.
+    /// The <paramref name="callback"/> is posted to the UI thread.
+    /// </summary>
+    public bool TryAutoSegmentForCenterline(SpatialVector3D[] seedPatientPoints, Action<AutoSegmentResult> callback)
+    {
+        if (_autoOutlineInProgress || _volume is null || SpatialMetadata is null || seedPatientPoints.Length == 0)
+        {
+            return false;
+        }
+
+        _autoOutlineInProgress = true;
+
+        _ = Task.Run(() =>
+        {
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                HashSet<int> combinedRegion = [];
+                string lastGpuLog = string.Empty;
+                int succeededSeeds = 0;
+
+                foreach (SpatialVector3D seedPatient in seedPatientPoints)
+                {
+                    if (TrySegmentVolumeSeedFromPatient(seedPatient, sensitivityLevel: 0, out HashSet<int> region, out _))
+                    {
+                        combinedRegion.UnionWith(region);
+                        succeededSeeds++;
+                    }
+
+                    if (!string.IsNullOrEmpty(_lastGpuSegmentLog))
+                    {
+                        lastGpuLog = _lastGpuSegmentLog;
+                    }
+                }
+
+                if (succeededSeeds == 0 || combinedRegion.Count < AutoOutlineMinPixels * 2)
+                {
+                    sw.Stop();
+                    Console.Error.WriteLine($"[AutoSegForCenterline] FAILED {succeededSeeds}/{seedPatientPoints.Length} seeds, {combinedRegion.Count} voxels in {sw.ElapsedMilliseconds}ms {lastGpuLog}");
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        _autoOutlineInProgress = false;
+                        string detail = string.IsNullOrEmpty(lastGpuLog)
+                            ? $"Auto vessel segmentation could not grow a viable region from {seedPatientPoints.Length} seed(s)."
+                            : $"Auto vessel segmentation could not grow a viable region from {seedPatientPoints.Length} seed(s).\n{lastGpuLog}";
+                        callback(new AutoSegmentResult(false, [], null, detail));
+                    });
+                    return;
+                }
+
+                SegmentationMask3D mask = CreateSegmentationMaskFromRegion(combinedRegion);
+                VolumeRoiContour[] contours = BuildAutoOutlinedVolumeContours(combinedRegion);
+                sw.Stop();
+
+                if (contours.Length == 0)
+                {
+                    Console.Error.WriteLine($"[AutoSegForCenterline] {combinedRegion.Count} voxels but 0 contours in {sw.ElapsedMilliseconds}ms");
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        _autoOutlineInProgress = false;
+                        callback(new AutoSegmentResult(false, [], null, "Auto vessel segmentation produced voxels but no usable contours."));
+                    });
+                    return;
+                }
+
+                string gpuLog = lastGpuLog;
+                Console.Error.WriteLine($"[AutoSegForCenterline] OK {succeededSeeds}/{seedPatientPoints.Length} seeds, {combinedRegion.Count} voxels, {contours.Length} slices in {sw.ElapsedMilliseconds}ms {gpuLog}");
+
+                Dispatcher.UIThread.Post(() =>
+                {
+                    try
+                    {
+                        // Directly create the finalized measurement + fire events — no draft involved.
+                        StudyMeasurement measurement = StudyMeasurement.CreateVolumeRoi(FilePath, SpatialMetadata!, contours, mask.Id);
+                        SegmentationMask3D finalMask = mask with
+                        {
+                            Metadata = mask.Metadata with
+                            {
+                                SourceMeasurementId = measurement.Id.ToString("D"),
+                            }
+                        };
+                        SegmentationMaskCreated?.Invoke(finalMask);
+                        MeasurementCreated?.Invoke(measurement);
+                        SetSelectedMeasurement(measurement.Id);
+                        UpdateMeasurementPresentation();
+
+                        string toastMsg = string.IsNullOrEmpty(gpuLog)
+                            ? $"Auto vessel mask: {contours.Length} slice(s), {combinedRegion.Count} voxels from {succeededSeeds} seed(s) in {sw.ElapsedMilliseconds}ms."
+                            : $"Auto vessel mask: {contours.Length} slice(s), {combinedRegion.Count} voxels from {succeededSeeds} seed(s) in {sw.ElapsedMilliseconds}ms.\n{gpuLog}";
+                        callback(new AutoSegmentResult(true, contours, finalMask, toastMsg));
+                    }
+                    finally
+                    {
+                        _autoOutlineInProgress = false;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                Exception root = ex is AggregateException agg ? agg.Flatten().InnerExceptions.FirstOrDefault() ?? ex : ex;
+                string detail = $"{root.GetType().Name}: {root.Message}";
+                Console.Error.WriteLine($"[AutoSegForCenterline] EXCEPTION in {sw.ElapsedMilliseconds}ms: {detail}");
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _autoOutlineInProgress = false;
+                    callback(new AutoSegmentResult(false, [], null, detail));
+                });
+            }
+        });
+
+        return true;
+    }
     private AutoOutlineDeveloperSettings _autoOutlineDeveloperSettings = new();
 
     public AutoOutlineDeveloperSettings GetAutoOutlineDeveloperSettings() => _autoOutlineDeveloperSettings with { };
@@ -193,32 +320,66 @@ public partial class DicomViewPanel
 
         VolumeRoiDraft? previousDraft = CloneVolumeRoiDraftState();
         _autoOutlineInProgress = true;
-        try
-        {
-            Point clampedPoint = ClampImagePoint(imagePoint);
-            if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out SegmentationMask3D? segmentationMask, out string failureReason))
-            {
-                AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, failureReason));
-                return false;
-            }
+        Point clampedPoint = ClampImagePoint(imagePoint);
 
-            ApplyAutoOutlinedVolumeContours(clampedPoint, sensitivityLevel, contours, segmentationMask);
-            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, $"Auto 3D ROI created {contours.Length} contour slice(s)."));
-            RecordVolumeRoiDraftTransition("Create auto-outlined volume ROI draft", previousDraft, _volumeRoiDraft);
-            return true;
-        }
-        catch (Exception ex)
+        // Capture references needed on the background thread.
+        SeriesVolume volume = _volume;
+        DicomSpatialMetadata spatialMetadata = SpatialMetadata;
+
+        _ = Task.Run(() =>
         {
-            Exception root = ex is AggregateException agg ? agg.Flatten().InnerExceptions.FirstOrDefault() ?? ex : ex;
-            string detail = $"{root.GetType().Name}: {root.Message}";
-            System.Diagnostics.Debug.WriteLine($"[AutoOutline] {detail}\n{root.StackTrace}");
-            AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, ClampImagePoint(imagePoint), sensitivityLevel, false, $"Auto 3D ROI failed ({detail})"));
-            return false;
-        }
-        finally
-        {
-            _autoOutlineInProgress = false;
-        }
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            try
+            {
+                if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out SegmentationMask3D? segmentationMask, out string failureReason))
+                {
+                    sw.Stop();
+                    string gpuLog = _lastGpuSegmentLog;
+                    Console.Error.WriteLine($"[AutoOutline] FAILED in {sw.ElapsedMilliseconds}ms: {failureReason} {gpuLog}");
+                    Dispatcher.UIThread.Post(() =>
+                    {
+                        _autoOutlineInProgress = false;
+                        string detail = string.IsNullOrEmpty(gpuLog) ? failureReason : $"{failureReason}\n{gpuLog}";
+                        AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, detail));
+                    });
+                    return;
+                }
+
+                sw.Stop();
+                string successGpuLog = _lastGpuSegmentLog;
+                Console.Error.WriteLine($"[AutoOutline] OK in {sw.ElapsedMilliseconds}ms — {contours.Length} contours {successGpuLog}");
+                Dispatcher.UIThread.Post(() =>
+                {
+                    try
+                    {
+                        ApplyAutoOutlinedVolumeContours(clampedPoint, sensitivityLevel, contours, segmentationMask);
+                        string toastMsg = string.IsNullOrEmpty(successGpuLog)
+                            ? $"Auto 3D ROI created {contours.Length} contour slice(s) in {sw.ElapsedMilliseconds}ms."
+                            : $"Auto 3D ROI created {contours.Length} slice(s) in {sw.ElapsedMilliseconds}ms.\n{successGpuLog}";
+                        AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, true, toastMsg));
+                        RecordVolumeRoiDraftTransition("Create auto-outlined volume ROI draft", previousDraft, _volumeRoiDraft);
+                    }
+                    finally
+                    {
+                        _autoOutlineInProgress = false;
+                    }
+                });
+            }
+            catch (Exception ex)
+            {
+                sw.Stop();
+                Exception root = ex is AggregateException agg ? agg.Flatten().InnerExceptions.FirstOrDefault() ?? ex : ex;
+                string detail = $"{root.GetType().Name}: {root.Message}";
+                Console.Error.WriteLine($"[AutoOutline] EXCEPTION in {sw.ElapsedMilliseconds}ms: {detail}");
+                Dispatcher.UIThread.Post(() =>
+                {
+                    _autoOutlineInProgress = false;
+                    AutoOutlineAttempted?.Invoke(new AutoOutlineAttemptInfo(MeasurementKind.VolumeRoi, clampedPoint, sensitivityLevel, false, $"Auto 3D ROI failed ({detail})"));
+                });
+            }
+        });
+
+        return true;
     }
 
     private bool TryBuildAutoOutlinedVolumeContours(
@@ -231,64 +392,52 @@ public partial class DicomViewPanel
         contours = [];
         segmentationMask = null;
         failureReason = "Auto 3D ROI could not isolate a stable volume around this seed.";
-        string propagatedFailureReason = failureReason;
-        VolumeRoiContour[] propagatedContours = [];
-        bool hasPropagatedContours = false;
 
-        if (CanUseSlicePropagatedAutoOutline())
-        {
-            if (TryBuildSlicePropagatedVolumeContours(imagePoint, sensitivityLevel, out propagatedContours, out string slicePropagationFailureMessage))
-            {
-                hasPropagatedContours = propagatedContours.Length > 0;
-                contours = propagatedContours;
-            }
-            else
-            {
-                propagatedFailureReason = slicePropagationFailureMessage;
-            }
-        }
-
+        // ── Fast path: GPU / CPU volume seed segmentation ────────────────────
+        // Try the 3D region-growing path first — when a GPU is available this
+        // completes in <200 ms.  Only fall back to the much slower slice-
+        // propagation path if volume seed produces no usable contours.
         string regionFailureReason = string.Empty;
-
         if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, out HashSet<int> region, out regionFailureReason))
         {
             segmentationMask = CreateSegmentationMaskFromRegion(region);
             VolumeRoiContour[] regionContours = BuildAutoOutlinedVolumeContours(region);
             if (regionContours.Length > 0)
             {
-                if (!hasPropagatedContours || IsVolumeContourCandidatePreferred(regionContours, propagatedContours))
-                {
-                    contours = regionContours;
-                }
-
-                if (contours.Length == 0 && hasPropagatedContours)
-                {
-                    contours = propagatedContours;
-                }
-
-                return true;
-            }
-
-            if (hasPropagatedContours)
-            {
-                contours = propagatedContours;
+                contours = regionContours;
                 return true;
             }
 
             failureReason = "Auto 3D ROI segmented voxels, but no usable slice contours could be reconstructed.";
-            return false;
+            // Fall through to slice-propagation if available.
         }
 
-        if (hasPropagatedContours)
+        // ── Slow fallback: 2D slice propagation ─────────────────────────────
+        // Reslices the volume and runs 2D auto-outline per slice.  This is
+        // expensive but may succeed in cases the 3D seed path cannot handle.
+        if (CanUseSlicePropagatedAutoOutline())
         {
-            contours = propagatedContours;
-            return true;
+            if (TryBuildSlicePropagatedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] propagatedContours, out string slicePropagationFailureMessage))
+            {
+                if (propagatedContours.Length > 0)
+                {
+                    contours = propagatedContours;
+                    return true;
+                }
+            }
+            else
+            {
+                failureReason = string.IsNullOrEmpty(regionFailureReason)
+                    ? slicePropagationFailureMessage
+                    : $"{regionFailureReason} Slice propagation: {slicePropagationFailureMessage}";
+            }
+        }
+        else if (!string.IsNullOrEmpty(regionFailureReason))
+        {
+            failureReason = regionFailureReason;
         }
 
-        failureReason = CanUseSlicePropagatedAutoOutline()
-            ? $"{propagatedFailureReason} 3D grow fallback: {regionFailureReason}"
-            : regionFailureReason;
-        return false;
+        return contours.Length > 0;
     }
 
     private void ApplyAutoOutlinedVolumeContours(Point imagePoint, int sensitivityLevel, VolumeRoiContour[] contours, SegmentationMask3D? segmentationMask)
@@ -1039,6 +1188,16 @@ public partial class DicomViewPanel
 
     private bool TrySegmentVolumeSeed(Point imagePoint, int sensitivityLevel, out HashSet<int> region, out string failureReason)
     {
+        // ── GPU-accelerated path ─────────────────────────────────────────────
+        // Runs the entire region growing on the Tesla/OpenCL GPU with a single
+        // seed, parallel iterative flood-fill, and the same post-processing.
+        if (VolumeComputeBackend.CanUseOpenCl &&
+            TryGpuSegmentVolumeSeed(imagePoint, sensitivityLevel, out region, out failureReason))
+        {
+            return true;
+        }
+
+        // ── CPU fallback (normal + relaxed pass) ─────────────────────────────
         if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, relaxedPass: false, out region, out failureReason))
         {
             return true;
@@ -1056,6 +1215,241 @@ public partial class DicomViewPanel
         }
 
         return false;
+    }
+
+    /// <summary>
+    /// Segment from a patient-space 3D point — used by the centerline pipeline
+    /// where seeds are placed on different slices and the image-space round-trip
+    /// through the current viewing plane would lose the off-plane Z coordinate.
+    /// Converts the patient point directly to voxel space, then delegates to
+    /// the same GPU/CPU paths as the image-point overload.
+    /// </summary>
+    private bool TrySegmentVolumeSeedFromPatient(SpatialVector3D seedPatientPoint, int sensitivityLevel, out HashSet<int> region, out string failureReason)
+    {
+        region = [];
+        failureReason = string.Empty;
+
+        if (_volume is null)
+        {
+            failureReason = "Auto 3D ROI needs a loaded 3D volume.";
+            return false;
+        }
+
+        (double voxelX, double voxelY, double voxelZ) = _volume.PatientToVoxel(seedPatientPoint);
+        int seedX = Math.Clamp((int)Math.Round(voxelX), 0, _volume.SizeX - 1);
+        int seedY = Math.Clamp((int)Math.Round(voxelY), 0, _volume.SizeY - 1);
+        int seedZ = Math.Clamp((int)Math.Round(voxelZ), 0, _volume.SizeZ - 1);
+        short seedValue = _volume.GetVoxel(seedX, seedY, seedZ);
+        Dictionary<int, double> homogenizedCache = [];
+        double homogenizedSeedValue = GetCachedHomogenizedVoxelValue(seedX, seedY, seedZ, homogenizedCache);
+        int seedKey = GetVoxelKey(seedX, seedY, seedZ, _volume.SizeX, _volume.SizeY);
+
+        if (!TryComputeVolumeTolerance(seedX, seedY, seedZ, seedValue, homogenizedSeedValue,
+                sensitivityLevel, relaxedPass: false, homogenizedCache,
+                out _, out double baseTolerance))
+        {
+            failureReason = "The seed has no stable local intensity model for 3D growing.";
+            return false;
+        }
+
+        // ── GPU-accelerated path ─────────────────────────────────────────────
+        if (VolumeComputeBackend.CanUseOpenCl)
+        {
+            bool isMrLike = IsMrLikeModality();
+            bool isCtLike = IsCtLikeModality();
+            double gpuTolerance = baseTolerance * (isMrLike ? 1.8 : isCtLike ? 1.35 : 1.3);
+            float gradientLimit = (float)(baseTolerance * (isMrLike ? 3.0 : 2.2));
+
+            int maxRadiusX = Math.Clamp((int)Math.Round(80.0 / Math.Max(_volume.SpacingX, 0.1)), 12, _volume.SizeX);
+            int maxRadiusY = Math.Clamp((int)Math.Round(80.0 / Math.Max(_volume.SpacingY, 0.1)), 12, _volume.SizeY);
+            int maxRadiusZ = Math.Clamp((int)Math.Round(80.0 / Math.Max(_volume.SpacingZ, 0.1)), 8, _volume.SizeZ);
+
+            var sw = System.Diagnostics.Stopwatch.StartNew();
+            bool ok;
+            int iterations = 0;
+            try
+            {
+                ok = VolumeComputeBackend.TryGpuSegmentRegion(
+                    _volume,
+                    seedX, seedY, seedZ,
+                    (float)homogenizedSeedValue,
+                    (float)gpuTolerance,
+                    gradientLimit,
+                    maxRadiusX, maxRadiusY, maxRadiusZ,
+                    AutoOutlineMaxVoxelCount,
+                    out region,
+                    out iterations);
+            }
+            catch (Exception ex)
+            {
+                _lastGpuSegmentLog = $"[GPU] EXCEPTION {ex.GetType().Name}: {ex.Message}";
+                Console.Error.WriteLine($"[AutoOutline·GPU·Patient] EXCEPTION seed=({seedX},{seedY},{seedZ}): {ex.Message}");
+                region = [];
+                ok = false;
+            }
+
+            long gpuMs = sw.ElapsedMilliseconds;
+            if (ok && region.Count >= AutoOutlineMinPixels * 2)
+            {
+                int rawCount = region.Count;
+                region = RetainSeedConnectedVolumeRegion(region, seedKey);
+                int ccCount = region.Count;
+                if (region.Count >= AutoOutlineMinPixels * 2)
+                {
+                    region = SmoothVolumeRegion(region, seedKey);
+                    if (region.Count >= AutoOutlineMinPixels * 2)
+                    {
+                        long totalMs = sw.ElapsedMilliseconds;
+                        _lastGpuSegmentLog = $"[GPU] OK raw={rawCount} cc={ccCount} final={region.Count} iter={iterations} tol={gpuTolerance:F1} grad={gradientLimit:F1} gpu={gpuMs}ms total={totalMs}ms";
+                        Console.Error.WriteLine($"[AutoOutline·GPU·Patient] OK seed=({seedX},{seedY},{seedZ}) raw={rawCount} final={region.Count} iter={iterations} {totalMs}ms");
+                        return true;
+                    }
+                }
+            }
+
+            // GPU path didn't produce a viable result — fall through to CPU.
+            _lastGpuSegmentLog = $"[GPU] raw={region.Count} iter={iterations} tol={gpuTolerance:F1} {gpuMs}ms → FALLBACK";
+            region = [];
+        }
+
+        // ── CPU fallback — convert to image point for existing CPU path ──────
+        if (SpatialMetadata is not null)
+        {
+            Point imagePoint = SpatialMetadata.PixelPointFromPatient(seedPatientPoint);
+            imagePoint = ClampImagePoint(imagePoint);
+            if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, relaxedPass: false, out region, out failureReason))
+            {
+                return true;
+            }
+
+            if (TrySegmentVolumeSeed(imagePoint, sensitivityLevel, relaxedPass: true, out region, out failureReason))
+            {
+                return true;
+            }
+        }
+
+        failureReason = "Volume seed segmentation failed from patient-space coordinates.";
+        return false;
+    }
+
+    /// <summary>
+    /// Diagnostic log from the most recent GPU segmentation attempt.
+    /// Surfaced in the toast to make GPU behaviour visible during development.
+    /// </summary>
+    private string _lastGpuSegmentLog = string.Empty;
+
+    private bool TryGpuSegmentVolumeSeed(Point imagePoint, int sensitivityLevel, out HashSet<int> region, out string failureReason)
+    {
+        region = [];
+        failureReason = string.Empty;
+        _lastGpuSegmentLog = string.Empty;
+
+        if (_volume is null || SpatialMetadata is null)
+        {
+            failureReason = "Auto 3D ROI needs a loaded 3D volume.";
+            return false;
+        }
+
+        // Reuse the same seed-position and tolerance computation as the CPU path.
+        SpatialVector3D seedPatientPoint = SpatialMetadata.PatientPointFromPixel(imagePoint);
+        (double voxelX, double voxelY, double voxelZ) = _volume.PatientToVoxel(seedPatientPoint);
+        int seedX = Math.Clamp((int)Math.Round(voxelX), 0, _volume.SizeX - 1);
+        int seedY = Math.Clamp((int)Math.Round(voxelY), 0, _volume.SizeY - 1);
+        int seedZ = Math.Clamp((int)Math.Round(voxelZ), 0, _volume.SizeZ - 1);
+        short seedValue = _volume.GetVoxel(seedX, seedY, seedZ);
+        Dictionary<int, double> homogenizedCache = [];
+        double homogenizedSeedValue = GetCachedHomogenizedVoxelValue(seedX, seedY, seedZ, homogenizedCache);
+        int seedKey = GetVoxelKey(seedX, seedY, seedZ, _volume.SizeX, _volume.SizeY);
+
+        if (!TryComputeVolumeTolerance(seedX, seedY, seedZ, seedValue, homogenizedSeedValue,
+                sensitivityLevel, relaxedPass: false, homogenizedCache,
+                out _, out double baseTolerance))
+        {
+            _lastGpuSegmentLog = "[GPU] tolerance computation failed — no stable seed model";
+            failureReason = "The clicked seed has no stable local intensity model for GPU growing.";
+            return false;
+        }
+
+        int maxRadiusX = Math.Clamp((int)Math.Round(80.0 / Math.Max(_volume.SpacingX, 0.1)), 12, _volume.SizeX);
+        int maxRadiusY = Math.Clamp((int)Math.Round(80.0 / Math.Max(_volume.SpacingY, 0.1)), 12, _volume.SizeY);
+        int maxRadiusZ = Math.Clamp((int)Math.Round(80.0 / Math.Max(_volume.SpacingZ, 0.1)), 8, _volume.SizeZ);
+
+        // The GPU uses a single flat tolerance+gradient check per voxel, unlike the
+        // CPU which has adaptive tolerance, parent-delta, local-median, neighbourhood
+        // support, and priority-queue ordering.  To compensate, the GPU tolerance must
+        // be more generous than the CPU base tolerance.  The CPU effectively accepts
+        // voxels up to ~1.7× baseTolerance (MR) / ~1.2× baseTolerance (CT) via the
+        // seed-delta path alone, and the adaptive tolerance widens further as the
+        // region grows.  Apply a comparable widening here.
+        bool isMrLike = IsMrLikeModality();
+        bool isCtLike = IsCtLikeModality();
+        double gpuTolerance = baseTolerance * (isMrLike ? 1.8 : isCtLike ? 1.35 : 1.3);
+        float gradientLimit = (float)(baseTolerance * (isMrLike ? 3.0 : 2.2));
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        bool ok;
+        int iterations = 0;
+        try
+        {
+            ok = VolumeComputeBackend.TryGpuSegmentRegion(
+                _volume,
+                seedX, seedY, seedZ,
+                (float)homogenizedSeedValue,
+                (float)gpuTolerance,
+                gradientLimit,
+                maxRadiusX, maxRadiusY, maxRadiusZ,
+                AutoOutlineMaxVoxelCount,
+                out region,
+                out iterations);
+        }
+        catch (Exception ex)
+        {
+            _lastGpuSegmentLog = $"[GPU] EXCEPTION {ex.GetType().Name}: {ex.Message}";
+            Console.Error.WriteLine($"[AutoOutline·GPU] EXCEPTION seed=({seedX},{seedY},{seedZ}) tol={gpuTolerance:F1} grad={gradientLimit:F1}: {ex.Message}");
+            region = [];
+            failureReason = "GPU region growing threw an exception.";
+            return false;
+        }
+
+        long gpuMs = sw.ElapsedMilliseconds;
+
+        if (!ok || region.Count < AutoOutlineMinPixels * 2)
+        {
+            _lastGpuSegmentLog = $"[GPU] raw={region.Count} iter={iterations} tol={gpuTolerance:F1} grad={gradientLimit:F1} {gpuMs}ms → FALLBACK";
+            Console.Error.WriteLine($"[AutoOutline·GPU] FAILED seed=({seedX},{seedY},{seedZ}) raw={region.Count} iter={iterations} tol={gpuTolerance:F1} grad={gradientLimit:F1} {gpuMs}ms");
+            failureReason = "GPU region growing did not produce a viable region. Falling back to CPU.";
+            region = [];
+            return false;
+        }
+
+        int rawCount = region.Count;
+
+        // Same post-processing as the CPU path.
+        region = RetainSeedConnectedVolumeRegion(region, seedKey);
+        if (region.Count < AutoOutlineMinPixels * 2)
+        {
+            _lastGpuSegmentLog = $"[GPU] raw={rawCount} cc={region.Count} iter={iterations} tol={gpuTolerance:F1} {gpuMs}ms → CC too small";
+            Console.Error.WriteLine($"[AutoOutline·GPU] FRAGMENTED after CC: raw={rawCount} cc={region.Count} {sw.ElapsedMilliseconds}ms");
+            failureReason = "GPU segmented region was too fragmented after connected-component filtering.";
+            region = [];
+            return false;
+        }
+
+        int ccCount = region.Count;
+        region = SmoothVolumeRegion(region, seedKey);
+        if (region.Count < AutoOutlineMinPixels * 2)
+        {
+            _lastGpuSegmentLog = $"[GPU] raw={rawCount} cc={ccCount} smooth={region.Count} {sw.ElapsedMilliseconds}ms → smooth collapsed";
+            Console.Error.WriteLine($"[AutoOutline·GPU] COLLAPSED after smooth: {region.Count} voxels {sw.ElapsedMilliseconds}ms");
+            failureReason = "GPU segmented region collapsed during smoothing.";
+            region = [];
+            return false;
+        }
+
+        long totalMs = sw.ElapsedMilliseconds;
+        _lastGpuSegmentLog = $"[GPU] OK raw={rawCount} cc={ccCount} final={region.Count} iter={iterations} tol={gpuTolerance:F1} grad={gradientLimit:F1} gpu={gpuMs}ms total={totalMs}ms";
+        Console.Error.WriteLine($"[AutoOutline·GPU] OK seed=({seedX},{seedY},{seedZ}) raw={rawCount} final={region.Count} iter={iterations} {totalMs}ms");
+        return true;
     }
 
     private bool TrySegmentVolumeSeed(Point imagePoint, int sensitivityLevel, bool relaxedPass, out HashSet<int> region, out string failureReason)
@@ -2250,7 +2644,9 @@ public partial class DicomViewPanel
             return 0;
         }
 
-        List<double> rawSamples = [];
+        // Sample the 3×3×3 neighborhood once (27 voxels) into a stack-allocated buffer.
+        Span<short> rawSamples = stackalloc short[27];
+        int sampleCount = 0;
         for (int offsetZ = -1; offsetZ <= 1; offsetZ++)
         {
             int sampleZ = Math.Clamp(z + offsetZ, 0, _volume.SizeZ - 1);
@@ -2260,39 +2656,64 @@ public partial class DicomViewPanel
                 for (int offsetX = -1; offsetX <= 1; offsetX++)
                 {
                     int sampleX = Math.Clamp(x + offsetX, 0, _volume.SizeX - 1);
-                    rawSamples.Add(_volume.GetVoxel(sampleX, sampleY, sampleZ));
+                    rawSamples[sampleCount++] = _volume.GetVoxel(sampleX, sampleY, sampleZ);
                 }
             }
         }
 
-        if (rawSamples.Count == 0)
+        if (sampleCount == 0)
         {
             return 0;
         }
 
-        (double clampLower, double clampUpper) = ComputeRobustHomogenizationBounds(rawSamples, (_modality ?? string.Empty).Trim().ToUpperInvariant());
+        Span<short> sorted = rawSamples[..sampleCount];
+        sorted.Sort();
+
+        // Compute robust clamp bounds (inline, no allocation).
+        double median = sorted[sampleCount / 2];
+        double q1 = sorted[sampleCount / 4];
+        double q3 = sorted[(sampleCount * 3) / 4];
+        double iqr = Math.Max(0, q3 - q1);
+
+        // Compute MAD in-place using a stack-allocated scratch buffer.
+        Span<double> deviations = stackalloc double[sampleCount];
+        for (int i = 0; i < sampleCount; i++)
+            deviations[i] = Math.Abs(sorted[i] - median);
+        deviations.Sort();
+        double mad = deviations[sampleCount / 2];
+
+        string modality = (_modality ?? string.Empty).Trim().ToUpperInvariant();
+        bool isCtLike = modality is "CT" or "CTA";
+        double positiveRange = isCtLike
+            ? Math.Max(8.0, Math.Max(mad * AutoOutlineCtPositiveOutlierMadMultiplier, iqr * 0.55))
+            : Math.Max(6.0, Math.Max(mad * AutoOutlineGenericOutlierMadMultiplier, iqr * 0.70));
+        double negativeRange = isCtLike
+            ? Math.Max(10.0, Math.Max(mad * AutoOutlineCtNegativeOutlierMadMultiplier, iqr * 0.85))
+            : Math.Max(6.0, Math.Max(mad * AutoOutlineGenericOutlierMadMultiplier, iqr * 0.70));
+        double clampLower = median - negativeRange;
+        double clampUpper = median + positiveRange;
+
+        // Weighted average with distance-from-center weighting (reuses rawSamples, no re-read).
         double weightedSum = 0;
         double weightTotal = 0;
+        int idx = 0;
         for (int offsetZ = -1; offsetZ <= 1; offsetZ++)
         {
-            int sampleZ = Math.Clamp(z + offsetZ, 0, _volume.SizeZ - 1);
             int weightZ = offsetZ == 0 ? 2 : 1;
             for (int offsetY = -1; offsetY <= 1; offsetY++)
             {
-                int sampleY = Math.Clamp(y + offsetY, 0, _volume.SizeY - 1);
                 int weightY = offsetY == 0 ? 2 : 1;
                 for (int offsetX = -1; offsetX <= 1; offsetX++)
                 {
-                    int sampleX = Math.Clamp(x + offsetX, 0, _volume.SizeX - 1);
                     int weightX = offsetX == 0 ? 2 : 1;
                     int weight = weightX * weightY * weightZ;
-                    weightedSum += Math.Clamp(_volume.GetVoxel(sampleX, sampleY, sampleZ), clampLower, clampUpper) * weight;
+                    weightedSum += Math.Clamp((double)rawSamples[idx++], clampLower, clampUpper) * weight;
                     weightTotal += weight;
                 }
             }
         }
 
-        return weightTotal <= 0 ? rawSamples.Average() : weightedSum / weightTotal;
+        return weightTotal <= 0 ? median : weightedSum / weightTotal;
     }
 
     private static double ComputeInterQuartileRange(List<double> values)
@@ -2369,9 +2790,202 @@ public partial class DicomViewPanel
         return orderedValues[lower] + ((orderedValues[upper] - orderedValues[lower]) * t);
     }
 
+    /// <summary>
+    /// Per-slice voxel index built by <see cref="PreIndexRegionBySlice"/>.
+    /// Stores the 2-D bounding box and per-voxel (col, row) coordinates for
+    /// a single slice so that contour extraction can skip empty slices entirely
+    /// and only iterate the tight bounding box.
+    /// </summary>
+    private readonly struct SliceVoxelIndex(int minCol, int maxCol, int minRow, int maxRow, List<(int Col, int Row)> pixels)
+    {
+        public readonly int MinCol = minCol;
+        public readonly int MaxCol = maxCol;
+        public readonly int MinRow = minRow;
+        public readonly int MaxRow = maxRow;
+        public readonly List<(int Col, int Row)> Pixels = pixels;
+    }
+
+    /// <summary>
+    /// Pre-indexes the voxel-key region into per-slice buckets in a single O(N) pass.
+    /// For axial orientation the slice key is Z, column is X, row is Y.
+    /// For coronal it is Y/X/Z; for sagittal it is X/Y/Z.
+    /// Returns a dictionary mapping slice index → <see cref="SliceVoxelIndex"/>.
+    /// </summary>
+    private Dictionary<int, SliceVoxelIndex> PreIndexRegionBySlice(HashSet<int> region)
+    {
+        if (_volume is null)
+        {
+            return [];
+        }
+
+        int sizeX = _volume.SizeX;
+        int sizeY = _volume.SizeY;
+
+        // Temporary mutable accumulators per slice.
+        Dictionary<int, (int minCol, int maxCol, int minRow, int maxRow, List<(int, int)> pixels)> acc = [];
+
+        foreach (int key in region)
+        {
+            DecodeVoxelKey(key, sizeX, sizeY, out int x, out int y, out int z);
+
+            // Map (x, y, z) to (sliceIndex, col, row) depending on orientation.
+            int sliceIndex, col, row;
+            switch (_volumeOrientation)
+            {
+                case SliceOrientation.Axial:
+                    sliceIndex = z; col = x; row = y;
+                    break;
+                case SliceOrientation.Coronal:
+                    sliceIndex = y; col = x; row = z; // row will be remapped later
+                    break;
+                case SliceOrientation.Sagittal:
+                    sliceIndex = x; col = y; row = z; // row will be remapped later
+                    break;
+                default:
+                    continue;
+            }
+
+            if (!acc.TryGetValue(sliceIndex, out var bucket))
+            {
+                bucket = (col, col, row, row, []);
+                acc[sliceIndex] = bucket;
+            }
+            else
+            {
+                bucket.minCol = Math.Min(bucket.minCol, col);
+                bucket.maxCol = Math.Max(bucket.maxCol, col);
+                bucket.minRow = Math.Min(bucket.minRow, row);
+                bucket.maxRow = Math.Max(bucket.maxRow, row);
+                acc[sliceIndex] = bucket;
+            }
+
+            bucket.pixels.Add((col, row));
+        }
+
+        // Convert to immutable index.
+        Dictionary<int, SliceVoxelIndex> result = new(acc.Count);
+        foreach ((int sliceIdx, var bucket) in acc)
+        {
+            result[sliceIdx] = new SliceVoxelIndex(bucket.minCol, bucket.maxCol, bucket.minRow, bucket.maxRow, bucket.pixels);
+        }
+
+        return result;
+    }
+
+    /// <summary>
+    /// Builds a tight 2-D boolean mask from a pre-indexed slice.
+    /// For coronal / sagittal orientations the row coordinate is the raw Z index,
+    /// which needs remapping through <see cref="MapOutputRowToSourceZ"/>.
+    /// Returns the mask in image-space coordinates (col, row) and the origin
+    /// offset (left, top) so boundary points can be translated back.
+    /// </summary>
+    private bool TryBuildSliceMaskFromPreIndex(
+        SliceVoxelIndex index,
+        out bool[,] mask,
+        out int left,
+        out int top,
+        out int setCount)
+    {
+        mask = new bool[1, 1];
+        left = 0;
+        top = 0;
+        setCount = 0;
+
+        if (_volume is null)
+        {
+            return false;
+        }
+
+        bool needsRowRemap = _volumeOrientation is SliceOrientation.Coronal or SliceOrientation.Sagittal;
+        double targetSpacingY = _volume.SpacingY > 0 ? _volume.SpacingY : 1.0;
+        int outputHeight = needsRowRemap
+            ? GetResampledDepth(_volume.SizeZ, _volume.SpacingZ, targetSpacingY)
+            : 0; // not used for axial
+
+        // For coronal/sagittal, the stored row is the raw Z.  We need to map
+        // each Z → output row and recompute the bounding box in output space.
+        int minCol = index.MinCol;
+        int maxCol = index.MaxCol;
+        int minRow, maxRow;
+
+        if (needsRowRemap)
+        {
+            // Build a lookup table from source-Z → output-row.
+            // The output row range is [0 .. outputHeight-1].
+            minRow = int.MaxValue;
+            maxRow = int.MinValue;
+            foreach ((int _, int rawZ) in index.Pixels)
+            {
+                int outputRow = MapSourceZToOutputRow(rawZ, outputHeight, _volume.SizeZ);
+                if (outputRow < minRow) minRow = outputRow;
+                if (outputRow > maxRow) maxRow = outputRow;
+            }
+
+            if (minRow > maxRow)
+            {
+                return false;
+            }
+        }
+        else
+        {
+            minRow = index.MinRow;
+            maxRow = index.MaxRow;
+        }
+
+        left = minCol;
+        top = minRow;
+        int width = maxCol - minCol + 1;
+        int height = maxRow - minRow + 1;
+        if (width <= 0 || height <= 0)
+        {
+            return false;
+        }
+
+        mask = new bool[width, height];
+
+        if (needsRowRemap)
+        {
+            foreach ((int col, int rawZ) in index.Pixels)
+            {
+                int outputRow = MapSourceZToOutputRow(rawZ, outputHeight, _volume.SizeZ);
+                mask[col - left, outputRow - top] = true;
+            }
+        }
+        else
+        {
+            foreach ((int col, int row) in index.Pixels)
+            {
+                mask[col - left, row - top] = true;
+            }
+        }
+
+        setCount = index.Pixels.Count;
+        return setCount >= AutoOutlineMinPixels;
+    }
+
+    /// <summary>Inverse of <see cref="MapOutputRowToSourceZ"/>.</summary>
+    private static int MapSourceZToOutputRow(int sourceZ, int outputHeight, int sourceDepth)
+    {
+        if (outputHeight <= 1 || sourceDepth <= 1)
+        {
+            return 0;
+        }
+
+        // MapOutputRowToSourceZ: z = (outputHeight-1-row) * (sourceDepth-1) / (outputHeight-1)
+        // Inverse: row = outputHeight-1 - z * (outputHeight-1) / (sourceDepth-1)
+        return Math.Clamp((int)Math.Round(outputHeight - 1 - (sourceZ * (outputHeight - 1) / (double)(sourceDepth - 1))), 0, outputHeight - 1);
+    }
+
     private VolumeRoiContour[] BuildAutoOutlinedVolumeContours(HashSet<int> region)
     {
         if (_volume is null || SpatialMetadata is null)
+        {
+            return [];
+        }
+
+        // ── Pre-index: one O(N) pass over the region ────────────────────────
+        Dictionary<int, SliceVoxelIndex> sliceIndex = PreIndexRegionBySlice(region);
+        if (sliceIndex.Count == 0)
         {
             return [];
         }
@@ -2380,22 +2994,32 @@ public partial class DicomViewPanel
         List<VolumeRoiContour> contours = [];
         List<VolumeSliceComponentState> previousSliceComponents = [];
         int nextComponentId = 0;
-        for (int sliceIndex = 0; sliceIndex < sliceCount; sliceIndex++)
+
+        for (int si = 0; si < sliceCount; si++)
         {
-            if (!TryBuildSliceMaskFromRegion(region, sliceIndex, out bool[,] sliceMask))
+            if (!sliceIndex.TryGetValue(si, out SliceVoxelIndex idx))
+            {
+                // No voxels on this slice — fast skip, reset component tracking.
+                if (previousSliceComponents.Count > 0)
+                    previousSliceComponents.Clear();
+                continue;
+            }
+
+            if (!TryBuildSliceMaskFromPreIndex(idx, out bool[,] sliceMask, out int maskLeft, out int maskTop, out int setCount)
+                || setCount < AutoOutlineMinPixels)
             {
                 previousSliceComponents.Clear();
                 continue;
             }
 
-            AutoOutlineMask[] componentMasks = ExtractConnectedSliceMasks(sliceMask);
+            AutoOutlineMask[] componentMasks = ExtractConnectedSliceMasks(sliceMask, maskLeft, maskTop);
             if (componentMasks.Length == 0)
             {
                 previousSliceComponents.Clear();
                 continue;
             }
 
-            DicomSpatialMetadata metadata = VolumeReslicer.GetSliceSpatialMetadata(_volume, _volumeOrientation, sliceIndex);
+            DicomSpatialMetadata metadata = VolumeReslicer.GetSliceSpatialMetadata(_volume, _volumeOrientation, si);
             List<VolumeSliceContourCandidate> currentCandidates = [];
             foreach (AutoOutlineMask componentMask in componentMasks.OrderByDescending(mask => mask.Count))
             {
@@ -2551,6 +3175,23 @@ public partial class DicomViewPanel
         }
 
         return [.. components];
+    }
+
+    private static AutoOutlineMask[] ExtractConnectedSliceMasks(bool[,] mask, int offsetLeft, int offsetTop)
+    {
+        AutoOutlineMask[] locals = ExtractConnectedSliceMasks(mask);
+        if (offsetLeft == 0 && offsetTop == 0)
+        {
+            return locals;
+        }
+
+        for (int i = 0; i < locals.Length; i++)
+        {
+            AutoOutlineMask m = locals[i];
+            locals[i] = new AutoOutlineMask(m.Left + offsetLeft, m.Top + offsetTop, m.Pixels, m.Count);
+        }
+
+        return locals;
     }
 
     private static Point ComputeMaskCentroid(AutoOutlineMask mask)
@@ -3000,11 +3641,21 @@ public partial class DicomViewPanel
 
     private bool IsMrLikeModality()
     {
+        return _cachedIsMrLike ??= ComputeIsMrLikeModality();
+    }
+
+    private bool ComputeIsMrLikeModality()
+    {
         string modality = (_modality ?? string.Empty).Trim().ToUpperInvariant();
         return modality is "MR" or "MRI";
     }
 
     private bool IsCtLikeModality()
+    {
+        return _cachedIsCtLike ??= ComputeIsCtLikeModality();
+    }
+
+    private bool ComputeIsCtLikeModality()
     {
         string modality = (_modality ?? string.Empty).Trim().ToUpperInvariant();
         return modality is "CT" or "CTA";

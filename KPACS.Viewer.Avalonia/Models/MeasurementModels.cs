@@ -38,16 +38,28 @@ public sealed record VolumeRoiContour(
             return false;
         }
 
+        // Quick reject on first anchor — all anchors share the same geometric plane,
+        // so testing one is sufficient and avoids iterating the full array.
         double planeTolerance = Math.Max(0.75, Math.Min(metadata.RowSpacing, metadata.ColumnSpacing));
-        if (Anchors.Any(anchor => anchor.PatientPoint is null || metadata.DistanceToPlane(anchor.PatientPoint.Value) > planeTolerance))
+        if (Anchors[0].PatientPoint is not { } firstPatientPoint ||
+            metadata.DistanceToPlane(firstPatientPoint) > planeTolerance)
         {
             return false;
         }
 
-        imagePoints = Anchors
-            .Select(anchor => metadata.PixelPointFromPatient(anchor.PatientPoint!.Value))
-            .ToArray();
-        return imagePoints.Length > 0;
+        Point[] points = new Point[Anchors.Length];
+        for (int i = 0; i < Anchors.Length; i++)
+        {
+            if (Anchors[i].PatientPoint is null)
+            {
+                return false;
+            }
+
+            points[i] = metadata.PixelPointFromPatient(Anchors[i].PatientPoint!.Value);
+        }
+
+        imagePoints = points;
+        return true;
     }
 }
 
@@ -65,6 +77,19 @@ public sealed record StudyMeasurement(
     VolumeRoiContour[]? VolumeContours = null,
     Guid? SegmentationMaskId = null)
 {
+    /// <summary>
+    /// Multi-entry cache for volume contour projections keyed by quantized plane position.
+    /// Eliminates re-computation when scrolling back and forth through the same slices.
+    /// Only accessed from the UI thread; does not participate in record equality.
+    /// </summary>
+    private Dictionary<long, (Point[][] Contours, bool IsInterpolated)>? _volumeContourProjectionCache;
+
+    /// <summary>
+    /// Lazily built sorted contour index grouped by component. Enables binary search
+    /// for bracketing contour pairs instead of repeated GroupBy + OrderBy per scroll step.
+    /// </summary>
+    private (int ComponentId, double[] PlanePositions, VolumeRoiContour[] Contours)[]? _sortedContourComponentIndex;
+
     public static StudyMeasurement Create(
         MeasurementKind kind,
         string sourceFilePath,
@@ -222,6 +247,17 @@ public sealed record StudyMeasurement(
             return false;
         }
 
+        // Multi-entry cache — survives across scroll steps so revisited slices are free.
+        double currentPlanePosition = metadata.Origin.Dot(metadata.Normal);
+        long cacheKey = BitConverter.DoubleToInt64Bits(Math.Round(currentPlanePosition, 3));
+        _volumeContourProjectionCache ??= [];
+        if (_volumeContourProjectionCache.TryGetValue(cacheKey, out var cached))
+        {
+            contours = cached.Contours;
+            isInterpolated = cached.IsInterpolated;
+            return contours.Length > 0;
+        }
+
         List<Point[]> projected = [];
         foreach (VolumeRoiContour contour in VolumeContours)
         {
@@ -236,6 +272,7 @@ public sealed record StudyMeasurement(
         if (projected.Count > 0)
         {
             contours = projected.ToArray();
+            _volumeContourProjectionCache[cacheKey] = (contours, false);
             return true;
         }
 
@@ -243,9 +280,12 @@ public sealed record StudyMeasurement(
         {
             contours = interpolatedContours;
             isInterpolated = true;
+            _volumeContourProjectionCache[cacheKey] = (contours, true);
             return true;
         }
 
+        // Cache negative result to avoid re-computation for out-of-range slices.
+        _volumeContourProjectionCache[cacheKey] = ([], false);
         return false;
     }
 
@@ -261,73 +301,102 @@ public sealed record StudyMeasurement(
         const int sampleCount = 40;
         double currentPlanePosition = metadata.Origin.Dot(metadata.Normal);
 
-        List<Point[]> interpolated = [];
-        foreach ((VolumeRoiContour Contour, Vector3D[] Points)[] closedContours in VolumeContours
-            .Where(contour => contour.IsClosed && contour.Anchors.Length >= 3)
-            .GroupBy(contour => contour.ComponentId)
-            .OrderBy(group => group.Key)
-            .Select(group => group
-                .OrderBy(contour => contour.PlanePosition)
-                .Select(contour => (Contour: contour, Points: ResampleClosedContour(contour, sampleCount)))
-                .Where(item => item.Points.Length >= 3)
-                .ToArray()))
+        var componentIndex = GetSortedContourComponentIndex();
+        if (componentIndex.Length == 0)
         {
-            if (closedContours.Length < 2)
+            return false;
+        }
+
+        List<Point[]> interpolated = [];
+        foreach ((int componentId, double[] planePositions, VolumeRoiContour[] contours) in componentIndex)
+        {
+            if (contours.Length < 2)
             {
                 continue;
             }
 
-            for (int index = 1; index < closedContours.Length; index++)
+            // Binary search for the bracketing pair instead of linear scan.
+            int searchResult = Array.BinarySearch(planePositions, currentPlanePosition);
+            if (searchResult >= 0)
             {
-                if (closedContours[index - 1].Points.Length == closedContours[index].Points.Length)
-                {
-                    closedContours[index] = (
-                        closedContours[index].Contour,
-                        AlignContourPoints(closedContours[index - 1].Points, closedContours[index].Points));
-                }
+                // Exact match — the direct-projection path should have handled this.
+                continue;
             }
 
-            for (int index = 0; index < closedContours.Length - 1; index++)
+            int insertionPoint = ~searchResult;
+            if (insertionPoint <= 0 || insertionPoint >= contours.Length)
             {
-                (VolumeRoiContour lowerContour, Vector3D[] lowerPoints) = closedContours[index];
-                (VolumeRoiContour upperContour, Vector3D[] upperPoints) = closedContours[index + 1];
+                continue;
+            }
 
-                double lowerPlane = lowerContour.PlanePosition;
-                double upperPlane = upperContour.PlanePosition;
-                if (currentPlanePosition <= lowerPlane || currentPlanePosition >= upperPlane)
-                {
-                    continue;
-                }
+            int lowerIndex = insertionPoint - 1;
+            VolumeRoiContour lowerContour = contours[lowerIndex];
+            VolumeRoiContour upperContour = contours[lowerIndex + 1];
+            double lowerPlane = lowerContour.PlanePosition;
+            double upperPlane = upperContour.PlanePosition;
+            double thickness = upperPlane - lowerPlane;
+            if (Math.Abs(thickness) <= double.Epsilon)
+            {
+                continue;
+            }
 
-                double thickness = upperPlane - lowerPlane;
-                if (Math.Abs(thickness) <= double.Epsilon)
-                {
-                    continue;
-                }
+            double t = (currentPlanePosition - lowerPlane) / thickness;
 
-                double t = (currentPlanePosition - lowerPlane) / thickness;
-                Vector3D[] interpolatedPoints = VolumeRoiInterpolationHelper.TryInterpolateContour(
-                    CreateInterpolationInput(lowerContour),
-                    CreateInterpolationInput(upperContour),
-                    t,
-                    sampleCount,
-                    out Vector3D[] maskInterpolatedPoints)
-                    ? maskInterpolatedPoints
-                    : InterpolateContourPoints(lowerPoints, upperPoints, t);
-                Point[] projected = interpolatedPoints
-                    .Select(metadata.PixelPointFromPatient)
-                    .ToArray();
-                if (projected.Length >= 3)
-                {
-                    interpolated.Add(projected);
-                }
+            // Fast linear interpolation: resample + align + lerp.
+            // Avoids the expensive SDF grid computation (up to 192×192 cells × P vertices).
+            Vector3D[] lowerPoints = ResampleClosedContour(lowerContour, sampleCount);
+            Vector3D[] upperPoints = ResampleClosedContour(upperContour, sampleCount);
+            if (lowerPoints.Length < 3 || upperPoints.Length < 3)
+            {
+                continue;
+            }
 
-                break;
+            if (lowerPoints.Length == upperPoints.Length)
+            {
+                upperPoints = AlignContourPoints(lowerPoints, upperPoints);
+            }
+
+            Vector3D[] interpolatedPts = InterpolateContourPoints(lowerPoints, upperPoints, t);
+            Point[] projected = new Point[interpolatedPts.Length];
+            for (int i = 0; i < interpolatedPts.Length; i++)
+            {
+                projected[i] = metadata.PixelPointFromPatient(interpolatedPts[i]);
+            }
+
+            if (projected.Length >= 3)
+            {
+                interpolated.Add(projected);
             }
         }
 
         imagePoints = interpolated.ToArray();
         return imagePoints.Length > 0;
+    }
+
+    private (int ComponentId, double[] PlanePositions, VolumeRoiContour[] Contours)[] GetSortedContourComponentIndex()
+    {
+        if (_sortedContourComponentIndex is not null)
+        {
+            return _sortedContourComponentIndex;
+        }
+
+        if (VolumeContours is null || VolumeContours.Length == 0)
+        {
+            _sortedContourComponentIndex = [];
+            return _sortedContourComponentIndex;
+        }
+
+        _sortedContourComponentIndex = VolumeContours
+            .Where(c => c.IsClosed && c.Anchors.Length >= 3)
+            .GroupBy(c => c.ComponentId)
+            .OrderBy(g => g.Key)
+            .Select(g =>
+            {
+                VolumeRoiContour[] ordered = g.OrderBy(c => c.PlanePosition).ToArray();
+                return (g.Key, ordered.Select(c => c.PlanePosition).ToArray(), ordered);
+            })
+            .ToArray();
+        return _sortedContourComponentIndex;
     }
 
     private static VolumeContourInterpolationInput CreateInterpolationInput(VolumeRoiContour contour)

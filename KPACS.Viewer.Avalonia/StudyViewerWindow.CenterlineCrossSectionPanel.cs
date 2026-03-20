@@ -18,6 +18,7 @@ public partial class StudyViewerWindow
     private readonly byte[] _centerlineCrossSectionLutR = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
     private readonly byte[] _centerlineCrossSectionLutG = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
     private readonly byte[] _centerlineCrossSectionLutB = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
+    private const int CenterlineSyncThrottleMs = 16;
     private Point _centerlineCrossSectionOffset;
     private bool _centerlineCrossSectionPinned;
     private double _centerlineCrossSectionStationNormalized;
@@ -27,6 +28,11 @@ public partial class StudyViewerWindow
     private Point _centerlineCrossSectionDragStart;
     private Point _centerlineCrossSectionDragStartOffset;
     private bool _isUpdatingCenterlineCrossSectionSlider;
+    private readonly Avalonia.Threading.DispatcherTimer _centerlineSyncDebounceTimer = new();
+    private bool _centerlineSyncThrottleActive;
+    private ViewportSlot? _pendingCenterlineSyncSlot;
+    private SeriesVolume? _pendingCenterlineSyncVolume;
+    private SpatialVector3D? _pendingCenterlineSyncPatientPoint;
 
     private void RefreshCenterlineCrossSectionPanel()
     {
@@ -59,8 +65,57 @@ public partial class StudyViewerWindow
         CenterlinePathPoint pathPoint = path.Points[stationIndex];
         var stopwatch = StartVascularStopwatch();
         SpatialVector3D tangent = GetCenterlineTangent(path, stationIndex);
-        VolumeSlicePlane plane = CreateCenterlineCrossSectionPlane(volume, pathPoint.PatientPoint, tangent);
-        ReslicedImage resliced = VolumeReslicer.ExtractSlice(volume, plane);
+
+        // Try direct GPU cross-section kernel (avoids VolumeSlicePlane construction overhead).
+        ReslicedImage resliced;
+        SpatialVector3D referenceUp = Math.Abs(tangent.Dot(volume.Normal)) < 0.92 ? volume.Normal : volume.ColumnDirection;
+        SpatialVector3D csRow = tangent.Cross(referenceUp).Normalize();
+        if (csRow.Length <= 1e-6) csRow = tangent.Cross(volume.RowDirection).Normalize();
+        if (csRow.Length <= 1e-6) csRow = new SpatialVector3D(1, 0, 0);
+        SpatialVector3D csCol = csRow.Cross(tangent).Normalize();
+        double csPixelSpacing = CenterlineCrossSectionFieldOfViewMm / CenterlineCrossSectionImageSize;
+
+        if (VolumeComputeBackend.TryRenderCrossSection(
+                volume,
+                pathPoint.PatientPoint,
+                csRow,
+                csCol,
+                CenterlineCrossSectionFieldOfViewMm,
+                CenterlineCrossSectionImageSize,
+                out short[] gpuPixels))
+        {
+            resliced = new ReslicedImage
+            {
+                Pixels = gpuPixels,
+                Width = CenterlineCrossSectionImageSize,
+                Height = CenterlineCrossSectionImageSize,
+                PixelSpacingX = csPixelSpacing,
+                PixelSpacingY = csPixelSpacing,
+                RenderBackendLabel = VolumeComputeBackend.CurrentStatus.DisplayName,
+            };
+        }
+        else
+        {
+            if (VolumeComputeBackend.CpuFallbackDisabled)
+            {
+                Console.Error.WriteLine($"[CPU·BLOCKED] Cross-section fallback suppressed — returning blank image");
+                resliced = new ReslicedImage
+                {
+                    Pixels = new short[CenterlineCrossSectionImageSize * CenterlineCrossSectionImageSize],
+                    Width = CenterlineCrossSectionImageSize,
+                    Height = CenterlineCrossSectionImageSize,
+                    PixelSpacingX = csPixelSpacing,
+                    PixelSpacingY = csPixelSpacing,
+                    RenderBackendLabel = "NONE (CPU disabled)",
+                };
+            }
+            else
+            {
+                VolumeSlicePlane plane = CreateCenterlineCrossSectionPlane(volume, pathPoint.PatientPoint, tangent);
+                resliced = VolumeReslicer.ExtractSlice(volume, plane);
+            }
+        }
+
         RenderCenterlineCrossSectionImage(resliced);
         RecordVascularPerformanceMetric("cross-section-scrub", stopwatch.Elapsed.TotalMilliseconds);
 
@@ -80,10 +135,10 @@ public partial class StudyViewerWindow
         CenterlineCrossSectionPinButton.IsChecked = _centerlineCrossSectionPinned;
         CenterlineCrossSectionTitleText.Text = "Centerline cross-section";
         CenterlineCrossSectionSummaryText.Text = $"{seedSet.Label} · {path.Summary}";
-        CenterlineCrossSectionStatusText.Text = $"Station {stationIndex + 1}/{path.Points.Count} · {pathPoint.ArcLengthMm:0.0} / {path.TotalLengthMm:0.0} mm · q={path.QualityScore:0.00} · {BuildVascularMarkerStatus(path)}";
+        CenterlineCrossSectionStatusText.Text = $"Station {stationIndex + 1}/{path.Points.Count} · {pathPoint.ArcLengthMm:0.0} / {path.TotalLengthMm:0.0} mm · q={path.QualityScore:0.00} · {BuildVascularMarkerStatus(path)} · [{resliced.RenderBackendLabel}]";
         CenterlineCrossSectionHintText.Text = "Scrub along the centerline to inspect orthogonal vessel sections. Use the marker buttons to capture neck and distal landing spans; the current station is synchronized back into the native views via the 3D cursor.";
         ApplyCenterlineCrossSectionPanelOffset();
-        SyncCenterlineCrossSectionCursor(slot, volume, pathPoint.PatientPoint);
+        ScheduleCenterlineCrossSectionSync(slot, volume, pathPoint.PatientPoint);
     }
 
     private void RefreshCenterlinePanels()
@@ -323,8 +378,59 @@ public partial class StudyViewerWindow
     {
         DicomSpatialMetadata metadata = slot.CurrentSpatialMetadata
             ?? VolumeReslicer.GetSliceSpatialMetadata(volume, SliceOrientation.Axial, GetVolumeSliceIndexForPatientPoint(volume, SliceOrientation.Axial, patientPoint));
-        ApplyExternal3DCursor(volume, metadata, patientPoint);
+
+        // Apply synchronously on the current (UI) thread so that the main viewports
+        // update in the same render frame as the cross-section panel.
+        ApplyCursorToSlots(volume, metadata, patientPoint);
         Broadcast3DCursor(volume, metadata, patientPoint);
+    }
+
+    private void ScheduleCenterlineCrossSectionSync(ViewportSlot slot, SeriesVolume volume, SpatialVector3D patientPoint)
+    {
+        _pendingCenterlineSyncSlot = slot;
+        _pendingCenterlineSyncVolume = volume;
+        _pendingCenterlineSyncPatientPoint = patientPoint;
+
+        if (!_centerlineSyncThrottleActive)
+        {
+            // First call: fire immediately, then start cooldown.
+            _centerlineSyncThrottleActive = true;
+            FlushPendingCenterlineSync();
+            _centerlineSyncDebounceTimer.Start();
+        }
+        // Else: cooldown timer running — latest params stored, will fire on next tick.
+    }
+
+    private void FlushPendingCenterlineSync()
+    {
+        ViewportSlot? slot = _pendingCenterlineSyncSlot;
+        SeriesVolume? volume = _pendingCenterlineSyncVolume;
+        SpatialVector3D? patientPoint = _pendingCenterlineSyncPatientPoint;
+        _pendingCenterlineSyncSlot = null;
+        _pendingCenterlineSyncVolume = null;
+        _pendingCenterlineSyncPatientPoint = null;
+
+        if (slot is not null && volume is not null && patientPoint is not null)
+        {
+            SyncCenterlineCrossSectionCursor(slot, volume, patientPoint.Value);
+        }
+    }
+
+    private void OnCenterlineSyncDebounceTimerTick(object? sender, EventArgs e)
+    {
+        _centerlineSyncDebounceTimer.Stop();
+
+        if (_pendingCenterlineSyncSlot is not null)
+        {
+            // More events arrived during cooldown — flush and restart.
+            FlushPendingCenterlineSync();
+            _centerlineSyncDebounceTimer.Start();
+        }
+        else
+        {
+            // No pending events — scrubbing stopped, release throttle.
+            _centerlineSyncThrottleActive = false;
+        }
     }
 
     private void OnCenterlineCrossSectionSliderChanged(object? sender, AvaloniaPropertyChangedEventArgs e)

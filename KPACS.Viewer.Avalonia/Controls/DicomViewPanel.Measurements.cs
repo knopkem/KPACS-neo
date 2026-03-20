@@ -1313,6 +1313,7 @@ public partial class DicomViewPanel
         {
             Point[] imagePoints;
             bool isInterpolatedVolumeSlice = false;
+            Point[][]? volumeContourProjections = null;
             if (measurement.Kind == MeasurementKind.VolumeRoi)
             {
                 if (SpatialMetadata is null ||
@@ -1323,6 +1324,7 @@ public partial class DicomViewPanel
                 }
 
                 imagePoints = projectedContours[0];
+                volumeContourProjections = projectedContours;
             }
             else if (!measurement.TryProjectTo(SpatialMetadata, out imagePoints))
             {
@@ -1337,7 +1339,8 @@ public partial class DicomViewPanel
                 controlPoints,
                 CreateMeasurementLabel(measurement, imagePoints, controlPoints, isSelected),
                 isSelected,
-                isInterpolatedVolumeSlice));
+                isInterpolatedVolumeSlice,
+                volumeContourProjections));
         }
 
         return renderedMeasurements;
@@ -1408,16 +1411,16 @@ public partial class DicomViewPanel
                 MeasurementOverlay.Children.Add(polygon);
                 break;
             case MeasurementKind.VolumeRoi:
-                if (SpatialMetadata is not null && rendered.Measurement.TryProjectVolumeContoursTo(SpatialMetadata, out Point[][] projectedContours, out bool isInterpolatedVolumeSlice))
+                if (rendered.VolumeContourProjections is { Length: > 0 } cachedProjections)
                 {
-                    foreach (Point[] contour in projectedContours)
+                    foreach (Point[] contour in cachedProjections)
                     {
                         var contourPolygon = new Polygon
                         {
                             Points = new Points(contour.Select(ImageToControlPoint)),
                             Stroke = stroke,
                             Fill = fill,
-                            StrokeThickness = isInterpolatedVolumeSlice ? 1.35 : 2,
+                            StrokeThickness = rendered.IsInterpolatedVolumeSlice ? 1.35 : 2,
                         };
                         MeasurementOverlay.Children.Add(contourPolygon);
                     }
@@ -2422,7 +2425,7 @@ public partial class DicomViewPanel
         double MaxZ);
 
     private sealed record MeasurementHit(StudyMeasurement Measurement, Point[] ImagePoints, int HandleIndex, bool MoveWholeMeasurement, bool MoveLabel);
-    private sealed record RenderedMeasurement(StudyMeasurement Measurement, Point[] ImagePoints, Point[] ControlPoints, MeasurementLabel? Label, bool IsSelected, bool IsInterpolatedVolumeSlice = false);
+    private sealed record RenderedMeasurement(StudyMeasurement Measurement, Point[] ImagePoints, Point[] ControlPoints, MeasurementLabel? Label, bool IsSelected, bool IsInterpolatedVolumeSlice = false, Point[][]? VolumeContourProjections = null);
     private sealed record MeasurementLabel(string Text, Rect Bounds);
     private sealed record RoiStatistics(double Mean, double Median, double StandardDeviation, double Min, double Max, double Percentile10, double Percentile90, int PixelCount)
     {

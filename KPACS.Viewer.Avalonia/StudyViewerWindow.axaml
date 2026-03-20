@@ -1345,6 +1345,11 @@
                                     Content="Suggest RECIST follow-up"
                                     Click="OnToolboxRecistSuggestClick"
                                     ToolTip.Tip="Use the selected baseline line or ROI and create a suggested follow-up lesion in this viewport's loaded series." />
+                            <Button x:Name="ToolboxClearVolumeRoiButton"
+                                    Classes="popupAction"
+                                    Content="Clear 3D ROIs &amp; centerlines"
+                                    Click="OnToolboxClearVolumeRoiAndCenterlinesClick"
+                                    ToolTip.Tip="Delete all finalized 3D ROI measurements, centerline seed sets, centerline paths, and vascular planning data. Useful for retesting auto-segmentation." />
                         </StackPanel>
 
                         <Border Height="1" Background="#334D5F74" />

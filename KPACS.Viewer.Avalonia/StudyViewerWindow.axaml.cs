@@ -114,6 +114,8 @@ public partial class StudyViewerWindow : Window
         _linkedViewSyncDebounceTimer.Tick += OnLinkedViewSyncDebounceTimerTick;
         _volumeRoiDraftPanelRefreshTimer.Interval = TimeSpan.FromMilliseconds(VolumeRoiDraftPanelRefreshDebounceMs);
         _volumeRoiDraftPanelRefreshTimer.Tick += OnVolumeRoiDraftPanelRefreshTimerTick;
+        _centerlineSyncDebounceTimer.Interval = TimeSpan.FromMilliseconds(CenterlineSyncThrottleMs);
+        _centerlineSyncDebounceTimer.Tick += OnCenterlineSyncDebounceTimerTick;
         InitializeVolumeRoiDraftPreviewControls();
         Title = $"K-PACS Viewer {viewerNumber}";
         if (Application.Current is App app)
@@ -141,6 +143,7 @@ public partial class StudyViewerWindow : Window
         KeyUp += OnWindowKeyUp;
         SizeChanged += OnWindowSizeChanged;
         Deactivated += (_, _) => Clear3DCursor();
+        VolumeComputeBackend.GpuFallbackOccurred += OnGpuFallbackOccurred;
         Opened += OnViewerOpened;
         ApplyLayout(_currentLayoutSpec, persistLayout: false);
         InitializeSecondaryCaptureUi();
@@ -1054,6 +1057,22 @@ public partial class StudyViewerWindow : Window
         if (_isShowingCurrentStudy)
         {
             _ = LoadVolumesForSlotsAsync();
+        }
+
+        ShowGpuInitStatusToast();
+    }
+
+    private void ShowGpuInitStatusToast()
+    {
+        VolumeComputeBackendStatus status = VolumeComputeBackend.CurrentStatus;
+        string fallbackNote = VolumeComputeBackend.CpuFallbackDisabled ? " ⛔ CPU fallback is DISABLED" : "";
+        if (status.IsAccelerated)
+        {
+            ShowToast($"GPU rendering active: {status.DeviceName}{fallbackNote}", ToastSeverity.Success, TimeSpan.FromSeconds(8));
+        }
+        else
+        {
+            ShowToast($"GPU rendering unavailable — CPU fallback: {status.Detail}{fallbackNote}", ToastSeverity.Error, TimeSpan.FromSeconds(15));
         }
     }
 
@@ -2470,40 +2489,51 @@ public partial class StudyViewerWindow : Window
 
         Dispatcher.UIThread.Post(() =>
         {
-            try
-            {
-                _isSynchronizingLinkedViews = true;
-
-                foreach (ViewportSlot slot in _slots)
-                {
-                    if (slot.Series is null || slot.Series.Instances.Count == 0)
-                    {
-                        slot.Panel.Set3DCursorOverlay(null);
-                        continue;
-                    }
-
-                    SliceProjection? projection = FindBestProjection(slot, sourceMetadata, patientPoint, sourceVolume);
-                    if (projection is null)
-                    {
-                        slot.Panel.Set3DCursorOverlay(null);
-                        continue;
-                    }
-
-                    ApplyProjectionToSlot(slot, projection, preferExactRemoteFocus: true);
-
-                    slot.CurrentSpatialMetadata = slot.Volume is not null
-                        ? slot.Panel.SpatialMetadata
-                        : GetSpatialMetadata(slot.Series.Instances[slot.InstanceIndex]);
-                    slot.Panel.Set3DCursorOverlay(projection.ImagePoint);
-                }
-            }
-            finally
-            {
-                _isSynchronizingLinkedViews = false;
-            }
-
-            UpdateStatus();
+            ApplyCursorToSlots(sourceVolume, sourceMetadata, patientPoint);
         }, DispatcherPriority.Input);
+    }
+
+    /// <summary>
+    /// Synchronously updates all viewport slots to reflect the given 3D cursor position.
+    /// Must be called on the UI thread. Use this from code paths that are already on the
+    /// UI thread (e.g. centerline sync) to avoid an extra Dispatcher.Post round-trip
+    /// that would defer painting by one frame.
+    /// </summary>
+    private void ApplyCursorToSlots(SeriesVolume? sourceVolume, DicomSpatialMetadata sourceMetadata, SpatialVector3D patientPoint)
+    {
+        try
+        {
+            _isSynchronizingLinkedViews = true;
+
+            foreach (ViewportSlot slot in _slots)
+            {
+                if (slot.Series is null || slot.Series.Instances.Count == 0)
+                {
+                    slot.Panel.Set3DCursorOverlay(null);
+                    continue;
+                }
+
+                SliceProjection? projection = FindBestProjection(slot, sourceMetadata, patientPoint, sourceVolume);
+                if (projection is null)
+                {
+                    slot.Panel.Set3DCursorOverlay(null);
+                    continue;
+                }
+
+                ApplyProjectionToSlot(slot, projection, preferExactRemoteFocus: true);
+
+                slot.CurrentSpatialMetadata = slot.Volume is not null
+                    ? slot.Panel.SpatialMetadata
+                    : GetSpatialMetadata(slot.Series.Instances[slot.InstanceIndex]);
+                slot.Panel.Set3DCursorOverlay(projection.ImagePoint);
+            }
+        }
+        finally
+        {
+            _isSynchronizingLinkedViews = false;
+        }
+
+        UpdateStatus();
     }
 
     private SliceProjection? FindBestProjection(ViewportSlot slot, DicomSpatialMetadata sourceMetadata, SpatialVector3D patientPoint, SeriesVolume? sourceVolume)
@@ -3296,8 +3326,10 @@ public partial class StudyViewerWindow : Window
         {
         }
 
+        VolumeComputeBackend.GpuFallbackOccurred -= OnGpuFallbackOccurred;
         UnregisterForLinkedViewSync();
         _linkedViewSyncDebounceTimer.Stop();
+        _centerlineSyncDebounceTimer.Stop();
         _volumeRoiDraftPanelRefreshTimer.Stop();
         _volumeRoiPreviewAutoRotateTimer.Stop();
         _measurementSessionSaveDebounceTimer.Stop();
@@ -3314,6 +3346,18 @@ public partial class StudyViewerWindow : Window
         {
             _remoteRetrievalSession.StudyChanged -= OnRemoteStudyChanged;
         }
+    }
+
+    private void OnGpuFallbackOccurred(string errorDetail)
+    {
+        Dispatcher.UIThread.Post(() =>
+        {
+            int failures = VolumeComputeBackend.ConsecutiveGpuFailures;
+            string message = failures > 1
+                ? $"GPU kernel failed ({failures}× consecutive) — rendering on CPU: {errorDetail}"
+                : $"GPU kernel failed — rendering on CPU: {errorDetail}";
+            ShowToast(message, ToastSeverity.Warning, TimeSpan.FromSeconds(12));
+        });
     }
 
     private void ShowToast(string message, ToastSeverity severity, TimeSpan? duration = null)

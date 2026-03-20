@@ -266,10 +266,23 @@ public partial class StudyViewerWindow
                 _centerlineSeedSets[seedSet.Id] = resolvedSeedSet;
                 RebuildCenterlinePreviewPath(resolvedSeedSet);
                 ScheduleMeasurementSessionSave();
-                ShowToast(
-                    "Only a seed preview is available. Create or select a 3D vessel mask first, then the real centerline can be computed.",
-                    ToastSeverity.Info,
-                    TimeSpan.FromSeconds(5));
+
+                // ── Auto-segment vessel mask when centerline seeds are ready ─
+                if (TryAutoSegmentVesselForCenterline(resolvedSeedSet))
+                {
+                    ShowToast(
+                        "Auto-segmenting vessel mask for centerline…",
+                        ToastSeverity.Info,
+                        TimeSpan.FromSeconds(3));
+                }
+                else
+                {
+                    ShowToast(
+                        "Only a seed preview is available. Create or select a 3D vessel mask first, then the real centerline can be computed.",
+                        ToastSeverity.Info,
+                        TimeSpan.FromSeconds(5));
+                }
+
                 RefreshCenterlinePanels();
                 UpdateStatus();
             });
@@ -661,5 +674,57 @@ public partial class StudyViewerWindow
                     : "preview seed only";
 
         return $"   Centerline: click {seedSet.PendingSeedLabel}; CTRL=guide, SHIFT=start, ALT=end, Backspace removes last, Esc exits ({seedSet.SeedCount} seed{(seedSet.SeedCount == 1 ? string.Empty : "s")}, {pathText})";
+    }
+
+    // ── Auto-segment vessel mask when centerline seeds are placed ──────────
+    // When start + end are placed but no 3D mask exists yet, run the GPU 3D
+    // auto-segmentation from BOTH seed positions (which are on the vessel).
+    // The regions are unioned — if they connect, the mask spans the full
+    // vessel between start and end.  On success the mask fires through the
+    // normal event chain → centerline extraction → curved MPR.
+
+    private bool TryAutoSegmentVesselForCenterline(CenterlineSeedSet seedSet)
+    {
+        if (seedSet.StartSeed is not { } startSeed || seedSet.EndSeed is not { } endSeed)
+        {
+            return false;
+        }
+
+        if (_activeSlot?.Panel is not DicomViewPanel panel ||
+            !panel.IsVolumeBound)
+        {
+            return false;
+        }
+
+        // Pass the actual patient-space seed positions directly.
+        // These are the 3D points where the user clicked — guaranteed to be
+        // on the vessel.  No lossy image-plane projection needed.
+        Models.Vector3D[] seedPatientPoints = [startSeed.PatientPoint, endSeed.PatientPoint];
+
+        Guid seedSetId = seedSet.Id;
+        return panel.TryAutoSegmentForCenterline(seedPatientPoints, result =>
+        {
+            if (result.Succeeded && result.Mask is not null)
+            {
+                // Bind the mask to the seed set so subsequent centerline computations find it.
+                if (_centerlineSeedSets.TryGetValue(seedSetId, out CenterlineSeedSet? current))
+                {
+                    CenterlineSeedSet bound = current.BindSegmentationMask(result.Mask.Id);
+                    _centerlineSeedSets[seedSetId] = bound;
+                    // Re-schedule now that binding is in place.
+                    ScheduleCenterlineComputation(bound, showSuccessToast: true);
+                    ScheduleMeasurementSessionSave();
+                }
+
+                ShowToast(result.Message, ToastSeverity.Success, TimeSpan.FromSeconds(4));
+            }
+            else
+            {
+                ShowToast(
+                    $"Auto vessel segmentation failed — place a 3D ROI manually.\n{result.Message}",
+                    ToastSeverity.Warning,
+                    TimeSpan.FromSeconds(6));
+            }
+        });
     }
 }

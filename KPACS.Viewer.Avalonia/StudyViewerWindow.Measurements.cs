@@ -378,6 +378,72 @@ public partial class StudyViewerWindow
         }
     }
 
+    private void OnToolboxClearVolumeRoiAndCenterlinesClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        // Collect all VolumeRoi measurements and their associated segmentation masks.
+        List<StudyMeasurement> volumeRoiMeasurements = _studyMeasurements
+            .Where(m => m.Kind == MeasurementKind.VolumeRoi)
+            .ToList();
+
+        int removedMeasurements = volumeRoiMeasurements.Count;
+        int removedCenterlines = _centerlineSeedSets.Count;
+
+        if (removedMeasurements == 0 && removedCenterlines == 0)
+        {
+            ShowToast("No 3D ROIs or centerlines to clear.", ToastSeverity.Info, TimeSpan.FromSeconds(3));
+            return;
+        }
+
+        foreach (StudyMeasurement measurement in volumeRoiMeasurements)
+        {
+            if (measurement.SegmentationMaskId is Guid maskId)
+            {
+                _segmentationMasks.Remove(maskId);
+            }
+
+            _polygonAutoOutlineStates.Remove(measurement.Id);
+            _reportRegionOverrides.Remove(measurement.Id);
+            _reportAnatomyOverrides.Remove(measurement.Id);
+            _reportReviewStates.Remove(measurement.Id);
+            RemoveMeasurementInsight(measurement.Id);
+        }
+
+        _studyMeasurements.RemoveAll(m => m.Kind == MeasurementKind.VolumeRoi);
+
+        // Clear all centerline seed sets, paths, and vascular planning bundles.
+        _centerlineSeedSets.Clear();
+        _centerlinePaths.Clear();
+        _vascularPlanningBundles.Clear();
+        _selectedCenterlineSeedSetId = null;
+        SetCenterlineEditMode(false, showToast: false);
+
+        // Cancel any in-progress volume ROI draft on the active panel.
+        if (_activeSlot?.Panel is { HasVolumeRoiDraft: true } activePanel)
+        {
+            activePanel.CancelVolumeRoiDraft();
+        }
+
+        if (_selectedMeasurementId is Guid selectedId &&
+            !_studyMeasurements.Any(m => m.Id == selectedId))
+        {
+            _selectedMeasurementId = null;
+        }
+
+        RefreshMeasurementPanels();
+        ScheduleMeasurementSessionSave();
+
+        string summary = (removedMeasurements, removedCenterlines) switch
+        {
+            (> 0, > 0) => $"Cleared {removedMeasurements} 3D ROI(s) and {removedCenterlines} centerline(s).",
+            (> 0, _) => $"Cleared {removedMeasurements} 3D ROI(s).",
+            _ => $"Cleared {removedCenterlines} centerline(s).",
+        };
+        ShowToast(summary, ToastSeverity.Success, TimeSpan.FromSeconds(4));
+
+        CloseViewportToolbox();
+        CloseAllActionPopups();
+    }
+
     private sealed record PolygonAutoOutlineState(Point SeedPoint, int SensitivityLevel);
 
     private string GetMeasurementToolLabel() => _measurementTool switch

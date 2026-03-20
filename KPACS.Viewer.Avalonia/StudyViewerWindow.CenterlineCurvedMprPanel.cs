@@ -29,7 +29,6 @@ public partial class StudyViewerWindow
     private CancellationTokenSource? _centerlineCurvedMprRenderCancellation;
     private int _centerlineCurvedMprRenderVersion;
     private Guid? _centerlineCurvedMprRenderedPathId;
-    private int _centerlineCurvedMprRenderedStationIndex = -1;
     private CurvedMprDisplayOrientation _centerlineCurvedMprDisplayOrientation = CurvedMprDisplayOrientation.Horizontal;
     private const double CenterlineCurvedMprHorizontalDisplayWidth = 620;
     private const double CenterlineCurvedMprHorizontalDisplayHeight = 240;
@@ -70,7 +69,7 @@ public partial class StudyViewerWindow
         CenterlineCurvedMprStatusText.Text = $"Station {stationIndex + 1}/{path.Points.Count} · {path.Points[stationIndex].ArcLengthMm:0.0} / {path.TotalLengthMm:0.0} mm · strip {CenterlineCurvedMprFieldOfViewMm:0} mm · slab {CenterlineCurvedMprSlabThicknessMm:0} mm MIP";
         CenterlineCurvedMprHintText.Text = $"This first CPR view follows the computed vessel path. Click or drag in the image to move the shared centerline station and keep the orthogonal cross-section synchronized. {BuildSelectedVascularPlanningSummary()}";
         ApplyCenterlineCurvedMprPanelOffset();
-        ScheduleCenterlineCurvedMprRender(path, volume, stationIndex);
+        ScheduleCenterlineCurvedMprRender(path, volume);
     }
 
     private void HideCenterlineCurvedMprPanel()
@@ -92,9 +91,9 @@ public partial class StudyViewerWindow
         CenterlineCurvedMprStationIndicator.Margin = new Thickness(0, 0, 0, 0);
     }
 
-    private void ScheduleCenterlineCurvedMprRender(CenterlinePath path, SeriesVolume volume, int stationIndex)
+    private void ScheduleCenterlineCurvedMprRender(CenterlinePath path, SeriesVolume volume)
     {
-        if (_centerlineCurvedMprRenderedPathId == path.Id && _centerlineCurvedMprRenderedStationIndex == stationIndex && CenterlineCurvedMprImage.Source is not null)
+        if (_centerlineCurvedMprRenderedPathId == path.Id && CenterlineCurvedMprImage.Source is not null)
         {
             return;
         }
@@ -104,10 +103,10 @@ public partial class StudyViewerWindow
         CancellationTokenSource cancellation = new();
         _centerlineCurvedMprRenderCancellation = cancellation;
         int version = ++_centerlineCurvedMprRenderVersion;
-        _ = RenderCenterlineCurvedMprAsync(path, volume, stationIndex, version, cancellation.Token);
+        _ = RenderCenterlineCurvedMprAsync(path, volume, version, cancellation.Token);
     }
 
-    private async Task RenderCenterlineCurvedMprAsync(CenterlinePath path, SeriesVolume volume, int stationIndex, int version, CancellationToken cancellationToken)
+    private async Task RenderCenterlineCurvedMprAsync(CenterlinePath path, SeriesVolume volume, int version, CancellationToken cancellationToken)
     {
         var stopwatch = StartVascularStopwatch();
         CurvedMprRenderResult renderResult;
@@ -155,8 +154,17 @@ public partial class StudyViewerWindow
             _centerlineCurvedMprDisplayOrientation = renderResult.Orientation;
             ApplyCenterlineCurvedMprDisplayOrientation(_centerlineCurvedMprDisplayOrientation);
             _centerlineCurvedMprRenderedPathId = path.Id;
-            _centerlineCurvedMprRenderedStationIndex = stationIndex;
-            UpdateCenterlineCurvedMprStationIndicator(path, stationIndex);
+
+            // Update status text with the actual backend that rendered the image.
+            string gpuError = VolumeComputeBackend.LastRenderError ?? string.Empty;
+            string backendInfo = string.IsNullOrEmpty(gpuError)
+                ? $"[{renderResult.RenderBackendLabel}]"
+                : $"[{renderResult.RenderBackendLabel}] ⚠ {gpuError}";
+            if (CenterlineCurvedMprStatusText is not null)
+            {
+                CenterlineCurvedMprStatusText.Text += $" · {backendInfo}";
+            }
+
             RecordVascularPerformanceMetric("curved-mpr-update", stopwatch.Elapsed.TotalMilliseconds);
         });
     }

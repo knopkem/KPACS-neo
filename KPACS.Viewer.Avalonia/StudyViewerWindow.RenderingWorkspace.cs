@@ -286,12 +286,20 @@ public partial class StudyViewerWindow
         VolumeComputeBackendStatus status = VolumeComputeBackend.CurrentStatus;
         string runtime = $"Selection: {GetRenderingBackendPreferenceLabel(preference)} · Runtime: {status.DisplayName} · Device: {status.DeviceName}";
         string detail = string.IsNullOrWhiteSpace(status.Detail) ? string.Empty : $" · {status.Detail}";
-        if (!hasVolume || panel is null)
+        string? lastError = VolumeComputeBackend.LastRenderError;
+        int failures = VolumeComputeBackend.ConsecutiveGpuFailures;
+        string errorSuffix = string.Empty;
+        if (failures > 0 && !string.IsNullOrEmpty(lastError))
         {
-            return runtime + detail;
+            errorSuffix = $" · ⚠ GPU failures: {failures} — {lastError}";
         }
 
-        return $"Last frame: {panel.LastRenderBackendLabel} · {runtime}{detail}";
+        if (!hasVolume || panel is null)
+        {
+            return runtime + detail + errorSuffix;
+        }
+
+        return $"Last frame: {panel.LastRenderBackendLabel} · {runtime}{detail}{errorSuffix}";
     }
 
     private static string GetDvrPresetLabel(TransferFunctionPreset preset) => VolumeRenderingPresetCatalog.GetLabel(preset);

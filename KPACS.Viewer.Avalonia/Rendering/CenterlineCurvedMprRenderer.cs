@@ -29,30 +29,106 @@ internal static class CenterlineCurvedMprRenderer
         double halfFieldOfView = Math.Max(5.0, fieldOfViewMm) * 0.5;
         double pixelSpacingMm = height <= 1 ? 1.0 : (halfFieldOfView * 2.0) / (height - 1);
         double slab = Math.Max(0, slabThicknessMm);
-        short[] pixels = new short[width * height];
         int[] centerRows = new int[width];
 
         IReadOnlyList<CenterlineFrame> frames = BuildFrames(volume, path);
         int slabSampleCount = slab > 0.25 ? Math.Max(3, (int)Math.Ceiling(slab / Math.Max(0.5, Math.Min(volume.SpacingX, volume.SpacingY)))) : 1;
 
+        // --- GPU path: pack frames into a flat float buffer and dispatch to OpenCL ---
+        short[] pixels = TryRenderOnGpu(volume, frames, width, height, pixelSpacingMm, slabSampleCount, slab);
+        string backendLabel;
+
+        if (pixels.Length == 0)
+        {
+            if (VolumeComputeBackend.CpuFallbackDisabled)
+            {
+                Console.Error.WriteLine($"[CPU·BLOCKED] Curved MPR fallback suppressed — returning blank image");
+                pixels = new short[width * height];
+                backendLabel = "NONE (CPU disabled)";
+            }
+            else
+            {
+                backendLabel = "CPU";
+                // --- CPU fallback (original sequential loop, now parallelized) ---
+                pixels = new short[width * height];
+                Parallel.For(0, width, x =>
+                {
+                    CenterlineFrame frame = frames[x];
+                    for (int y = 0; y < height; y++)
+                    {
+                        double offsetMm = ((height - 1) * 0.5 - y) * pixelSpacingMm;
+                        Vector3D sampleCenter = frame.PatientPoint + (frame.Normal * offsetMm);
+                        double value = SampleSlab(volume, sampleCenter, frame.Binormal, slab, slabSampleCount);
+                        pixels[(y * width) + x] = ClampToShort(value);
+                    }
+                });
+            }
+        }
+        else
+        {
+            backendLabel = VolumeComputeBackend.CurrentStatus.DisplayName;
+        }
+
         for (int x = 0; x < width; x++)
         {
-            cancellationToken.ThrowIfCancellationRequested();
-
-            CenterlineFrame frame = frames[x];
             centerRows[x] = height / 2;
-            for (int y = 0; y < height; y++)
-            {
-                double offsetMm = ((height - 1) * 0.5 - y) * pixelSpacingMm;
-                Vector3D sampleCenter = frame.PatientPoint + (frame.Normal * offsetMm);
-                double value = SampleSlab(volume, sampleCenter, frame.Binormal, slab, slabSampleCount);
-                pixels[(y * width) + x] = ClampToShort(value);
-            }
         }
 
         return orientation == CurvedMprDisplayOrientation.Vertical
-            ? RotateVertical(width, height, pixelSpacingMm, pixels)
-            : new CurvedMprRenderResult(width, height, pixelSpacingMm, pixels, centerRows, orientation);
+            ? RotateVertical(width, height, pixelSpacingMm, pixels, backendLabel)
+            : new CurvedMprRenderResult(width, height, pixelSpacingMm, pixels, centerRows, orientation, backendLabel);
+    }
+
+    /// <summary>
+    /// Packs the per-station Frenet frames into a flat float array (12 floats per station)
+    /// and dispatches to the GPU curved MPR kernel. Returns an empty array on failure.
+    /// </summary>
+    private static short[] TryRenderOnGpu(
+        SeriesVolume volume,
+        IReadOnlyList<CenterlineFrame> frames,
+        int width,
+        int height,
+        double pixelSpacingMm,
+        int slabSampleCount,
+        double slabThicknessMm)
+    {
+        if (!VolumeComputeBackend.CanUseOpenCl || frames.Count == 0)
+        {
+            return [];
+        }
+
+        // Pack frames: 12 floats per station (point, normal, binormal, padding)
+        float[] frameData = new float[frames.Count * 12];
+        for (int i = 0; i < frames.Count; i++)
+        {
+            int offset = i * 12;
+            CenterlineFrame f = frames[i];
+            frameData[offset + 0] = (float)f.PatientPoint.X;
+            frameData[offset + 1] = (float)f.PatientPoint.Y;
+            frameData[offset + 2] = (float)f.PatientPoint.Z;
+            frameData[offset + 3] = (float)f.Normal.X;
+            frameData[offset + 4] = (float)f.Normal.Y;
+            frameData[offset + 5] = (float)f.Normal.Z;
+            frameData[offset + 6] = (float)f.Binormal.X;
+            frameData[offset + 7] = (float)f.Binormal.Y;
+            frameData[offset + 8] = (float)f.Binormal.Z;
+            // [9..11] reserved
+        }
+
+        if (VolumeComputeBackend.TryRenderCurvedMpr(
+                volume,
+                frameData.AsSpan(),
+                width,
+                height,
+                pixelSpacingMm,
+                slabSampleCount,
+                slabThicknessMm,
+                out short[] gpuPixels))
+        {
+            return gpuPixels;
+        }
+
+        return [];
     }
 
     private static CurvedMprDisplayOrientation ResolveDisplayOrientation(CenterlinePath path)
@@ -74,7 +150,7 @@ internal static class CenterlineCurvedMprRenderer
             : CurvedMprDisplayOrientation.Horizontal;
     }
 
-    private static CurvedMprRenderResult RotateVertical(int width, int height, double pixelSpacingMm, short[] pixels)
+    private static CurvedMprRenderResult RotateVertical(int width, int height, double pixelSpacingMm, short[] pixels, string backendLabel)
     {
         short[] rotated = new short[width * height];
         for (int y = 0; y < height; y++)
@@ -88,7 +164,7 @@ internal static class CenterlineCurvedMprRenderer
         }
 
         int[] centerRows = Enumerable.Repeat(height / 2, width).ToArray();
-        return new CurvedMprRenderResult(height, width, pixelSpacingMm, rotated, centerRows, CurvedMprDisplayOrientation.Vertical);
+        return new CurvedMprRenderResult(height, width, pixelSpacingMm, rotated, centerRows, CurvedMprDisplayOrientation.Vertical, backendLabel);
     }
 
     private static double SampleSlab(SeriesVolume volume, Vector3D sampleCenter, Vector3D slabDirection, double slabThicknessMm, int sampleCount)
@@ -213,9 +289,9 @@ internal static class CenterlineCurvedMprRenderer
 
 internal sealed class CurvedMprRenderResult
 {
-    public static CurvedMprRenderResult Empty { get; } = new(1, 1, 1.0, [0], [0], CurvedMprDisplayOrientation.Horizontal);
+    public static CurvedMprRenderResult Empty { get; } = new(1, 1, 1.0, [0], [0], CurvedMprDisplayOrientation.Horizontal, "CPU");
 
-    public CurvedMprRenderResult(int width, int height, double pixelSpacingMm, short[] pixels, int[] centerRows, CurvedMprDisplayOrientation orientation)
+    public CurvedMprRenderResult(int width, int height, double pixelSpacingMm, short[] pixels, int[] centerRows, CurvedMprDisplayOrientation orientation, string renderBackendLabel = "CPU")
     {
         Width = width;
         Height = height;
@@ -223,6 +299,7 @@ internal sealed class CurvedMprRenderResult
         Pixels = pixels;
         CenterRows = centerRows;
         Orientation = orientation;
+        RenderBackendLabel = renderBackendLabel;
     }
 
     public int Width { get; }
@@ -236,6 +313,8 @@ internal sealed class CurvedMprRenderResult
     public int[] CenterRows { get; }
 
     public CurvedMprDisplayOrientation Orientation { get; }
+
+    public string RenderBackendLabel { get; }
 }
 
 internal enum CurvedMprDisplayOrientation

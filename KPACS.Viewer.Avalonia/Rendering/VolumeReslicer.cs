@@ -425,6 +425,12 @@ public static class VolumeReslicer
             return gpuImage;
         }
 
+        if (VolumeComputeBackend.CpuFallbackDisabled)
+        {
+            Console.Error.WriteLine($"[CPU·BLOCKED] MIP projection fallback suppressed — returning blank image");
+            return reference;
+        }
+
         short[] mipPixels = new short[reference.Pixels.Length];
 
         Parallel.For(0, reference.Height, row =>
@@ -471,6 +477,12 @@ public static class VolumeReslicer
         if (VolumeComputeBackend.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, VolumeProjectionMode.MinPr, out ReslicedImage gpuImage))
         {
             return gpuImage;
+        }
+
+        if (VolumeComputeBackend.CpuFallbackDisabled)
+        {
+            Console.Error.WriteLine($"[CPU·BLOCKED] MinIP projection fallback suppressed — returning blank image");
+            return reference;
         }
 
         short[] minPixels = new short[reference.Pixels.Length];
@@ -521,6 +533,12 @@ public static class VolumeReslicer
             return gpuImage;
         }
 
+        if (VolumeComputeBackend.CpuFallbackDisabled)
+        {
+            Console.Error.WriteLine($"[CPU·BLOCKED] Average projection fallback suppressed — returning blank image");
+            return reference;
+        }
+
         short[] averaged = new short[reference.Pixels.Length];
         int projectionCount = Math.Max(1, endSlice - startSlice + 1);
 
@@ -568,6 +586,12 @@ public static class VolumeReslicer
         if (VolumeComputeBackend.TryRenderProjection(volume, orientation, startSlice, endSlice, reference, VolumeProjectionMode.MpVrt, out ReslicedImage gpuImage))
         {
             return gpuImage;
+        }
+
+        if (VolumeComputeBackend.CpuFallbackDisabled)
+        {
+            Console.Error.WriteLine($"[CPU·BLOCKED] MaxVariance projection fallback suppressed — returning blank image");
+            return reference;
         }
 
         short[] projected = new short[reference.Pixels.Length];
@@ -645,6 +669,12 @@ public static class VolumeReslicer
             };
         }
 
+        if (VolumeComputeBackend.CpuFallbackDisabled)
+        {
+            Console.Error.WriteLine($"[CPU·BLOCKED] DVR fallback suppressed — returning blank image");
+            return reference;
+        }
+
         VolumeGradientVolume gradients = GradientCache.GetValue(volume, static source => VolumeGradientVolume.Create(source));
         VolumeTransferFunction tf = VolumeTransferFunction.CreateDefault(volume.MinValue, volume.MaxValue);
 
@@ -671,6 +701,12 @@ public static class VolumeReslicer
         if (VolumeComputeBackend.TryRenderDvrView(volume, state, transferFunction, out ReslicedImage gpuImage))
         {
             return gpuImage;
+        }
+
+        if (VolumeComputeBackend.CpuFallbackDisabled)
+        {
+            Console.Error.WriteLine($"[CPU·BLOCKED] DVR view fallback suppressed — returning blank image");
+            return new ReslicedImage();
         }
 
         VolumeGradientVolume gradients = GradientCache.GetValue(volume, static source => VolumeGradientVolume.Create(source));
@@ -709,6 +745,20 @@ public static class VolumeReslicer
         if (VolumeComputeBackend.TryRenderObliqueProjection(volume, plane, thicknessMm, mode, out ReslicedImage gpuImage))
         {
             return gpuImage;
+        }
+
+        if (VolumeComputeBackend.CpuFallbackDisabled)
+        {
+            Console.Error.WriteLine($"[CPU·BLOCKED] Oblique slab fallback suppressed — returning blank image");
+            return new ReslicedImage
+            {
+                Pixels = new short[Math.Max(1, plane.Width) * Math.Max(1, plane.Height)],
+                Width = Math.Max(1, plane.Width),
+                Height = Math.Max(1, plane.Height),
+                PixelSpacingX = plane.PixelSpacingX,
+                PixelSpacingY = plane.PixelSpacingY,
+                SpatialMetadata = plane.CreateSpatialMetadata(volume),
+            };
         }
 
         int width = Math.Max(1, plane.Width);

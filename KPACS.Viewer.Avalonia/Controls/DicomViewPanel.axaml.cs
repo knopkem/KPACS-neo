@@ -288,6 +288,8 @@ public partial class DicomViewPanel : UserControl
         _studyDescription = studyDescription ?? string.Empty;
         _institution = institution ?? string.Empty;
         _modality = modality ?? string.Empty;
+        _cachedIsMrLike = null;
+        _cachedIsCtLike = null;
         UpdateOverlay();
     }
 
@@ -555,6 +557,8 @@ public partial class DicomViewPanel : UserControl
             _studyDescription = dataset.GetSingleValueOrDefault(DicomTag.StudyDescription, "");
             _institution = dataset.GetSingleValueOrDefault(DicomTag.InstitutionName, "");
             _modality = dataset.GetSingleValueOrDefault(DicomTag.Modality, "");
+            _cachedIsMrLike = null;
+            _cachedIsCtLike = null;
 
             // --- Extract pixel data ---
             if (!dataset.Contains(DicomTag.PixelData))
