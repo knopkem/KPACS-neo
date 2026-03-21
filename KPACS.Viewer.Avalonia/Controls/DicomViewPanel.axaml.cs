@@ -196,7 +196,8 @@ public partial class DicomViewPanel : UserControl
     private double _startWindowCenter, _startWindowWidth;
     private double _startPanX, _startPanY;
     private bool _isStackDragging;
-    private int _lastStackMouseY;
+    private int _lastStackScreenY;   // screen-space Y for stack drag (like Delphi Mouse.CursorPos)
+    private DispatcherTimer? _stackDragTimer;
 
     // Integrated zoom/pan (ported from TdView: IsCursorInZoomRegion, FZoomRegion)
     // Edge zone = outer 1/6th of each dimension → drag to zoom
@@ -499,6 +500,12 @@ public partial class DicomViewPanel : UserControl
         if (IsWindowActionMode())
         {
             Cursor = CreateWindowCursor();
+            return;
+        }
+
+        if (IsScrollActionMode())
+        {
+            Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
             return;
         }
 
@@ -2655,8 +2662,22 @@ public partial class DicomViewPanel : UserControl
 
         DetachCapturedPointerHandlers();
         _capturedTopLevel = topLevel;
-        _capturedTopLevel.PointerMoved += OnCapturedTopLevelPointerMoved;
-        _capturedTopLevel.PointerReleased += OnCapturedTopLevelPointerReleased;
+
+        // Subscribe during the Tunnel phase with handledEventsToo so the
+        // handler fires even when a sibling panel (or the captured element
+        // itself) has already set e.Handled = true.  This is the reliable
+        // fallback that keeps stack-drag, pan, and edge-zoom working when
+        // the pointer leaves the panel boundary in a multi-viewport grid.
+        _capturedTopLevel.AddHandler(
+            InputElement.PointerMovedEvent,
+            OnCapturedTopLevelPointerMoved,
+            RoutingStrategies.Tunnel,
+            handledEventsToo: true);
+        _capturedTopLevel.AddHandler(
+            InputElement.PointerReleasedEvent,
+            OnCapturedTopLevelPointerReleased,
+            RoutingStrategies.Tunnel,
+            handledEventsToo: true);
     }
 
     private void DetachCapturedPointerHandlers()
@@ -2666,8 +2687,8 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
-        _capturedTopLevel.PointerMoved -= OnCapturedTopLevelPointerMoved;
-        _capturedTopLevel.PointerReleased -= OnCapturedTopLevelPointerReleased;
+        _capturedTopLevel.RemoveHandler(InputElement.PointerMovedEvent, OnCapturedTopLevelPointerMoved);
+        _capturedTopLevel.RemoveHandler(InputElement.PointerReleasedEvent, OnCapturedTopLevelPointerReleased);
         _capturedTopLevel = null;
     }
 
@@ -2678,6 +2699,8 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
+        // When the pointer is inside our bounds the normal RootGrid.PointerMoved
+        // handler covers it — skip here to avoid double-processing.
         Point pos = e.GetPosition(RootGrid);
         Rect bounds = new(RootGrid.Bounds.Size);
         if (bounds.Contains(pos))
@@ -2685,6 +2708,10 @@ public partial class DicomViewPanel : UserControl
             return;
         }
 
+        // Pointer is outside the panel (e.g. fast-stack drag beyond the edge in
+        // a multi-viewport grid).  This Tunnel + handledEventsToo subscription
+        // is the only reliable way to keep receiving moves when a sibling panel
+        // or the platform capture swallows the event.
         OnPointerMoved(RootGrid, e);
     }
 
@@ -2890,7 +2917,7 @@ public partial class DicomViewPanel : UserControl
             _isLeftDragging = true;
             _isStackDragging = true;
             _mouseDownPos = pos;
-            _lastStackMouseY = (int)_mouseDownPos.Y;
+            BeginStackDragTimer(e);
             Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
             e.Pointer.Capture(RootGrid);
             _capturedPointer = e.Pointer;
@@ -2902,19 +2929,31 @@ public partial class DicomViewPanel : UserControl
             _isLeftDragging = true;
             _mouseDownPos = pos;
 
-            // Lock the zone at click time (ported from FZoomRegion := IsCursorInZoomRegion)
-            _isEdgeZoom = IsCursorInZoomRegion(_mouseDownPos);
-
-            if (_isEdgeZoom)
+            if (IsScrollActionMode())
             {
-                _lastMouseY = (int)_mouseDownPos.Y;
+                // ScrollStack tool mode: left-drag behaves like middle-drag
+                // (fast stack) so users without a middle button can still
+                // drag-scroll through slices.
+                _isStackDragging = true;
+                BeginStackDragTimer(e);
                 Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
             }
             else
             {
-                _startPanX = _panX;
-                _startPanY = _panY;
-                Cursor = new Cursor(StandardCursorType.Hand);
+                // Lock the zone at click time (ported from FZoomRegion := IsCursorInZoomRegion)
+                _isEdgeZoom = IsCursorInZoomRegion(_mouseDownPos);
+
+                if (_isEdgeZoom)
+                {
+                    _lastMouseY = (int)_mouseDownPos.Y;
+                    Cursor = new Cursor(StandardCursorType.SizeNorthSouth);
+                }
+                else
+                {
+                    _startPanX = _panX;
+                    _startPanY = _panY;
+                    Cursor = new Cursor(StandardCursorType.Hand);
+                }
             }
 
             e.Pointer.Capture(RootGrid);
@@ -2944,6 +2983,7 @@ public partial class DicomViewPanel : UserControl
         {
             EndPlaneTiltDrag();
             HandleDvrPointerReleased();  // no-op if not orbiting
+            StopStackDragTimer();
             _isLeftDragging = false;
             _isEdgeZoom = false;
             _isStackDragging = false;
@@ -3002,22 +3042,10 @@ public partial class DicomViewPanel : UserControl
         }
         else if (_isLeftDragging && _isStackDragging)
         {
-            int currentY = (int)pos.Y;
-            int deltaY = currentY - _lastStackMouseY;
-
-            if (Math.Abs(deltaY) > 1)
-            {
-                int stepDivisor = GetStackDragStepDivisor();
-                int stackDelta = Math.Max(1, Math.Abs(deltaY) / stepDivisor);
-                if (deltaY < 0)
-                {
-                    stackDelta = -stackDelta;
-                }
-
-                StackScrollRequested?.Invoke(stackDelta);
-                _lastStackMouseY = currentY;
-                e.Handled = true;
-            }
+            // Stack drag is driven by a DispatcherTimer polling screen cursor
+            // position (the Delphi Mouse.CursorPos pattern), so it works even
+            // when the pointer leaves the panel.  Nothing to do here.
+            e.Handled = true;
         }
         else if (_isLeftDragging && _isEdgeZoom)
         {
@@ -3163,6 +3191,135 @@ public partial class DicomViewPanel : UserControl
         int maxIndex = Math.Max(1, StackItemCount - 1);
         return Math.Max(2, (int)Math.Ceiling(200.0 / maxIndex));
     }
+
+    // ==============================================================================================
+    // Stack-drag via screen-cursor polling (Delphi Mouse.CursorPos pattern)
+    // ==============================================================================================
+    //
+    // Avalonia's pointer capture does not reliably deliver PointerMoved events
+    // when the pointer crosses into a sibling panel in a multi-viewport grid.
+    // The Delphi implementation sidesteps this by reading Mouse.CursorPos
+    // (global screen coordinates) in every MouseMove.  We replicate that by
+    // polling the cursor position on a short-interval DispatcherTimer.
+
+    /// <summary>
+    /// Starts the stack-drag polling timer.  Records the initial screen-space Y
+    /// so that subsequent ticks can compute the delta.
+    /// </summary>
+    private void BeginStackDragTimer(PointerEventArgs e)
+    {
+        // Record initial Y in screen coordinates.
+        PixelPoint? screenPos = GetScreenPosition(e);
+        _lastStackScreenY = screenPos?.Y ?? 0;
+
+        if (_stackDragTimer is null)
+        {
+            _stackDragTimer = new DispatcherTimer(DispatcherPriority.Input)
+            {
+                Interval = TimeSpan.FromMilliseconds(8),  // ~120 Hz polling
+            };
+            _stackDragTimer.Tick += OnStackDragTimerTick;
+        }
+
+        _stackDragTimer.Start();
+    }
+
+    /// <summary>Stops and resets the stack-drag polling timer.</summary>
+    private void StopStackDragTimer()
+    {
+        _stackDragTimer?.Stop();
+    }
+
+    /// <summary>
+    /// Polls the current screen cursor position and fires StackScrollRequested
+    /// based on the Y delta since the last tick — works regardless of which
+    /// Avalonia control the pointer is currently over.
+    /// </summary>
+    private void OnStackDragTimerTick(object? sender, EventArgs e)
+    {
+        if (!_isStackDragging)
+        {
+            StopStackDragTimer();
+            return;
+        }
+
+        // Get current screen cursor position.
+        PixelPoint? screenPos = GetCurrentScreenCursorPosition();
+        if (screenPos is null)
+        {
+            return;
+        }
+
+        int currentY = screenPos.Value.Y;
+        int deltaY = currentY - _lastStackScreenY;
+
+        if (Math.Abs(deltaY) > 1)
+        {
+            int stepDivisor = GetStackDragStepDivisor();
+            int stackDelta = Math.Max(1, Math.Abs(deltaY) / stepDivisor);
+            if (deltaY < 0)
+            {
+                stackDelta = -stackDelta;
+            }
+
+            StackScrollRequested?.Invoke(stackDelta);
+            _lastStackScreenY = currentY;
+        }
+    }
+
+    /// <summary>
+    /// Gets the screen position from a pointer event via the TopLevel.
+    /// </summary>
+    private PixelPoint? GetScreenPosition(PointerEventArgs e)
+    {
+        TopLevel? topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is null)
+        {
+            return null;
+        }
+
+        Point posInTopLevel = e.GetPosition(topLevel);
+        PixelPoint screenPos = topLevel.PointToScreen(posInTopLevel);
+        return screenPos;
+    }
+
+    /// <summary>
+    /// Gets the current screen cursor position by reading the last known pointer
+    /// position relative to our TopLevel and converting to screen coordinates.
+    /// Falls back to the platform cursor position via Win32 on Windows.
+    /// </summary>
+    private PixelPoint? GetCurrentScreenCursorPosition()
+    {
+        // Use Win32 GetCursorPos on Windows for reliable global cursor tracking,
+        // exactly matching the Delphi Mouse.CursorPos pattern.
+        if (RuntimeInformation.IsOSPlatform(OSPlatform.Windows))
+        {
+            if (GetCursorPos(out POINT pt))
+            {
+                return new PixelPoint(pt.X, pt.Y);
+            }
+        }
+
+        // Fallback for non-Windows: convert last known pointer position via TopLevel.
+        TopLevel? topLevel = TopLevel.GetTopLevel(this);
+        if (topLevel is not null)
+        {
+            PixelPoint screenPos = topLevel.PointToScreen(_lastPointerPos);
+            return screenPos;
+        }
+
+        return null;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private struct POINT
+    {
+        public int X;
+        public int Y;
+    }
+
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool GetCursorPos(out POINT lpPoint);
 
     private void UpdateDisplayGeometry(double pixelSpacingX, double pixelSpacingY)
     {

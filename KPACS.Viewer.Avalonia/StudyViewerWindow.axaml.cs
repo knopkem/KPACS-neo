@@ -2439,12 +2439,15 @@ public partial class StudyViewerWindow : Window
     private static string BuildLinkedSyncSignature(ViewportSlot slot, DicomViewPanel panel)
     {
         string seriesUid = slot.Series?.SeriesInstanceUid ?? string.Empty;
+        // Round zoom to 4 decimal places to avoid float-noise triggering
+        // infinite sync loops while still detecting intentional zoom changes.
+        string zoomTag = $"{panel.ZoomFactor:F4}";
         if (panel.IsVolumeBound)
         {
-            return $"vol|{seriesUid}|{panel.VolumeOrientation}|{panel.VolumeSliceIndex}";
+            return $"vol|{seriesUid}|{panel.VolumeOrientation}|{panel.VolumeSliceIndex}|{zoomTag}";
         }
 
-        return $"img|{seriesUid}|{slot.InstanceIndex}";
+        return $"img|{seriesUid}|{slot.InstanceIndex}|{zoomTag}";
     }
 
     private void Apply3DCursor(ViewportSlot sourceSlot, Point sourceImagePoint)
