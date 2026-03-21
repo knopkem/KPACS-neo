@@ -7,9 +7,12 @@
 // ------------------------------------------------------------------------------------------------
 
 using FellowOakDicom;
+using FellowOakDicom.IO.Buffer;
 using FellowOakDicom.Network;
 using FellowOakDicom.Network.Client;
 using KPACS.DCMClasses.Models;
+using System.Reflection;
+using System.Text;
 
 namespace KPACS.DCMClasses;
 
@@ -20,6 +23,9 @@ namespace KPACS.DCMClasses;
 /// </summary>
 public class DicomNetworkClient
 {
+    private static readonly PropertyInfo? DatasetFallbackEncodingsProperty =
+        typeof(DicomDataset).GetProperty("FallbackEncodings", BindingFlags.Instance | BindingFlags.NonPublic);
+
     private string _localAet = "KPACS";
     private string _remoteAet = string.Empty;
 
@@ -111,6 +117,133 @@ public class DicomNetworkClient
     /// </summary>
     public event Action<ImageInfo>? OnImageFound;
 
+    private void ApplyCharacterSetToFindRequest(DicomDataset dataset)
+    {
+        if (string.IsNullOrWhiteSpace(DefaultCharacterSet))
+        {
+            return;
+        }
+
+        dataset.AddOrUpdate(DicomTag.SpecificCharacterSet, DefaultCharacterSet.Trim());
+    }
+
+    private void NormalizeFindResponseDataset(DicomDataset dataset)
+    {
+        string[] effectiveCharacterSets = ResolveFindResponseCharacterSets(dataset);
+        Encoding[] effectiveEncodings = DicomEncoding.GetEncodings(effectiveCharacterSets);
+
+        TrySetDatasetFallbackEncodings(dataset, effectiveEncodings);
+        dataset.AddOrUpdate(DicomTag.SpecificCharacterSet, effectiveCharacterSets);
+
+        var replacements = new List<DicomItem>();
+        foreach (DicomItem item in dataset)
+        {
+            switch (item)
+            {
+                case DicomSequence sequence:
+                    foreach (DicomDataset childDataset in sequence.Items)
+                    {
+                        NormalizeFindResponseDataset(childDataset);
+                    }
+                    break;
+
+                case DicomStringElement stringElement when ShouldRebuildFindResponseElement(stringElement):
+                {
+                    DicomItem? rebuilt = RebuildFindResponseElement(stringElement, effectiveEncodings);
+                    if (rebuilt is not null)
+                    {
+                        replacements.Add(rebuilt);
+                    }
+
+                    break;
+                }
+            }
+        }
+
+        foreach (DicomItem replacement in replacements)
+        {
+            dataset.AddOrUpdate(replacement);
+        }
+    }
+
+    private string[] ResolveFindResponseCharacterSets(DicomDataset dataset)
+    {
+        string fallbackCharacterSet = string.IsNullOrWhiteSpace(DefaultCharacterSet)
+            ? "ISO_IR 100"
+            : DefaultCharacterSet.Trim();
+
+        if (!dataset.TryGetValues(DicomTag.SpecificCharacterSet, out string[]? responseCharacterSets)
+            || responseCharacterSets.Length == 0)
+        {
+            return [fallbackCharacterSet];
+        }
+
+        string[] normalizedCharacterSets = responseCharacterSets
+            .Select(static value => value?.Trim() ?? string.Empty)
+            .Where(static value => !string.IsNullOrWhiteSpace(value))
+            .ToArray();
+
+        if (normalizedCharacterSets.Length == 0)
+        {
+            return [fallbackCharacterSet];
+        }
+
+        try
+        {
+            _ = DicomEncoding.GetEncodings(normalizedCharacterSets);
+            return normalizedCharacterSets;
+        }
+        catch
+        {
+            return [fallbackCharacterSet];
+        }
+    }
+
+    private static void TrySetDatasetFallbackEncodings(DicomDataset dataset, Encoding[] encodings)
+    {
+        try
+        {
+            DatasetFallbackEncodingsProperty?.SetValue(dataset, encodings);
+        }
+        catch
+        {
+        }
+    }
+
+    private static bool ShouldRebuildFindResponseElement(DicomStringElement element)
+    {
+        DicomVR vr = element.ValueRepresentation;
+        return vr == DicomVR.PN
+            || vr == DicomVR.LO
+            || vr == DicomVR.SH
+            || vr == DicomVR.ST
+            || vr == DicomVR.LT
+            || vr == DicomVR.UC
+            || vr == DicomVR.UT;
+    }
+
+    private static DicomItem? RebuildFindResponseElement(DicomStringElement element, Encoding[] encodings)
+    {
+        IByteBuffer buffer = element.Buffer;
+
+        if (element.ValueRepresentation == DicomVR.PN)
+            return new DicomPersonName(element.Tag, encodings, buffer);
+        if (element.ValueRepresentation == DicomVR.LO)
+            return new DicomLongString(element.Tag, encodings, buffer);
+        if (element.ValueRepresentation == DicomVR.SH)
+            return new DicomShortString(element.Tag, encodings, buffer);
+        if (element.ValueRepresentation == DicomVR.ST)
+            return new DicomShortText(element.Tag, encodings, buffer);
+        if (element.ValueRepresentation == DicomVR.LT)
+            return new DicomLongText(element.Tag, encodings, buffer);
+        if (element.ValueRepresentation == DicomVR.UC)
+            return new DicomUnlimitedCharacters(element.Tag, encodings, buffer);
+        if (element.ValueRepresentation == DicomVR.UT)
+            return new DicomUnlimitedText(element.Tag, encodings, buffer);
+
+        return null;
+    }
+
     // ==============================================================================================
     // C-ECHO
     // ==============================================================================================
@@ -163,11 +296,26 @@ public class DicomNetworkClient
         {
             var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
-            var request = DicomCFindRequest.CreateStudyQuery(
-                patientId: string.IsNullOrEmpty(filter.PatientId) ? null : filter.PatientId,
-                patientName: string.IsNullOrEmpty(filter.PatientName) ? null : filter.PatientName,
-                studyDateTime: null
-            );
+            var request = new DicomCFindRequest(DicomQueryRetrieveLevel.Study);
+
+            ApplyCharacterSetToFindRequest(request.Dataset);
+
+            request.Dataset.AddOrUpdate(DicomTag.PatientID,
+                string.IsNullOrEmpty(filter.PatientId) ? string.Empty : filter.PatientId);
+            request.Dataset.AddOrUpdate(DicomTag.PatientName,
+                string.IsNullOrEmpty(filter.PatientName) ? string.Empty : filter.PatientName);
+            request.Dataset.AddOrUpdate(DicomTag.StudyDate, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.StudyTime, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.AccessionNumber, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.ModalitiesInStudy, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.StudyDescription, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.ReferringPhysicianName, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.PatientBirthDate, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.PatientSex, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.StudyInstanceUID, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.StudyID, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.NumberOfStudyRelatedSeries, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.NumberOfStudyRelatedInstances, string.Empty);
 
             // Add additional query keys
             if (!string.IsNullOrEmpty(filter.AccessionNumber))
@@ -181,20 +329,11 @@ public class DicomNetworkClient
             if (!string.IsNullOrEmpty(filter.PhysiciansName))
                 request.Dataset.AddOrUpdate(DicomTag.ReferringPhysicianName, filter.PhysiciansName);
 
-            // Request return keys
-            request.Dataset.AddOrUpdate(DicomTag.StudyInstanceUID, string.Empty);
-            request.Dataset.AddOrUpdate(DicomTag.StudyTime, string.Empty);
-            request.Dataset.AddOrUpdate(DicomTag.StudyID, string.Empty);
-            request.Dataset.AddOrUpdate(DicomTag.PatientBirthDate, string.Empty);
-            request.Dataset.AddOrUpdate(DicomTag.PatientSex, string.Empty);
-            request.Dataset.AddOrUpdate(DicomTag.InstitutionName, string.Empty);
-            request.Dataset.AddOrUpdate(DicomTag.NumberOfStudyRelatedSeries, string.Empty);
-            request.Dataset.AddOrUpdate(DicomTag.NumberOfStudyRelatedInstances, string.Empty);
-
             request.OnResponseReceived += (req, resp) =>
             {
                 if (resp.Status == DicomStatus.Pending && resp.HasDataset)
                 {
+                    NormalizeFindResponseDataset(resp.Dataset);
                     var study = DatasetToStudyInfo(resp.Dataset);
                     study.ServerAet = RemoteAET.Trim();
                     study.ServerIp = IP;
@@ -236,7 +375,13 @@ public class DicomNetworkClient
         {
             var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
-            var request = DicomCFindRequest.CreateSeriesQuery(studyInstanceUid);
+            var request = new DicomCFindRequest(DicomQueryRetrieveLevel.Series);
+
+            ApplyCharacterSetToFindRequest(request.Dataset);
+
+            request.Dataset.AddOrUpdate(DicomTag.StudyInstanceUID, studyInstanceUid);
+            request.Dataset.AddOrUpdate(DicomTag.SeriesInstanceUID, string.Empty);
+            request.Dataset.AddOrUpdate(DicomTag.SeriesNumber, string.Empty);
 
             // Add return keys
             request.Dataset.AddOrUpdate(DicomTag.SeriesDescription, string.Empty);
@@ -252,6 +397,7 @@ public class DicomNetworkClient
             {
                 if (resp.Status == DicomStatus.Pending && resp.HasDataset)
                 {
+                    NormalizeFindResponseDataset(resp.Dataset);
                     var series = DatasetToSeriesInfo(resp.Dataset);
                     series.StudyInstanceUid = studyInstanceUid;
                     results.Add(series);
@@ -297,6 +443,7 @@ public class DicomNetworkClient
             {
                 if (resp.Status == DicomStatus.Pending && resp.HasDataset)
                 {
+                    NormalizeFindResponseDataset(resp.Dataset);
                     var image = DatasetToImageInfo(resp.Dataset);
                     results.Add(image);
                     OnImageFound?.Invoke(image);
@@ -478,6 +625,8 @@ public class DicomNetworkClient
 
             var request = new DicomCFindRequest(DicomQueryRetrieveLevel.NotApplicable);
 
+            ApplyCharacterSetToFindRequest(request.Dataset);
+
             // Patient-level keys
             if (!string.IsNullOrEmpty(filter.PatName))
                 request.Dataset.AddOrUpdate(DicomTag.PatientName, filter.PatName);
@@ -522,6 +671,7 @@ public class DicomNetworkClient
             {
                 if (resp.Status == DicomStatus.Pending && resp.HasDataset)
                 {
+                    NormalizeFindResponseDataset(resp.Dataset);
                     results.Add(DatasetToWorklistItem(resp.Dataset));
                 }
             };
