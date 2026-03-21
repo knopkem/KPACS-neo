@@ -161,6 +161,21 @@ public static class VolumeReslicer
         };
     }
 
+    // Single-entry cache for the most recent orthogonal slice extraction.
+    // During linked-view sync in large grids (e.g. 4×4), many panels
+    // request the same volume/orientation/slice in rapid succession.
+    // Caching the last result avoids redundant reslice + GPU round-trips.
+    // The pixel arrays in ReslicedImage are treated as read-only by the
+    // rendering pipeline, so sharing a single instance is safe.
+    [ThreadStatic]
+    private static SeriesVolume? t_cachedSliceVolume;
+    [ThreadStatic]
+    private static SliceOrientation t_cachedSliceOrientation;
+    [ThreadStatic]
+    private static int t_cachedSliceIndex;
+    [ThreadStatic]
+    private static ReslicedImage? t_cachedSliceResult;
+
     /// <summary>
     /// Extracts an orthogonal slice from the volume.
     /// </summary>
@@ -170,13 +185,27 @@ public static class VolumeReslicer
     /// <returns>Resliced 2D image.</returns>
     public static ReslicedImage ExtractSlice(SeriesVolume volume, SliceOrientation orientation, int sliceIndex)
     {
-        return orientation switch
+        if (t_cachedSliceResult is not null
+            && ReferenceEquals(t_cachedSliceVolume, volume)
+            && t_cachedSliceOrientation == orientation
+            && t_cachedSliceIndex == sliceIndex)
+        {
+            return t_cachedSliceResult;
+        }
+
+        ReslicedImage result = orientation switch
         {
             SliceOrientation.Axial => ExtractAxial(volume, sliceIndex),
             SliceOrientation.Coronal => ExtractCoronal(volume, sliceIndex),
             SliceOrientation.Sagittal => ExtractSagittal(volume, sliceIndex),
             _ => ExtractAxial(volume, sliceIndex),
         };
+
+        t_cachedSliceVolume = volume;
+        t_cachedSliceOrientation = orientation;
+        t_cachedSliceIndex = sliceIndex;
+        t_cachedSliceResult = result;
+        return result;
     }
 
     public static ReslicedImage ExtractSlice(SeriesVolume volume, VolumeSlicePlane plane) =>

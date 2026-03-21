@@ -74,6 +74,7 @@ public partial class StudyViewerWindow : Window
     private bool _assignedPriorStudyLoadAttempted;
     private int _linkedSyncSuspendCount;
     private ViewportSlot? _pendingLinkedSyncSourceSlot;
+    private bool _linkedSyncThrottleActive;
     private ViewportSlot? _linkedReferenceSourceSlot;
     private ViewportSlot? _openToolboxSlot;
     private SeriesVolume? _linkedReferenceSourceVolume;
@@ -81,7 +82,7 @@ public partial class StudyViewerWindow : Window
     private PendingLinkedSyncContext? _pendingLinkedSyncContext;
     private string _thumbnailStripMessage = string.Empty;
     private const int AdjacentPriorityDebounceMs = 180;
-    private const int LinkedViewSyncDebounceMs = 33;
+    private const int LinkedViewSyncThrottleMs = 16;
     private const int VolumeRoiDraftPanelRefreshDebounceMs = 50;
     private const int WorkspaceDockAutoHideMs = 1000;
     private const int ViewportLayoutResetDebounceMs = 140;
@@ -110,7 +111,7 @@ public partial class StudyViewerWindow : Window
         _isShowingCurrentStudy = !context.StartBlank;
         _viewportLayoutResetTimer.Interval = TimeSpan.FromMilliseconds(ViewportLayoutResetDebounceMs);
         _viewportLayoutResetTimer.Tick += OnViewportLayoutResetTimerTick;
-        _linkedViewSyncDebounceTimer.Interval = TimeSpan.FromMilliseconds(LinkedViewSyncDebounceMs);
+        _linkedViewSyncDebounceTimer.Interval = TimeSpan.FromMilliseconds(LinkedViewSyncThrottleMs);
         _linkedViewSyncDebounceTimer.Tick += OnLinkedViewSyncDebounceTimerTick;
         _volumeRoiDraftPanelRefreshTimer.Interval = TimeSpan.FromMilliseconds(VolumeRoiDraftPanelRefreshDebounceMs);
         _volumeRoiDraftPanelRefreshTimer.Tick += OnVolumeRoiDraftPanelRefreshTimerTick;
@@ -844,6 +845,16 @@ public partial class StudyViewerWindow : Window
             panel.StackItemCount = panel.VolumeSliceCount;
         }
 
+        // Fast path: when the sync loop is driving target panels, it manages
+        // display-state capture, reference lines, and side-panel refreshes
+        // in a single batch pass after all slots are updated.  Doing that
+        // work here for every intermediate panel notification would create
+        // O(N²) overhead that blocks the UI thread in large grids (e.g. 4×4).
+        if (_isSynchronizingLinkedViews)
+        {
+            return;
+        }
+
         slot.ViewState = panel.CaptureDisplayState();
         string syncSignature = BuildLinkedSyncSignature(slot, panel);
         bool syncAnchorChanged = !string.Equals(slot.LastLinkedSyncSignature, syncSignature, StringComparison.Ordinal);
@@ -867,7 +878,7 @@ public partial class StudyViewerWindow : Window
 
         RefreshLinkedReferenceLines();
 
-        if (_isSynchronizingLinkedViews || IsLinkedSyncSuspended())
+        if (IsLinkedSyncSuspended())
         {
             return;
         }
@@ -893,8 +904,17 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
-        _linkedViewSyncDebounceTimer.Stop();
-        _linkedViewSyncDebounceTimer.Start();
+        if (!_linkedSyncThrottleActive)
+        {
+            // First event: fire immediately, then start the cooldown timer
+            // so subsequent events during fast scrolling are coalesced.
+            _linkedSyncThrottleActive = true;
+            _pendingLinkedSyncSourceSlot = null;
+            SynchronizeLinkedViews(sourceSlot);
+            _linkedViewSyncDebounceTimer.Start();
+        }
+        // Else: cooldown timer is already running — the latest source slot
+        // is stored and will be applied on the next timer tick.
     }
 
     private void OnLinkedViewSyncDebounceTimerTick(object? sender, EventArgs e)
@@ -915,10 +935,16 @@ public partial class StudyViewerWindow : Window
         _pendingLinkedSyncSourceSlot = null;
         if (sourceSlot is null)
         {
+            // No pending work — end the throttle cooldown so that
+            // the next scroll event fires immediately again.
+            _linkedSyncThrottleActive = false;
             return;
         }
 
         SynchronizeLinkedViews(sourceSlot);
+        // Keep the timer running so that further rapid events
+        // are coalesced at ~60 fps until scrolling stops.
+        _linkedViewSyncDebounceTimer.Start();
     }
 
     private void UpdateSlotVisualStates()
@@ -1970,7 +1996,25 @@ public partial class StudyViewerWindow : Window
                     continue;
                 }
 
-                ApplyProjectionToSlot(targetSlot, projection, preferExactRemoteFocus: true);
+                // Volume-bound fast path: bypass LoadSlot to avoid the
+                // redundant ApplyDisplayState render.  ShowVolumeSlice
+                // reslices and renders once; ApplyNavigationState applies
+                // the final zoom/pan — 2 renders instead of 3.
+                if (targetSlot.Volume is not null && targetSlot.Panel.IsVolumeBound)
+                {
+                    int maxSlice = Math.Max(0, targetSlot.Panel.VolumeSliceCount - 1);
+                    int targetIndex = Math.Clamp(projection.InstanceIndex, 0, maxSlice);
+                    if (targetSlot.InstanceIndex != targetIndex || !targetSlot.Panel.IsImageLoaded)
+                    {
+                        targetSlot.InstanceIndex = targetIndex;
+                        targetSlot.Panel.ShowVolumeSlice(targetIndex);
+                        targetSlot.CurrentSpatialMetadata = targetSlot.Panel.SpatialMetadata;
+                    }
+                }
+                else
+                {
+                    ApplyProjectionToSlot(targetSlot, projection, preferExactRemoteFocus: true);
+                }
 
                 targetSlot.Panel.ApplyNavigationState(navigationState with { CenterImagePoint = projection.ImagePoint });
                 if (targetSlot.Panel.IsImageLoaded)
