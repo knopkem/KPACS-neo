@@ -109,11 +109,31 @@ public partial class StudyViewerWindow
             .ThenByDescending(slot => ReferenceEquals(slot, _activeSlot))
             .FirstOrDefault();
 
-    private static bool SlotContainsMeasurementSource(ViewportSlot slot, StudyMeasurement measurement)
+    private bool SlotContainsMeasurementSource(ViewportSlot slot, StudyMeasurement measurement)
     {
         if (slot.Series is null)
         {
             return false;
+        }
+
+        if (slot.CurrentSpatialMetadata is DicomSpatialMetadata metadata)
+        {
+            bool metadataSopMatch = !string.IsNullOrWhiteSpace(measurement.ReferencedSopInstanceUid)
+                && string.Equals(metadata.SopInstanceUid, measurement.ReferencedSopInstanceUid, StringComparison.OrdinalIgnoreCase);
+            bool metadataFileMatch = !string.IsNullOrWhiteSpace(measurement.SourceFilePath)
+                && string.Equals(metadata.FilePath, measurement.SourceFilePath, StringComparison.OrdinalIgnoreCase);
+            bool spatialMatch = measurement.TryProjectTo(metadata, out _)
+                || (measurement.Kind == MeasurementKind.VolumeRoi && measurement.TryProjectVolumeContoursTo(metadata, out _));
+
+            if (metadataSopMatch || metadataFileMatch || spatialMatch)
+            {
+                return true;
+            }
+        }
+
+        if (slot.Volume is not null && IsMeasurementCompatibleWithVolume(measurement, slot.Volume))
+        {
+            return true;
         }
 
         foreach (InstanceRecord instance in slot.Series.Instances)

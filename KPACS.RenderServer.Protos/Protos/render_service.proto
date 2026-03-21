@@ -151,6 +151,10 @@ message VolumeInfo {
   int32  max_value = 15;
   bool   is_monochrome1 = 16;
   int32  slice_count = 17;
+  string series_instance_uid = 18;
+  string frame_of_reference_uid = 19;
+  string acquisition_number = 20;
+  repeated string slice_sop_instance_uids = 21;
 }
 
 // ============================================================================

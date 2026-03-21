@@ -126,6 +126,10 @@ public sealed class VolumeServiceImpl : VolumeService.VolumeServiceBase
             MaxValue = v.MaxValue,
             IsMonochrome1 = v.IsMonochrome1,
             SliceCount = v.SizeZ,
+            SeriesInstanceUid = v.SeriesInstanceUid,
+            FrameOfReferenceUid = v.FrameOfReferenceUid,
+            AcquisitionNumber = v.AcquisitionNumber,
+            SliceSopInstanceUids = { v.SliceSopInstanceUids },
         };
     }
 }

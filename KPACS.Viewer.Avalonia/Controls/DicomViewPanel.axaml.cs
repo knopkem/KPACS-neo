@@ -358,6 +358,7 @@ public partial class DicomViewPanel : UserControl
         RootGrid.PointerPressed += OnPointerPressed;
         RootGrid.PointerReleased += OnPointerReleased;
         RootGrid.PointerMoved += OnPointerMoved;
+        RootGrid.PointerCaptureLost += OnRootGridPointerCaptureLost;
         RootGrid.PointerWheelChanged += OnPointerWheelChanged;
         RootGrid.PointerExited += OnPointerExited;
         KeyDown += OnPanelKeyDown;
@@ -3038,6 +3039,30 @@ public partial class DicomViewPanel : UserControl
             UpdateZoneCursor(e.GetPosition(RootGrid));
             e.Handled = true;
         }
+    }
+
+    private void OnRootGridPointerCaptureLost(object? sender, PointerCaptureLostEventArgs e)
+    {
+        if (!_isLeftDragging && !_isRightDragging && !_isStackDragging)
+        {
+            return;
+        }
+
+        if (_isStackDragging)
+        {
+            return;
+        }
+
+        EndPlaneTiltDrag();
+        HandleDvrPointerReleased();
+        StopStackDragTimer();
+        _isLeftDragging = false;
+        _isRightDragging = false;
+        _isEdgeZoom = false;
+        _isStackDragging = false;
+        _capturedPointer = null;
+        DetachCapturedPointerHandlers();
+        UpdateZoneCursor(_lastPointerPos);
     }
 
     // ==============================================================================================

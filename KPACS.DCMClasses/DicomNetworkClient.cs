@@ -10,7 +10,6 @@ using FellowOakDicom;
 using FellowOakDicom.Network;
 using FellowOakDicom.Network.Client;
 using KPACS.DCMClasses.Models;
-using System.Text;
 
 namespace KPACS.DCMClasses;
 
@@ -124,7 +123,7 @@ public class DicomNetworkClient
     {
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
             var request = new DicomCEchoRequest();
             bool success = false;
             request.OnResponseReceived += (req, resp) =>
@@ -162,15 +161,13 @@ public class DicomNetworkClient
 
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
             var request = DicomCFindRequest.CreateStudyQuery(
                 patientId: string.IsNullOrEmpty(filter.PatientId) ? null : filter.PatientId,
                 patientName: string.IsNullOrEmpty(filter.PatientName) ? null : filter.PatientName,
                 studyDateTime: null
             );
-
-            ApplyCharacterSetToQuery(request.Dataset);
 
             // Add additional query keys
             if (!string.IsNullOrEmpty(filter.AccessionNumber))
@@ -237,11 +234,9 @@ public class DicomNetworkClient
 
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
             var request = DicomCFindRequest.CreateSeriesQuery(studyInstanceUid);
-
-            ApplyCharacterSetToQuery(request.Dataset);
 
             // Add return keys
             request.Dataset.AddOrUpdate(DicomTag.SeriesDescription, string.Empty);
@@ -289,11 +284,9 @@ public class DicomNetworkClient
 
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
             var request = DicomCFindRequest.CreateImageQuery(studyInstanceUid, seriesInstanceUid);
-
-            ApplyCharacterSetToQuery(request.Dataset);
 
             request.Dataset.AddOrUpdate(DicomTag.InstanceNumber, string.Empty);
             request.Dataset.AddOrUpdate(DicomTag.ImageType, string.Empty);
@@ -343,7 +336,7 @@ public class DicomNetworkClient
 
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
             var request = new DicomCMoveRequest(dest, studyInstanceUid);
             request.OnResponseReceived += (req, resp) =>
@@ -382,7 +375,7 @@ public class DicomNetworkClient
 
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
             var request = new DicomCMoveRequest(dest, studyInstanceUid, seriesInstanceUid);
             request.OnResponseReceived += (req, resp) =>
@@ -430,7 +423,7 @@ public class DicomNetworkClient
 
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
             foreach (var filePath in files)
             {
@@ -481,11 +474,9 @@ public class DicomNetworkClient
 
         try
         {
-            var client = CreateClient();
+            var client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
 
             var request = new DicomCFindRequest(DicomQueryRetrieveLevel.NotApplicable);
-
-            ApplyCharacterSetToQuery(request.Dataset);
 
             // Patient-level keys
             if (!string.IsNullOrEmpty(filter.PatName))
@@ -550,144 +541,70 @@ public class DicomNetworkClient
     // Dataset-to-Model Conversion Helpers
     // ==============================================================================================
 
-    private IDicomClient CreateClient()
-    {
-        IDicomClient client = DicomClientFactory.Create(IP, Port, false, LocalAET.Trim(), RemoteAET.Trim());
-        client.FallbackEncoding = ResolveFallbackEncoding();
-        return client;
-    }
-
-    private Encoding ResolveFallbackEncoding()
-    {
-        if (string.IsNullOrWhiteSpace(DefaultCharacterSet))
-        {
-            return DicomEncoding.Default;
-        }
-
-        string characterSet = DefaultCharacterSet.Trim();
-
-        try
-        {
-            return DicomEncoding.GetEncoding(characterSet);
-        }
-        catch
-        {
-            try
-            {
-                return Encoding.GetEncoding(characterSet);
-            }
-            catch
-            {
-                return DicomEncoding.Default;
-            }
-        }
-    }
-
-    private void ApplyCharacterSetToQuery(DicomDataset dataset)
-    {
-        if (string.IsNullOrWhiteSpace(DefaultCharacterSet))
-        {
-            dataset.AddOrUpdate(DicomTag.SpecificCharacterSet, string.Empty);
-            return;
-        }
-
-        dataset.AddOrUpdate(DicomTag.SpecificCharacterSet, DefaultCharacterSet.Trim());
-    }
-
-    private DicomDataset GetEffectiveTextDataset(DicomDataset dataset)
-    {
-        if (dataset.Contains(DicomTag.SpecificCharacterSet))
-        {
-            return dataset;
-        }
-
-        if (string.IsNullOrWhiteSpace(DefaultCharacterSet))
-        {
-            return dataset;
-        }
-
-        var copy = new DicomDataset(dataset);
-        copy.AddOrUpdate(DicomTag.SpecificCharacterSet, DefaultCharacterSet.Trim());
-        return copy;
-    }
-
-    private string ReadDatasetString(DicomDataset dataset, DicomTag tag)
-    {
-        DicomDataset effectiveDataset = GetEffectiveTextDataset(dataset);
-
-        try
-        {
-            return effectiveDataset.GetString(tag)?.Trim() ?? string.Empty;
-        }
-        catch
-        {
-            return string.Empty;
-        }
-    }
-
-    private StudyInfo DatasetToStudyInfo(DicomDataset ds)
+    private static StudyInfo DatasetToStudyInfo(DicomDataset ds)
     {
         return new StudyInfo
         {
-            PatientName = ReadDatasetString(ds, DicomTag.PatientName),
-            PatientId = ReadDatasetString(ds, DicomTag.PatientID),
-            PatientBD = ReadDatasetString(ds, DicomTag.PatientBirthDate),
-            PatientSex = ReadDatasetString(ds, DicomTag.PatientSex),
-            StudyDate = ReadDatasetString(ds, DicomTag.StudyDate),
-            StudyTime = ReadDatasetString(ds, DicomTag.StudyTime),
-            StudyId = ReadDatasetString(ds, DicomTag.StudyID),
-            StudyDescription = ReadDatasetString(ds, DicomTag.StudyDescription),
-            StudyInstanceUid = ReadDatasetString(ds, DicomTag.StudyInstanceUID),
-            InstitutionName = ReadDatasetString(ds, DicomTag.InstitutionName),
-            PhysiciansName = ReadDatasetString(ds, DicomTag.ReferringPhysicianName),
-            AccessionNumber = ReadDatasetString(ds, DicomTag.AccessionNumber),
-            Modalities = ReadDatasetString(ds, DicomTag.ModalitiesInStudy),
+            PatientName = ds.GetSingleValueOrDefault(DicomTag.PatientName, string.Empty),
+            PatientId = ds.GetSingleValueOrDefault(DicomTag.PatientID, string.Empty),
+            PatientBD = ds.GetSingleValueOrDefault(DicomTag.PatientBirthDate, string.Empty),
+            PatientSex = ds.GetSingleValueOrDefault(DicomTag.PatientSex, string.Empty),
+            StudyDate = ds.GetSingleValueOrDefault(DicomTag.StudyDate, string.Empty),
+            StudyTime = ds.GetSingleValueOrDefault(DicomTag.StudyTime, string.Empty),
+            StudyId = ds.GetSingleValueOrDefault(DicomTag.StudyID, string.Empty),
+            StudyDescription = ds.GetSingleValueOrDefault(DicomTag.StudyDescription, string.Empty),
+            StudyInstanceUid = ds.GetSingleValueOrDefault(DicomTag.StudyInstanceUID, string.Empty),
+            InstitutionName = ds.GetSingleValueOrDefault(DicomTag.InstitutionName, string.Empty),
+            PhysiciansName = ds.GetSingleValueOrDefault(DicomTag.ReferringPhysicianName, string.Empty),
+            AccessionNumber = ds.GetSingleValueOrDefault(DicomTag.AccessionNumber, string.Empty),
+            Modalities = ds.GetSingleValueOrDefault(DicomTag.ModalitiesInStudy, string.Empty),
         };
     }
 
-    private SeriesInfo DatasetToSeriesInfo(DicomDataset ds)
+    private static SeriesInfo DatasetToSeriesInfo(DicomDataset ds)
     {
         return new SeriesInfo
         {
-            SerDesc = ReadDatasetString(ds, DicomTag.SeriesDescription),
-            SerDate = ReadDatasetString(ds, DicomTag.SeriesDate),
-            SerTime = ReadDatasetString(ds, DicomTag.SeriesTime),
-            BodyPart = ReadDatasetString(ds, DicomTag.BodyPartExamined),
-            SeriesNumber = ReadDatasetString(ds, DicomTag.SeriesNumber),
-            SerModality = ReadDatasetString(ds, DicomTag.Modality),
-            ProtocolName = ReadDatasetString(ds, DicomTag.ProtocolName),
-            PatPosition = ReadDatasetString(ds, DicomTag.PatientPosition),
-            SerInstUid = ReadDatasetString(ds, DicomTag.SeriesInstanceUID),
-            FrameOfRefUid = ReadDatasetString(ds, DicomTag.FrameOfReferenceUID),
+            SerDesc = ds.GetSingleValueOrDefault(DicomTag.SeriesDescription, string.Empty),
+            SerDate = ds.GetSingleValueOrDefault(DicomTag.SeriesDate, string.Empty),
+            SerTime = ds.GetSingleValueOrDefault(DicomTag.SeriesTime, string.Empty),
+            BodyPart = ds.GetSingleValueOrDefault(DicomTag.BodyPartExamined, string.Empty),
+            SeriesNumber = ds.GetSingleValueOrDefault(DicomTag.SeriesNumber, string.Empty),
+            SerModality = ds.GetSingleValueOrDefault(DicomTag.Modality, string.Empty),
+            ProtocolName = ds.GetSingleValueOrDefault(DicomTag.ProtocolName, string.Empty),
+            PatPosition = ds.GetSingleValueOrDefault(DicomTag.PatientPosition, string.Empty),
+            SerInstUid = ds.GetSingleValueOrDefault(DicomTag.SeriesInstanceUID, string.Empty),
+            FrameOfRefUid = ds.GetSingleValueOrDefault(DicomTag.FrameOfReferenceUID, string.Empty),
         };
     }
 
-    private ImageInfo DatasetToImageInfo(DicomDataset ds)
+    private static ImageInfo DatasetToImageInfo(DicomDataset ds)
     {
         return new ImageInfo
         {
-            ImageDate = ReadDatasetString(ds, DicomTag.AcquisitionDate),
-            ImageTime = ReadDatasetString(ds, DicomTag.AcquisitionTime),
-            ImageNumber = ReadDatasetString(ds, DicomTag.InstanceNumber),
-            SopInstUid = ReadDatasetString(ds, DicomTag.SOPInstanceUID),
-            SopClassUid = ReadDatasetString(ds, DicomTag.SOPClassUID),
-            SliceLocation = ReadDatasetString(ds, DicomTag.SliceLocation),
-            ImageType = ReadDatasetString(ds, DicomTag.ImageType),
-            NumberOfFrames = ReadDatasetString(ds, DicomTag.NumberOfFrames),
+            ImageDate = ds.GetSingleValueOrDefault(DicomTag.AcquisitionDate, string.Empty),
+            ImageTime = ds.GetSingleValueOrDefault(DicomTag.AcquisitionTime, string.Empty),
+            ImageNumber = ds.GetSingleValueOrDefault(DicomTag.InstanceNumber, string.Empty),
+            SopInstUid = ds.GetSingleValueOrDefault(DicomTag.SOPInstanceUID, string.Empty),
+            SopClassUid = ds.GetSingleValueOrDefault(DicomTag.SOPClassUID, string.Empty),
+            SliceLocation = ds.GetSingleValueOrDefault(DicomTag.SliceLocation, string.Empty),
+            ImageType = ds.GetSingleValueOrDefault(DicomTag.ImageType, string.Empty),
+            NumberOfFrames = ds.GetSingleValueOrDefault(DicomTag.NumberOfFrames, string.Empty),
         };
     }
 
-    private WorklistItem DatasetToWorklistItem(DicomDataset ds)
+    private static WorklistItem DatasetToWorklistItem(DicomDataset ds)
     {
         var item = new WorklistItem
         {
-            PatName = ReadDatasetString(ds, DicomTag.PatientName),
-            PatId = ReadDatasetString(ds, DicomTag.PatientID),
-            AccNo = ReadDatasetString(ds, DicomTag.AccessionNumber),
-            PatBD = ReadDatasetString(ds, DicomTag.PatientBirthDate),
-            PatSex = ReadDatasetString(ds, DicomTag.PatientSex),
-            StudyInstanceUid = ReadDatasetString(ds, DicomTag.StudyInstanceUID),
-            RequestedProcedureDescription = ReadDatasetString(ds, DicomTag.RequestedProcedureDescription),
+            PatName = ds.GetSingleValueOrDefault(DicomTag.PatientName, string.Empty),
+            PatId = ds.GetSingleValueOrDefault(DicomTag.PatientID, string.Empty),
+            AccNo = ds.GetSingleValueOrDefault(DicomTag.AccessionNumber, string.Empty),
+            PatBD = ds.GetSingleValueOrDefault(DicomTag.PatientBirthDate, string.Empty),
+            PatSex = ds.GetSingleValueOrDefault(DicomTag.PatientSex, string.Empty),
+            StudyInstanceUid = ds.GetSingleValueOrDefault(DicomTag.StudyInstanceUID, string.Empty),
+            RequestedProcedureDescription = ds.GetSingleValueOrDefault(
+                DicomTag.RequestedProcedureDescription, string.Empty),
         };
 
         // Extract Scheduled Procedure Step Sequence items
@@ -697,14 +614,21 @@ public class DicomNetworkClient
             if (spsSeq.Items.Count > 0)
             {
                 var sps = spsSeq.Items[0];
-                item.SppDescription = ReadDatasetString(sps, DicomTag.ScheduledProcedureStepDescription);
-                item.SppStartDate = ReadDatasetString(sps, DicomTag.ScheduledProcedureStepStartDate);
-                item.SppStartTime = ReadDatasetString(sps, DicomTag.ScheduledProcedureStepStartTime);
-                item.SppModality = ReadDatasetString(sps, DicomTag.Modality);
-                item.SppAeTitle = ReadDatasetString(sps, DicomTag.ScheduledStationAETitle);
-                item.SppPhysName = ReadDatasetString(sps, DicomTag.ScheduledPerformingPhysicianName);
-                item.SppStationName = ReadDatasetString(sps, DicomTag.ScheduledStationName);
-                item.SppLocation = ReadDatasetString(sps, DicomTag.ScheduledProcedureStepLocation);
+                item.SppDescription = sps.GetSingleValueOrDefault(
+                    DicomTag.ScheduledProcedureStepDescription, string.Empty);
+                item.SppStartDate = sps.GetSingleValueOrDefault(
+                    DicomTag.ScheduledProcedureStepStartDate, string.Empty);
+                item.SppStartTime = sps.GetSingleValueOrDefault(
+                    DicomTag.ScheduledProcedureStepStartTime, string.Empty);
+                item.SppModality = sps.GetSingleValueOrDefault(DicomTag.Modality, string.Empty);
+                item.SppAeTitle = sps.GetSingleValueOrDefault(
+                    DicomTag.ScheduledStationAETitle, string.Empty);
+                item.SppPhysName = sps.GetSingleValueOrDefault(
+                    DicomTag.ScheduledPerformingPhysicianName, string.Empty);
+                item.SppStationName = sps.GetSingleValueOrDefault(
+                    DicomTag.ScheduledStationName, string.Empty);
+                item.SppLocation = sps.GetSingleValueOrDefault(
+                    DicomTag.ScheduledProcedureStepLocation, string.Empty);
             }
         }
 

@@ -183,7 +183,7 @@ public partial class StudyViewerWindow
             .Where(candidate => candidate.SeedSetId == selectedSeedSet.Id && candidate.Kind == CenterlinePathKind.Computed)
             .OrderByDescending(candidate => candidate.UpdatedUtc)
             .FirstOrDefault();
-        if (selectedPath is null)
+        if (selectedPath is null || !selectedPath.HasRenderablePath)
         {
             return false;
         }

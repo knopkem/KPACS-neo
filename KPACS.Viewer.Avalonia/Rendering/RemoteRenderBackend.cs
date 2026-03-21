@@ -571,11 +571,11 @@ public sealed class RemoteRenderBackend : IRenderBackend
             minValue: (short)Math.Clamp(info.MinValue, short.MinValue, short.MaxValue),
             maxValue: (short)Math.Clamp(info.MaxValue, short.MinValue, short.MaxValue),
             isMonochrome1: info.IsMonochrome1,
-            seriesInstanceUid: "",
-            frameOfReferenceUid: "",
-            acquisitionNumber: "",
+            seriesInstanceUid: info.SeriesInstanceUid,
+            frameOfReferenceUid: info.FrameOfReferenceUid,
+            acquisitionNumber: info.AcquisitionNumber,
             sliceFilePaths: [],
-            sliceSopInstanceUids: []);
+            sliceSopInstanceUids: [.. info.SliceSopInstanceUids]);
     }
 
     // ==============================================================================================
