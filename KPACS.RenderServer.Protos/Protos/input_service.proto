@@ -1,0 +1,133 @@
+// ------------------------------------------------------------------------------------------------
+// K-PACS Render Server — input event forwarding
+//
+// Defines the messages the thin client sends to describe user interaction
+// (mouse, keyboard, scroll) so the server can update viewport state and
+// stream back new frames.
+// ------------------------------------------------------------------------------------------------
+
+syntax = "proto3";
+
+option csharp_namespace = "KPACS.RenderServer.Protos";
+
+package kpacs.render;
+
+service InputService {
+  /// Stream of user input events → stream of acknowledgements / state updates.
+  rpc StreamInput (stream InputEvent) returns (stream InputAck);
+}
+
+// ============================================================================
+// Input events from the thin client
+// ============================================================================
+
+message InputEvent {
+  string session_id    = 1;
+  string volume_id     = 2;
+  int32  viewport_index = 3;
+  uint64 timestamp_ms  = 4;
+
+  oneof event {
+    MouseMoveEvent    mouse_move    = 10;
+    MouseButtonEvent  mouse_button  = 11;
+    MouseWheelEvent   mouse_wheel   = 12;
+    KeyEvent          key           = 13;
+    ViewportResizeEvent resize      = 14;
+    ToolChangeEvent   tool_change   = 15;
+  }
+}
+
+message MouseMoveEvent {
+  /// Position relative to the viewport, in device-independent pixels.
+  double x = 1;
+  double y = 2;
+  KeyModifiers modifiers = 3;
+}
+
+message MouseButtonEvent {
+  MouseButton button  = 1;
+  bool        pressed = 2;
+  double      x       = 3;
+  double      y       = 4;
+  KeyModifiers modifiers = 5;
+}
+
+message MouseWheelEvent {
+  /// Signed delta (positive = scroll up / zoom in).
+  double delta = 1;
+  double x     = 2;
+  double y     = 3;
+  KeyModifiers modifiers = 4;
+}
+
+message KeyEvent {
+  string key     = 1;
+  bool   pressed = 2;
+  KeyModifiers modifiers = 3;
+}
+
+message ViewportResizeEvent {
+  int32 width  = 1;
+  int32 height = 2;
+}
+
+message ToolChangeEvent {
+  ActiveTool tool = 1;
+}
+
+// ============================================================================
+// Enums
+// ============================================================================
+
+enum MouseButton {
+  MOUSE_BUTTON_LEFT   = 0;
+  MOUSE_BUTTON_RIGHT  = 1;
+  MOUSE_BUTTON_MIDDLE = 2;
+}
+
+enum KeyModifiers {
+  KEY_MODIFIERS_NONE    = 0;
+  KEY_MODIFIERS_SHIFT   = 1;
+  KEY_MODIFIERS_CTRL    = 2;
+  KEY_MODIFIERS_ALT     = 4;
+}
+
+enum ActiveTool {
+  ACTIVE_TOOL_WINDOW_LEVEL = 0;
+  ACTIVE_TOOL_PAN          = 1;
+  ACTIVE_TOOL_ZOOM         = 2;
+  ACTIVE_TOOL_SCROLL       = 3;
+  ACTIVE_TOOL_DVR_ORBIT    = 4;
+}
+
+// ============================================================================
+// Acknowledgements / server-driven state pushes
+// ============================================================================
+
+message InputAck {
+  uint64 timestamp_ms = 1;
+  /// When the server recalculates viewport state in response to input,
+  /// it pushes the authoritative state back so the thin client stays in sync.
+  ViewportStateUpdate state_update = 2;
+}
+
+message ViewportStateUpdate {
+  int32 viewport_index = 1;
+  /// Windowing
+  double window_center = 2;
+  double window_width  = 3;
+  /// Slice
+  int32 slice_index = 4;
+  int32 slice_count = 5;
+  /// Zoom / pan
+  double zoom_factor = 6;
+  double pan_x       = 7;
+  double pan_y       = 8;
+  /// DVR orbit angles (so thin client can show overlays)
+  double dvr_azimuth_deg   = 9;
+  double dvr_elevation_deg = 10;
+  /// Status text for overlays
+  string orientation_label    = 11;
+  string projection_mode_label = 12;
+  string render_backend_label  = 13;
+}

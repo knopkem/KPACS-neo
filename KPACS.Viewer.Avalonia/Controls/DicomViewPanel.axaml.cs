@@ -118,6 +118,7 @@ public partial class DicomViewPanel : UserControl
     // ==============================================================================================
 
     private SeriesVolume? _volume;
+    private IRenderBackend? _renderBackend;
     private SliceOrientation _volumeOrientation = SliceOrientation.Axial;
     private int _volumeSliceIndex;
     private short[]? _volumeSlicePixels;
@@ -157,6 +158,12 @@ public partial class DicomViewPanel : UserControl
     public bool IsVerticallyFlipped => _viewFlipVertical;
     public int ViewRotationQuarterTurns => NormalizeQuarterTurns(_viewRotationQuarterTurns);
     public string LastRenderBackendLabel => _lastRenderBackendLabel;
+
+    /// <summary>The active render backend, if any. Null when no volume is bound.</summary>
+    public IRenderBackend? RenderBackend => _renderBackend;
+
+    /// <summary>True when this panel is rendering via a remote server.</summary>
+    public bool IsRemoteRendering => _renderBackend?.IsRemote == true;
 
     // ==============================================================================================
     // Rendering
@@ -526,6 +533,8 @@ public partial class DicomViewPanel : UserControl
     {
         LastError = null;
 
+        _renderBackend?.Dispose();
+        _renderBackend = null;
         _volume = null;
         _volumeSlicePixels = null;
         _volumeSliceBgraPixels = null;
@@ -750,6 +759,8 @@ public partial class DicomViewPanel : UserControl
     public void ClearImage()
     {
         _rawPixelData = null;
+        _renderBackend?.Dispose();
+        _renderBackend = null;
         _volume = null;
         _volumeSlicePixels = null;
         _volumeSliceBgraPixels = null;
@@ -792,14 +803,26 @@ public partial class DicomViewPanel : UserControl
     /// </summary>
     public void BindVolume(SeriesVolume volume, SliceOrientation orientation, int sliceIndex)
     {
+        BindVolumeWithBackend(volume, new LocalRenderBackend(volume), orientation, sliceIndex);
+    }
+
+    /// <summary>
+    /// Binds this panel to a volume using a specific render backend.
+    /// For local rendering, use <see cref="LocalRenderBackend"/>.
+    /// For remote rendering, use <see cref="RemoteRenderBackend"/>.
+    /// </summary>
+    public void BindVolumeWithBackend(SeriesVolume volume, IRenderBackend renderBackend, SliceOrientation orientation, int sliceIndex)
+    {
+        _renderBackend?.Dispose();
         _rawPixelData = null; // detach from legacy file path
         _volume = volume;
+        _renderBackend = renderBackend;
         _volumeOrientation = orientation;
         _planeTiltAroundColumn = 0;
         _planeTiltAroundRow = 0;
         _planeOffsetMm = 0;
         _pendingInitialFitToWindow = true;
-        _projectionThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), VolumeReslicer.GetSliceSpacing(volume, orientation));
+        _projectionThicknessMm = Math.Max(GetMinimumProjectionThicknessMm(), _renderBackend.GetSliceSpacing(orientation));
         _isMonochrome1 = volume.IsMonochrome1;
         _samplesPerPixel = 1;
         _bitsAllocated = 16;
@@ -827,13 +850,39 @@ public partial class DicomViewPanel : UserControl
     }
 
     /// <summary>
+    /// Pushes the panel's current windowing, colour scheme, and view transform
+    /// to the render backend. For local backends these are no-ops; for remote
+    /// backends they ensure the server applies the correct parameters.
+    /// Called automatically before every render request.
+    /// </summary>
+    private void SyncViewportStateToBackend()
+    {
+        if (_renderBackend is null)
+            return;
+
+        _renderBackend.SetWindowing(_windowCenter, _windowWidth);
+        _renderBackend.SetColorScheme(_colorScheme);
+        _renderBackend.SetViewTransform(
+            _zoomFactor, _panX, _panY,
+            _viewFlipHorizontal, _viewFlipVertical, _viewRotationQuarterTurns);
+        _renderBackend.SetOutputSize(
+            GetSourceRenderPixelWidth(),
+            GetSourceRenderPixelHeight());
+    }
+
+    /// <summary>
     /// Navigates to a different slice within the currently bound volume.
     /// Has no effect if no volume is bound.
     /// </summary>
     public bool ShowVolumeSlice(int sliceIndex)
     {
-        if (_volume is null)
+        if (_volume is null || _renderBackend is null)
             return false;
+
+        // Sync viewport state to the backend before rendering.
+        // For local backends these are no-ops; for remote backends they ensure
+        // the server applies the correct windowing, colour scheme, and transform.
+        SyncViewportStateToBackend();
 
         double previousDisplayWidth = GetDisplayWidth();
         double previousDisplayHeight = GetDisplayHeight();
@@ -857,24 +906,22 @@ public partial class DicomViewPanel : UserControl
         }
 
         // DVR with active 3D camera: use the arbitrary-view renderer.
-        // When OpenCL is available, render at full quality — the GPU is fast enough.
+        // When the backend supports high-quality interactive, render at full quality.
         ReslicedImage resliced;
         if (IsDvrMode && _dvrRenderState is not null)
         {
             UpdateDvrRenderState(highQuality: CanUseGpuForCurrentDvr());
-            resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
-                _volume, _dvrRenderState, _dvrTransferFunction);
+            resliced = _renderBackend.ComputeDirectVolumeRenderingView(
+                _dvrRenderState, _dvrTransferFunction);
         }
         else
         {
             resliced = requestedPlane is not null
-                ? VolumeReslicer.RenderSlab(
-                    _volume,
+                ? _renderBackend.RenderSlab(
                     requestedPlane,
                     _projectionThicknessMm,
                     _projectionMode)
-                : VolumeReslicer.RenderSlab(
-                    _volume,
+                : _renderBackend.RenderSlab(
                     _volumeOrientation,
                     sliceIndex,
                     _projectionThicknessMm,
@@ -897,7 +944,7 @@ public partial class DicomViewPanel : UserControl
         {
             SpatialMetadata = requestedPlane is not null
                 ? requestedPlane.CreateSpatialMetadata(_volume)
-                : VolumeReslicer.GetSliceSpatialMetadata(_volume, _volumeOrientation, _volumeSliceIndex);
+                : _renderBackend.GetSliceSpatialMetadata(_volumeOrientation, _volumeSliceIndex);
         }
         _fileName = SpatialMetadata?.FilePath ?? "";
         ApplyDisplayImageSize();
@@ -915,9 +962,9 @@ public partial class DicomViewPanel : UserControl
         PlaceholderText.IsVisible = false;
         if (IsDvrMode)
         {
-            bool gpuAvailable = VolumeComputeBackend.CanUseOpenCl;
-            RenderImage(sharp: gpuAvailable);
-            if (!gpuAvailable)
+            bool highQuality = _renderBackend.SupportsHighQualityInteractive;
+            RenderImage(sharp: highQuality);
+            if (!highQuality)
             {
                 ScheduleDvrSharpRender();
             }
@@ -992,7 +1039,7 @@ public partial class DicomViewPanel : UserControl
             _planeTiltAroundColumn = 0;
             _planeTiltAroundRow = 0;
             _planeOffsetMm = 0;
-            _volumeSliceIndex = Math.Max(0, VolumeReslicer.GetSliceCount(_volume, SliceOrientation.Axial) / 2);
+            _volumeSliceIndex = Math.Max(0, (_renderBackend?.GetSliceCount(SliceOrientation.Axial) ?? _volume.SizeZ) / 2);
             _projectionThicknessMm = GetMaximumProjectionThicknessMm();
             _dvrCameraViewPreset = DvrCameraViewPreset.Bottom;
             (_dvrInitialForward, _dvrInitialUp) = GetStandardDvrCameraBasis(_dvrCameraViewPreset);
@@ -1038,7 +1085,7 @@ public partial class DicomViewPanel : UserControl
 
     private double GetMinimumProjectionThicknessMm()
     {
-        if (_volume is null)
+        if (_volume is null || _renderBackend is null)
         {
             return 1.0;
         }
@@ -1046,12 +1093,12 @@ public partial class DicomViewPanel : UserControl
         VolumeSlicePlane? plane = GetCurrentSlicePlane();
         return plane is not null
             ? Math.Max(0.1, plane.SliceSpacingMm)
-            : Math.Max(0.1, VolumeReslicer.GetSliceSpacing(_volume, _volumeOrientation));
+            : Math.Max(0.1, _renderBackend.GetSliceSpacing(_volumeOrientation));
     }
 
     private double GetMaximumProjectionThicknessMm()
     {
-        if (_volume is null)
+        if (_volume is null || _renderBackend is null)
         {
             return 500.0;
         }
@@ -1064,29 +1111,28 @@ public partial class DicomViewPanel : UserControl
 
         return Math.Max(
             GetMinimumProjectionThicknessMm(),
-            VolumeReslicer.GetSliceSpacing(_volume, _volumeOrientation) * Math.Max(1, VolumeReslicer.GetSliceCount(_volume, _volumeOrientation)));
+            _renderBackend.GetSliceSpacing(_volumeOrientation) * Math.Max(1, _renderBackend.GetSliceCount(_volumeOrientation)));
     }
 
     private int GetCurrentSliceCount()
     {
-        if (_volume is null)
+        if (_volume is null || _renderBackend is null)
         {
             return 0;
         }
 
         VolumeSlicePlane? plane = GetCurrentSlicePlane();
-        return plane?.SliceCount ?? VolumeReslicer.GetSliceCount(_volume, _volumeOrientation);
+        return plane?.SliceCount ?? _renderBackend.GetSliceCount(_volumeOrientation);
     }
 
     private VolumeSlicePlane? GetCurrentSlicePlane(int? sliceIndex = null)
     {
-        if (_volume is null || !HasTiltedPlane)
+        if (_volume is null || _renderBackend is null || !HasTiltedPlane)
         {
             return null;
         }
 
-        VolumeSlicePlane plane = VolumeReslicer.CreateSlicePlane(
-            _volume,
+        VolumeSlicePlane plane = _renderBackend.CreateSlicePlane(
             _volumeOrientation,
             _planeTiltAroundColumn,
             _planeTiltAroundRow,
@@ -1102,13 +1148,12 @@ public partial class DicomViewPanel : UserControl
 
     private VolumeSlicePlane? GetCurrentSlicePlaneForSliceIndex(int sliceIndex)
     {
-        if (_volume is null || !HasTiltedPlane)
+        if (_volume is null || _renderBackend is null || !HasTiltedPlane)
         {
             return null;
         }
 
-        VolumeSlicePlane plane = VolumeReslicer.CreateSlicePlane(
-            _volume,
+        VolumeSlicePlane plane = _renderBackend.CreateSlicePlane(
             _volumeOrientation,
             _planeTiltAroundColumn,
             _planeTiltAroundRow,
@@ -1145,7 +1190,7 @@ public partial class DicomViewPanel : UserControl
         _planeTiltControlPressed = false;
         _planeOffsetMm = HasTiltedPlane
             ? GetCurrentPlaneOffsetMm()
-            : VolumeReslicer.CreateSlicePlane(_volume!, _volumeOrientation, 0, 0, 0).WithSliceIndex(_volumeSliceIndex).CurrentOffsetMm;
+            : (_renderBackend ?? (IRenderBackend)new LocalRenderBackend(_volume!)).CreateSlicePlane(_volumeOrientation, 0, 0, 0).WithSliceIndex(_volumeSliceIndex).CurrentOffsetMm;
         _isLeftDragging = true;
         _mouseDownPos = pos;
         Focus();
@@ -1593,7 +1638,7 @@ public partial class DicomViewPanel : UserControl
     /// </summary>
     private void RenderImageFastThenSharp()
     {
-        if (VolumeComputeBackend.CanUseOpenCl)
+        if (_renderBackend?.SupportsHighQualityInteractive ?? VolumeComputeBackend.CanUseOpenCl)
         {
             // Powerful hardware: render sharp immediately — no deferred pass needed.
             RenderImage(sharp: true);
@@ -1606,8 +1651,8 @@ public partial class DicomViewPanel : UserControl
 
     private void ScheduleSharpRender()
     {
-        // GPU workstation already renders sharp during interaction — no deferred pass needed.
-        if (VolumeComputeBackend.CanUseOpenCl)
+        // Backend already renders at full quality during interaction — no deferred pass needed.
+        if (_renderBackend?.SupportsHighQualityInteractive ?? VolumeComputeBackend.CanUseOpenCl)
         {
             return;
         }

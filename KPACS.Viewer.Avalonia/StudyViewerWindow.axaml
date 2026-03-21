@@ -349,6 +349,12 @@
                                 <TextBlock Text="Export" FontSize="11" />
                             </StackPanel>
                         </Button>
+                        <Button x:Name="WorkspaceRemoteGpuButton" Classes="workspaceAction" Click="OnWorkspaceRemoteGpuClick" ToolTip.Tip="Connect to a remote K-PACS Render Server for GPU-accelerated rendering. Allows using a powerful GPU on another machine.">
+                            <StackPanel Orientation="Horizontal" Spacing="5">
+                                <TextBlock Text="🖧" FontSize="11" />
+                                <TextBlock x:Name="WorkspaceRemoteGpuLabel" Text="Remote GPU" FontSize="11" />
+                            </StackPanel>
+                        </Button>
                     </WrapPanel>
                 </Grid>
             </Border>

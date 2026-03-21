@@ -4,6 +4,11 @@ A modern C# port of key components from **K-PACS**, the free DICOM workstation I
 
 This project aims to bring the core DICOM infrastructure into the .NET ecosystem, built on top of [fo-dicom](https://github.com/fo-dicom/fo-dicom) and targeting **.NET 10**.
 
+The supported application shape in this repository is:
+
+- **K-PACS Viewer (Avalonia)** — the main workstation, including local mode, local GPU/OpenCL mode, and an integrated remote-render / remote-imagebox option
+- **K-PACS Render Server** — the companion headless service that provides remote rendering and remote study browsing for that integrated viewer mode
+
 The old **WPF viewer has been retired from this repository**. Active UI development now happens only in the **Avalonia** application.
 
 ## Project Structure
@@ -70,6 +75,13 @@ KPACS.Viewer.Avalonia/          — Cross-platform study browser + DICOM viewer 
     ├── VolumeSlicePlane.cs       — Shared oblique plane geometry for tilted volume navigation
     └── VolumeTransferFunction.cs — DVR transfer-function presets for CT/PET-style rendering
 
+KPACS.RenderServer.Protos/      — Shared gRPC contracts for remote rendering and remote study browsing
+
+KPACS.RenderServer/             — Headless remote rendering and imagebox-backed study-browsing service (.NET 10)
+├── Program.cs                    — ASP.NET Core/gRPC host entry point
+├── appsettings.json              — Default server URL and imagebox database settings
+└── Services/                     — Session lifecycle, volume loading, render orchestration, and study-browser services
+
 VolumeRenderingPresetCatalog.cs  — Catalog for DVR presets, shading presets, light directions, and recommended color maps
 ```
 
@@ -112,6 +124,7 @@ The Avalonia application has moved beyond a single-file viewer and now includes 
 - **Oblique tilt-plane navigation** via a dedicated toolbox tool that tilts the current slice/slab plane in all volume modes, including DVR, while wheel and middle-drag continue front-to-back scrolling through the volume
 - **Parallelized volume reslicing/projection** for oblique slabs and thick orthogonal slabs to improve interactive performance on multi-core CPUs
 - **Linked slice synchronization** for same-space series plus lightweight prior-study / CT-MR fallback registration based on cached voxel volumes
+- **Integrated remote rendering mode** at the study-browser level with persisted render-server endpoint settings, remote imagebox browsing, transparent study open flow, and server-side rendering for both thin 2D series and full volume datasets
 - **Key-image workflow** with K-PACS-root Secondary Capture generation, volume-mode key-image toggling, and preview-strip marking only for K-PACS-managed key-image series
 - **DICOM rendering coverage** including bitmap overlay planes (60xx), embedded overlay bits, RGB Secondary Capture, and multiple YBR photometric interpretations
 - **Search/filter support** in Database, Filesystem, and Network mode, including wildcard remote matching and safe blocking of empty remote queries
@@ -167,6 +180,9 @@ dotnet build KPACS.DCMClasses/KPACS.DCMClasses.csproj
 
 # Cross-platform Avalonia viewer
 dotnet build KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj
+
+# Remote render server
+dotnet build KPACS.RenderServer/KPACS.RenderServer.csproj
 ```
 
 ## Release Packaging
@@ -217,6 +233,9 @@ The macOS package is emitted as an unsigned `.app` bundle. That is the most prac
 ```bash
 # Avalonia viewer (any platform)
 dotnet run --project KPACS.Viewer.Avalonia/KPACS.Viewer.Avalonia.csproj
+
+# Render server
+dotnet run --project KPACS.RenderServer/KPACS.RenderServer.csproj
 ```
 
 ## Avalonia Browser Workflow
@@ -248,6 +267,16 @@ Additional runtime configuration files are stored alongside the imagebox root:
 - `window-placement.json` — persisted browser/viewer geometry
 - `study-browser-layout.json` — persisted patient/study and study/series splitter sizes
 - `job-logs/` — per-job import/send logs written by the background job service
+
+### Remote rendering mode
+
+The Avalonia viewer can also connect to a `KPACS.RenderServer` instance and use the same study-browser workflow against the server-side imagebox:
+
+- **Standalone CPU / local mode** — browser and viewer use the workstation's own imagebox and CPU rendering path
+- **Standalone local GPU/OpenCL mode** — browser stays local while volume rendering uses local OpenCL when available
+- **Remote render-server mode** — the browser can switch to the remote imagebox, and opened studies render through the server while preserving the normal K-PACS viewer workflow
+
+This remote mode is built into `KPACS.Viewer.Avalonia`; there is no separate thin-client application in the supported repository layout.
 
 ### Network workflow notes
 

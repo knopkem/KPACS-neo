@@ -7,6 +7,8 @@ public sealed class DicomNetworkSettings
     public string InboxDirectory { get; set; } = string.Empty;
     public bool EnableDicomCommunicationLogging { get; set; }
     public string DicomCommunicationLogPath { get; set; } = string.Empty;
+    public string RenderServerDatabaseUrl { get; set; } = "http://localhost:5200";
+    public bool UseRenderServerDatabase { get; set; }
     public string SelectedArchiveId { get; set; } = string.Empty;
     public List<RemoteArchiveEndpoint> Archives { get; set; } =
     [
@@ -43,6 +45,9 @@ public sealed class DicomNetworkSettings
         DicomCommunicationLogPath = string.IsNullOrWhiteSpace(DicomCommunicationLogPath)
             ? Path.Combine(applicationDirectory, "dicom-communication.log")
             : Path.GetFullPath(DicomCommunicationLogPath.Trim());
+        RenderServerDatabaseUrl = string.IsNullOrWhiteSpace(RenderServerDatabaseUrl)
+            ? "http://localhost:5200"
+            : RenderServerDatabaseUrl.Trim();
 
         if (Archives.Count == 0)
         {
@@ -56,6 +61,29 @@ public sealed class DicomNetworkSettings
 
         RemoteArchiveEndpoint selectedArchive = GetSelectedArchive() ?? Archives[0];
         SelectedArchiveId = selectedArchive.Id;
+    }
+
+    public DicomNetworkSettings Clone()
+    {
+        return new DicomNetworkSettings
+        {
+            LocalAeTitle = LocalAeTitle,
+            LocalPort = LocalPort,
+            InboxDirectory = InboxDirectory,
+            EnableDicomCommunicationLogging = EnableDicomCommunicationLogging,
+            DicomCommunicationLogPath = DicomCommunicationLogPath,
+            RenderServerDatabaseUrl = RenderServerDatabaseUrl,
+            UseRenderServerDatabase = UseRenderServerDatabase,
+            SelectedArchiveId = SelectedArchiveId,
+            Archives = Archives.Select(archive => new RemoteArchiveEndpoint
+            {
+                Id = archive.Id,
+                Name = archive.Name,
+                Host = archive.Host,
+                Port = archive.Port,
+                RemoteAeTitle = archive.RemoteAeTitle,
+            }).ToList(),
+        };
     }
 
     internal static string NormalizeAeTitle(string? value, string fallback)

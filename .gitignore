@@ -28,3 +28,5 @@ KPACS.sln
 
 # Local published release output
 release/
+artifacts/publish-release-*/
+artifacts/publish-release-singlefile-test/

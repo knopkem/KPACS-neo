@@ -36,6 +36,12 @@ public static class VolumeRegistrationService
         SeriesVolume targetVolume,
         out VolumeTranslationRegistration registration)
     {
+        if (!HasVoxelData(sourceVolume) || !HasVoxelData(targetVolume))
+        {
+            registration = default;
+            return false;
+        }
+
         string cacheKey = $"{sourceVolume.SeriesInstanceUid}->{targetVolume.SeriesInstanceUid}";
         lock (SyncRoot)
         {
@@ -248,6 +254,25 @@ public static class VolumeRegistrationService
         }
 
         return profile;
+    }
+
+    private static bool HasVoxelData(SeriesVolume volume)
+    {
+        int expectedLength;
+        try
+        {
+            checked
+            {
+                expectedLength = volume.SizeX * volume.SizeY * volume.SizeZ;
+            }
+        }
+        catch (OverflowException)
+        {
+            return false;
+        }
+
+        return expectedLength > 0
+            && volume.Voxels.Length >= expectedLength;
     }
 
     private static VolumeProfile BuildProfile(SeriesVolume volume)

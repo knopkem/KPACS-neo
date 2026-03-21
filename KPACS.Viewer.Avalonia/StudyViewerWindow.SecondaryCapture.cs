@@ -301,7 +301,8 @@ public partial class StudyViewerWindow
     {
         foreach (ViewportSlot slot in _slots.Where(slot => slot.Series is not null && string.Equals(slot.Series.SeriesInstanceUid, affectedSeries.SeriesInstanceUid, StringComparison.OrdinalIgnoreCase)))
         {
-            if (affectedSeries.Instances.Count == 0)
+            int totalCount = GetSeriesTotalCount(affectedSeries);
+            if (totalCount == 0)
             {
                 slot.Series = null;
                 slot.InstanceIndex = 0;
@@ -310,7 +311,7 @@ public partial class StudyViewerWindow
                 continue;
             }
 
-            slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, affectedSeries.Instances.Count - 1);
+            slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, totalCount - 1);
             LoadSlot(slot);
         }
 
@@ -322,13 +323,7 @@ public partial class StudyViewerWindow
 
     private InstanceRecord? GetCurrentInstance(ViewportSlot slot)
     {
-        if (slot.Series is null || slot.Series.Instances.Count == 0)
-        {
-            return null;
-        }
-
-        int index = Math.Clamp(slot.InstanceIndex, 0, slot.Series.Instances.Count - 1);
-        return slot.Series.Instances[index];
+        return GetSafeSeriesInstance(slot.Series, slot.InstanceIndex);
     }
 
     private InstanceRecord? ResolveSecondaryCaptureSourceInstance(ViewportSlot slot)

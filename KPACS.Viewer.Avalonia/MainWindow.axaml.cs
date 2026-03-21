@@ -104,6 +104,7 @@ public partial class MainWindow : Window
         _ = RefreshNetworkInfoPanelAsync();
         _ = RefreshDatabaseInfoPanelAsync();
         UpdateModeUi();
+        await RestoreRenderServerDatabaseConnectionAsync();
 
         if (_browserMode == BrowserMode.Filesystem)
         {
@@ -267,14 +268,13 @@ public partial class MainWindow : Window
 
     private async Task LoadDatabaseStudiesAsync(string? statusOverride)
     {
-        _allStudies = await _app.Repository.SearchStudiesAsync(BuildQuery());
-        BuildPatientRows();
-        ApplyPatientFilter();
+        if (IsRenderServerDatabaseConnected)
+        {
+            await LoadRenderServerStudiesAsync(statusOverride);
+            return;
+        }
 
-        DatabaseStatsText.Text = $"{_allStudies.Count} studies indexed in SQLite.";
-        StatusText.Text = statusOverride ?? (_allStudies.Count == 0
-            ? "K-PACS imagebox ready — switch to Filesystem mode to scan media before importing."
-            : $"Loaded {_allStudies.Count} studies from the K-PACS imagebox and filesystem index.");
+        await LoadDatabaseStudiesLocalAsync(statusOverride);
     }
 
     private void LoadFilesystemPreviewStudies(string? statusOverride, bool applySearchFilters)
@@ -538,7 +538,11 @@ public partial class MainWindow : Window
     {
         return _browserMode switch
         {
-            BrowserMode.Database => await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey),
+            BrowserMode.Database => IsRenderServerDatabaseConnected
+                ? await LoadRenderServerStudyDetailsAsync(selectedStudy)
+                : _app.IsRemoteOnlyDebugMode
+                    ? null
+                    : await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey),
             BrowserMode.Filesystem => _filesystemPreviewDetails.GetValueOrDefault(selectedStudy.StudyInstanceUid),
             BrowserMode.Network => await EnsureNetworkPreviewLoadedAsync(selectedStudy),
             _ => null,
@@ -623,7 +627,11 @@ public partial class MainWindow : Window
         RemoteStudyRetrievalSession? retrievalSession = null;
         StudyDetails? details = _browserMode switch
         {
-            BrowserMode.Database => await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey),
+            BrowserMode.Database => IsRenderServerDatabaseConnected
+                ? await LoadRenderServerStudyDetailsAsync(selectedStudy)
+                : _app.IsRemoteOnlyDebugMode
+                    ? null
+                    : await _app.Repository.GetStudyDetailsAsync(selectedStudy.StudyKey),
             BrowserMode.Filesystem => _filesystemPreviewDetails.GetValueOrDefault(selectedStudy.StudyInstanceUid),
             BrowserMode.Network => await RetrieveNetworkStudyAsync(selectedStudy),
             BrowserMode.Email => null,
@@ -641,16 +649,22 @@ public partial class MainWindow : Window
             {
                 SetStatus("This browser mode does not provide studies yet.");
             }
-            else if (_browserMode == BrowserMode.Database)
+            else if (_browserMode == BrowserMode.Database && !IsRenderServerDatabaseConnected)
             {
                 SetStatus("Selected study could not be loaded from SQLite.");
                 ShowToast("Selected study could not be loaded from SQLite.", ToastSeverity.Error);
             }
+            else if (_browserMode == BrowserMode.Database)
+            {
+                SetStatus("Selected study could not be loaded from the remote render server.");
+                ShowToast("Selected study could not be loaded from the remote render server.", ToastSeverity.Error);
+            }
             return;
         }
 
-        if ((_browserMode == BrowserMode.Database || _browserMode == BrowserMode.Filesystem)
-            && details.Study.Availability != StudyAvailability.Imported)
+        if (!_app.IsRemoteOnlyDebugMode
+            && (((_browserMode == BrowserMode.Database && !IsRenderServerDatabaseConnected) || _browserMode == BrowserMode.Filesystem)
+                && details.Study.Availability != StudyAvailability.Imported))
         {
             bool queued = await _app.ImportService.QueueStudyImportAsync(details);
             if (queued)
@@ -814,12 +828,36 @@ public partial class MainWindow : Window
         await RefreshCurrentModeAsync($"Saved network configuration. Storage SCP restarted on port {updatedSettings.LocalPort}. DICOM trace logging {(updatedSettings.EnableDicomCommunicationLogging ? "enabled" : "disabled")}." );
     }
 
-    private async void OnConfigClick(object? sender, RoutedEventArgs e) => await OpenNetworkConfigurationAsync(allowModeSwitch: false);
+    private async void OnConfigClick(object? sender, RoutedEventArgs e)
+    {
+        if (_browserMode == BrowserMode.Database)
+        {
+            await OpenRenderServerDatabaseConnectionAsync();
+            return;
+        }
+
+        await OpenNetworkConfigurationAsync(allowModeSwitch: false);
+    }
 
     private async void OnInfoClick(object? sender, RoutedEventArgs e)
     {
         if (_browserMode == BrowserMode.Database)
         {
+            if (IsRenderServerDatabaseConnected)
+            {
+                string gpuName = _renderServerDatabaseCapabilities?.GpuDeviceName ?? "Unknown GPU";
+                long gpuMemoryMb = (_renderServerDatabaseCapabilities?.GpuMemoryBytes ?? 0) / (1024 * 1024);
+                string remoteDatabaseInfo = $"Remote render server: {_renderServerDatabaseUrl}\n"
+                    + $"GPU: {gpuName}\n"
+                    + $"GPU memory: {gpuMemoryMb:N0} MB\n"
+                    + $"OpenCL available: {(_renderServerDatabaseCapabilities?.OpenclAvailable == true ? "Yes" : "No")}\n"
+                    + $"Server version: {_renderServerDatabaseCapabilities?.ServerVersion}\n"
+                    + $"Loaded studies in browser: {_allStudies.Count}";
+
+                await new NetworkInfoWindow("Remote Database Information", remoteDatabaseInfo).ShowDialog(this);
+                return;
+            }
+
             bool dbExists = File.Exists(_app.Paths.DatabasePath);
             long dbSize = dbExists ? new FileInfo(_app.Paths.DatabasePath).Length : 0;
             int studyCount = 0;
@@ -1409,7 +1447,7 @@ public partial class MainWindow : Window
     private void OnStudyContextMenuOpened(object? sender, RoutedEventArgs e)
     {
         List<StudyListItem> selectedStudies = GetSelectedStudies();
-        DeleteStudyMenuItem.IsEnabled = _browserMode == BrowserMode.Database && selectedStudies.Count > 0;
+        DeleteStudyMenuItem.IsEnabled = _browserMode == BrowserMode.Database && !IsRenderServerDatabaseConnected && selectedStudies.Count > 0;
         DeleteStudyMenuItem.Header = selectedStudies.Count > 1 ? $"Delete {selectedStudies.Count} Studies" : "Delete Study";
     }
 
@@ -1554,7 +1592,15 @@ public partial class MainWindow : Window
         StudySeriesSplitter.IsVisible = true;
         HidePatientPanelButton.IsVisible = showPatientPanel;
         ShowPatientPanelButton.IsVisible = (databaseMode || networkMode) && !showPatientPanel;
-        ConfigButton.IsEnabled = networkMode;
+        ConfigButton.IsEnabled = networkMode || databaseMode;
+        ConfigButton.Content = databaseMode
+            ? (IsRenderServerDatabaseConnected ? "Local" : "Remote")
+            : "Cfg";
+        if (DatabaseRemoteButton is not null)
+        {
+            DatabaseRemoteButton.IsVisible = databaseMode;
+            DatabaseRemoteButton.Content = IsRenderServerDatabaseConnected ? "Local" : "Remote";
+        }
         InfoButton.IsEnabled = true;
 
         ModePlaceholderText.Text = _browserMode switch
@@ -1951,6 +1997,16 @@ public partial class MainWindow : Window
                 {
                     StudyDetails = details,
                     RemoteRetrievalSession = index == 0 ? retrievalSession : null,
+                    RenderServerConnection = _browserMode == BrowserMode.Database && IsRenderServerDatabaseConnected && index == 0 && !string.IsNullOrWhiteSpace(_renderServerDatabaseUrl)
+                        ? new RenderServerConnectionInfo
+                        {
+                            ServerUrl = _renderServerDatabaseUrl!,
+                            Capabilities = _renderServerDatabaseCapabilities,
+                        }
+                        : null,
+                    RemoteSeriesKeysBySeriesInstanceUid = _browserMode == BrowserMode.Database && IsRenderServerDatabaseConnected
+                        ? _renderServerSeriesKeysByStudyInstanceUid.GetValueOrDefault(details.Study.StudyInstanceUid)
+                        : null,
                     LoadPriorStudiesAsync = cancellationToken => _app.PriorStudyLookupService.FindPriorStudiesAsync(details.Study, priorLookupMode, cancellationToken),
                     LoadPriorStudyPreviewAsync = (priorStudy, onUpdated, cancellationToken) => _app.PriorStudyLookupService.LoadPriorStudyPreviewAsync(priorStudy, onUpdated, cancellationToken),
                     InitialPriorStudies = priorStudies,
@@ -2037,7 +2093,9 @@ public partial class MainWindow : Window
         List<StudyListItem> localStudies = [];
         try
         {
-            localStudies = await _app.Repository.SearchStudiesAsync(query);
+            localStudies = _browserMode == BrowserMode.Database && IsRenderServerDatabaseConnected
+                ? await SearchRenderServerStudiesAsync(query)
+                : await _app.Repository.SearchStudiesAsync(query);
         }
         catch
         {
@@ -2061,7 +2119,7 @@ public partial class MainWindow : Window
 
         foreach (StudyListItem study in localStudies.Where(study => MatchesPatient(selectedPatient, study)))
         {
-            candidatesByStudyUid[study.StudyInstanceUid] = new PatientStudyLaunchCandidate(study, null);
+            candidatesByStudyUid[study.StudyInstanceUid] = new PatientStudyLaunchCandidate(study, null, _browserMode == BrowserMode.Database && IsRenderServerDatabaseConnected);
         }
 
         foreach (RemoteStudySearchResult result in remoteStudies.Where(result => MatchesPatient(selectedPatient, result.Study)))
@@ -2101,6 +2159,11 @@ public partial class MainWindow : Window
 
     private async Task<(StudyDetails? Details, RemoteStudyRetrievalSession? RetrievalSession)> ResolveViewerLaunchStudyAsync(PatientStudyLaunchCandidate candidate)
     {
+        if (candidate.IsRenderServerDatabase)
+        {
+            return (await LoadRenderServerStudyDetailsAsync(candidate.Study), null);
+        }
+
         if (!candidate.IsRemote)
         {
             StudyDetails? details = candidate.Study.StudyKey > 0
@@ -2270,6 +2333,19 @@ public partial class MainWindow : Window
         }
 
         int refreshVersion = Interlocked.Increment(ref _databaseInfoRefreshVersion);
+        if (IsRenderServerDatabaseConnected)
+        {
+            ApplyHealthBadge(LocalDatabaseBadge, LocalDatabaseBadgeText, "Remote", HealthTone.Success);
+            LocalDatabasePrimaryText.Text = $"{_allStudies.Count} studies • {GetRenderServerLabel()}";
+            LocalDatabaseSecondaryText.Text = _renderServerDatabaseUrl ?? string.Empty;
+
+            DriveHealth remoteDiskHealth = GetDriveHealth(_app.Paths.DatabasePath, _app.NetworkSettingsService.CurrentSettings.InboxDirectory);
+            ApplyHealthBadge(DiskHealthBadge, DiskHealthBadgeText, remoteDiskHealth.Label, remoteDiskHealth.Tone);
+            DiskHealthPrimaryText.Text = remoteDiskHealth.PrimaryText;
+            DiskHealthSecondaryText.Text = remoteDiskHealth.SecondaryText;
+            return;
+        }
+
         bool localDbExists = File.Exists(_app.Paths.DatabasePath);
         FileInfo? dbInfo = localDbExists ? new FileInfo(_app.Paths.DatabasePath) : null;
         int localStudyCount;
@@ -2555,14 +2631,15 @@ public partial class MainWindow : Window
         bool singleSelected = selectedCount == 1;
         bool anySelected = selectedCount > 0;
         StudyListItem? selectedStudy = singleSelected ? GetPrimarySelectedStudy() : null;
+        bool localDatabaseMode = _browserMode == BrowserMode.Database && !IsRenderServerDatabaseConnected;
         bool sendEnabled = anySelected
             && !_filesystemScanInProgress
-            && (_browserMode == BrowserMode.Database || _browserMode == BrowserMode.Filesystem);
+            && (localDatabaseMode || _browserMode == BrowserMode.Filesystem);
 
         ViewActionButton.IsEnabled = singleSelected;
         SendActionButton.IsEnabled = sendEnabled;
         RelayActionButton.IsEnabled = sendEnabled;
-        ModifyActionButton.IsEnabled = _browserMode == BrowserMode.Database
+        ModifyActionButton.IsEnabled = localDatabaseMode
             && singleSelected
             && selectedStudy?.Availability == StudyAvailability.Imported;
     }
@@ -3208,7 +3285,7 @@ public partial class MainWindow : Window
         public string SelectionKey => $"{PatientId}\u001F{PatientName}";
     }
 
-    private sealed record PatientStudyLaunchCandidate(StudyListItem Study, RemoteStudySearchResult? RemoteResult)
+    private sealed record PatientStudyLaunchCandidate(StudyListItem Study, RemoteStudySearchResult? RemoteResult, bool IsRenderServerDatabase = false)
     {
         public bool IsRemote => RemoteResult is not null;
     }

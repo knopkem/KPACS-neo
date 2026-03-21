@@ -93,6 +93,7 @@ public partial class StudyViewerWindow : Window
     private const int MaxLayoutSlots = 12;
     private const double ParallelPlaneDotThreshold = 0.985;
     private const double CutlineEdgeTolerance = 1e-3;
+    private bool IsRemoteOnlyDebugMode => App.RemoteOnlyDebugModeEnabled;
 
     public StudyViewerWindow()
         : this(CreateDefaultContext(), "StudyViewerWindow", 1)
@@ -561,6 +562,11 @@ public partial class StudyViewerWindow : Window
         // Volume path: if a volume is loaded for this series, use it
         if (slot.Volume is not null)
         {
+            if (TryLoadRenderServerSlot(slot, refreshThumbnailStrip))
+            {
+                return;
+            }
+
             ApplySlotOverlayStudyInfo(slot);
             bool isCurrentBoundVolume = slot.Panel.BoundVolume == slot.Volume;
             SliceOrientation orientation = isCurrentBoundVolume
@@ -606,8 +612,8 @@ public partial class StudyViewerWindow : Window
         int totalCount = GetSeriesTotalCount(slot.Series);
         slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, Math.Max(0, totalCount - 1));
         slot.Panel.StackItemCount = totalCount;
-        InstanceRecord instance = slot.Series.Instances[Math.Clamp(slot.InstanceIndex, 0, slot.Series.Instances.Count - 1)];
-        if (!IsLocalInstance(instance))
+        InstanceRecord? instance = GetSafeSeriesInstance(slot.Series, slot.InstanceIndex);
+        if (instance is null || !IsLocalInstance(instance))
         {
             slot.CurrentSpatialMetadata = null;
             slot.Panel.ClearImage();
@@ -1156,6 +1162,20 @@ public partial class StudyViewerWindow : Window
         var slotsToLoad = _slots
             .Where(s => s.Series is not null && s.Volume is null)
             .ToList();
+        if (IsRenderServerStudy)
+        {
+            foreach (var slot in slotsToLoad)
+            {
+                if (slot.Series is null)
+                {
+                    continue;
+                }
+
+                await EnsureRenderServerBackendLoadedForSlotAsync(slot, slot.Series);
+            }
+
+            return;
+        }
 
         foreach (var slot in slotsToLoad)
         {
@@ -1183,6 +1203,11 @@ public partial class StudyViewerWindow : Window
                 {
                     await Dispatcher.UIThread.InvokeAsync(() => ApplyVolumeToSlot(slot, volume));
                 }
+                    if (IsRenderServerStudy)
+                    {
+                        ShowToast("Remote render-server study active. Local GPU status does not affect remote rendering.", ToastSeverity.Info, TimeSpan.FromSeconds(8));
+                        return;
+                    }
             }
             catch
             {
@@ -1203,11 +1228,18 @@ public partial class StudyViewerWindow : Window
 
         // Map the file-based instance index to the closest volume slice index
         int sliceCount = VolumeReslicer.GetSliceCount(volume, SliceOrientation.Axial);
-        int totalInstances = slot.Series?.Instances.Count ?? 1;
-        int mappedIndex = totalInstances > 1
-            ? (int)((long)previousIndex * (sliceCount - 1) / (totalInstances - 1))
-            : sliceCount / 2;
-        slot.InstanceIndex = Math.Clamp(mappedIndex, 0, sliceCount - 1);
+        int totalInstances = slot.Series is null ? 1 : Math.Max(1, GetSeriesTotalCount(slot.Series));
+        if (sliceCount <= 0)
+        {
+            slot.InstanceIndex = 0;
+        }
+        else
+        {
+            int mappedIndex = totalInstances > 1
+                ? (int)((long)previousIndex * (sliceCount - 1) / (totalInstances - 1))
+                : sliceCount / 2;
+            slot.InstanceIndex = Math.Clamp(mappedIndex, 0, sliceCount - 1);
+        }
 
         LoadSlot(slot, refreshThumbnailStrip: ReferenceEquals(slot, _activeSlot));
 
@@ -1372,8 +1404,8 @@ public partial class StudyViewerWindow : Window
         {
             SeriesRecord series = seriesList[index];
             int representativeIndex = GetRepresentativeInstanceIndex(series);
-            InstanceRecord instance = series.Instances[Math.Clamp(representativeIndex, 0, series.Instances.Count - 1)];
-            InstanceRecord? localRepresentative = GetBestLocalRepresentativeInstance(series);
+            InstanceRecord? localRepresentative = IsRemoteOnlyDebugMode ? null : GetBestLocalRepresentativeInstance(series);
+            bool isRemoteSeries = IsRenderServerStudy && TryGetRenderServerSeriesKey(series, out _);
             bool isActiveSeries = activeSeries is not null && string.Equals(activeSeries.SeriesInstanceUid, series.SeriesInstanceUid, StringComparison.Ordinal);
             bool isSecondaryCaptureSeries = HasManagedSecondaryCapture(series);
 
@@ -1406,7 +1438,10 @@ public partial class StudyViewerWindow : Window
             }
             else
             {
-                RequestSeriesThumbnail(series, representativeIndex);
+                if (!isRemoteSeries)
+                {
+                    RequestSeriesThumbnail(series, representativeIndex);
+                }
             }
 
             var label = new TextBlock
@@ -1418,6 +1453,25 @@ public partial class StudyViewerWindow : Window
             };
 
             grid.Children.Add(thumbPanel);
+
+            if (isRemoteSeries && localRepresentative is null)
+            {
+                grid.Children.Add(new Border
+                {
+                    Background = new SolidColorBrush(Color.Parse("#66000000")),
+                    HorizontalAlignment = HorizontalAlignment.Stretch,
+                    VerticalAlignment = VerticalAlignment.Stretch,
+                    Child = new TextBlock
+                    {
+                        Text = "☁ Remote",
+                        Foreground = Brushes.White,
+                        HorizontalAlignment = HorizontalAlignment.Center,
+                        VerticalAlignment = VerticalAlignment.Center,
+                        FontSize = 13,
+                        FontWeight = FontWeight.SemiBold,
+                    },
+                });
+            }
 
             if (isSecondaryCaptureSeries)
             {
@@ -1678,10 +1732,14 @@ public partial class StudyViewerWindow : Window
     {
         await SwitchMeasurementSessionAsync(study);
 
+        IReadOnlyList<SeriesRecord> orderedSeries = IsRenderServerStudy
+            ? GetPreferredRemoteStudySeries(study)
+            : study.Series;
+
         for (int index = 0; index < _slots.Count; index++)
         {
             ViewportSlot slot = _slots[index];
-            slot.Series = index < study.Series.Count ? study.Series[index] : null;
+            slot.Series = index < orderedSeries.Count ? orderedSeries[index] : null;
             slot.Volume = slot.Series is not null && _volumeCache.TryGetValue(slot.Series.SeriesInstanceUid, out var vol) ? vol : null;
             slot.InstanceIndex = 0;
             slot.ViewState = null;
@@ -1700,6 +1758,21 @@ public partial class StudyViewerWindow : Window
 
         SynchronizeLinkedViews(_activeSlot);
         UpdateStatus();
+    }
+
+    private IReadOnlyList<SeriesRecord> GetPreferredRemoteStudySeries(StudyDetails study)
+    {
+        return study.Series
+            .OrderByDescending(IsPreferredRemoteRenderableSeries)
+            .ThenByDescending(GetSeriesTotalCount)
+            .ThenBy(series => series.SeriesNumber)
+            .ThenBy(series => series.SeriesDescription, StringComparer.CurrentCultureIgnoreCase)
+            .ToList();
+    }
+
+    private static bool IsPreferredRemoteRenderableSeries(SeriesRecord series)
+    {
+        return GetSeriesTotalCount(series) >= VolumeLoaderService.MinSlicesForVolume;
     }
 
     private string BuildSubtitle()
@@ -1881,6 +1954,12 @@ public partial class StudyViewerWindow : Window
 
     private async Task EnsureVolumeLoadedForSlotAsync(ViewportSlot slot, SeriesRecord series)
     {
+        if (IsRenderServerStudy && TryGetRenderServerSeriesKey(series, out _))
+        {
+            await EnsureRenderServerBackendLoadedForSlotAsync(slot, series);
+            return;
+        }
+
         string seriesUid = series.SeriesInstanceUid;
 
         if (_volumeCache.TryGetValue(seriesUid, out SeriesVolume? cachedVolume))
@@ -1943,8 +2022,12 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
-        int targetIndex = Math.Clamp(projection.InstanceIndex, 0, slot.Series.Instances.Count - 1);
-        bool targetIsRemote = slot.Volume is null && !IsLocalInstance(slot.Series.Instances[targetIndex]);
+        int maxIndex = slot.Volume is not null
+            ? Math.Max(0, GetVolumeSliceCount(slot) - 1)
+            : Math.Max(0, GetSeriesTotalCount(slot.Series) - 1);
+        int targetIndex = Math.Clamp(projection.InstanceIndex, 0, maxIndex);
+        InstanceRecord? targetInstance = GetSafeSeriesInstance(slot.Series, targetIndex);
+        bool targetIsRemote = slot.Volume is null && (targetInstance is null || !IsLocalInstance(targetInstance));
         bool needsLoad = slot.InstanceIndex != targetIndex || !slot.Panel.IsImageLoaded || targetIsRemote;
         if (!needsLoad)
         {
@@ -2488,9 +2571,7 @@ public partial class StudyViewerWindow : Window
 
                 ApplyProjectionToSlot(slot, projection, preferExactRemoteFocus: true);
 
-                slot.CurrentSpatialMetadata = slot.Volume is not null
-                    ? slot.Panel.SpatialMetadata
-                    : GetSpatialMetadata(slot.Series.Instances[slot.InstanceIndex]);
+                slot.CurrentSpatialMetadata = ResolveCurrentSpatialMetadata(slot);
                 slot.Panel.Set3DCursorOverlay(projection.ImagePoint);
             }
         }
@@ -2569,9 +2650,7 @@ public partial class StudyViewerWindow : Window
 
                 ApplyProjectionToSlot(slot, projection, preferExactRemoteFocus: true);
 
-                slot.CurrentSpatialMetadata = slot.Volume is not null
-                    ? slot.Panel.SpatialMetadata
-                    : GetSpatialMetadata(slot.Series.Instances[slot.InstanceIndex]);
+                slot.CurrentSpatialMetadata = ResolveCurrentSpatialMetadata(slot);
                 slot.Panel.Set3DCursorOverlay(projection.ImagePoint);
             }
         }
@@ -2929,6 +3008,17 @@ public partial class StudyViewerWindow : Window
         return cached;
     }
 
+    private DicomSpatialMetadata? ResolveCurrentSpatialMetadata(ViewportSlot slot)
+    {
+        if (slot.Panel.SpatialMetadata is not null)
+        {
+            return slot.Panel.SpatialMetadata;
+        }
+
+        InstanceRecord? currentInstance = GetSafeSeriesInstance(slot.Series, slot.InstanceIndex);
+        return currentInstance is null ? null : GetSpatialMetadata(currentInstance);
+    }
+
     private LegacyProjectionSeriesCache GetOrCreateLegacyProjectionSeriesCache(SeriesRecord series)
     {
         string seriesUid = series.SeriesInstanceUid ?? string.Empty;
@@ -3167,21 +3257,20 @@ public partial class StudyViewerWindow : Window
 
         int total = GetSeriesTotalCount(slot.Series);
         int loaded = GetSeriesLoadedCount(slot.Series);
-        bool currentAvailable = slot.Series.Instances.Count > 0
-            && slot.InstanceIndex >= 0
-            && slot.InstanceIndex < slot.Series.Instances.Count
-            && IsLocalInstance(slot.Series.Instances[slot.InstanceIndex]);
+        InstanceRecord? currentInstance = GetSafeSeriesInstance(slot.Series, slot.InstanceIndex);
+        bool currentAvailable = currentInstance is not null && IsLocalInstance(currentInstance);
+        int displayIndex = total > 0 ? Math.Clamp(slot.InstanceIndex + 1, 1, total) : 0;
         string retrievalText = _remoteRetrievalSession is null
             ? string.Empty
             : currentAvailable
                 ? $"   Loaded {loaded}/{total}"
-                : $"   Retrieving image {slot.InstanceIndex + 1}... ({loaded}/{total} local)";
+                : $"   Retrieving image {displayIndex}... ({loaded}/{total} local)";
 
         string projectionText = slot.Panel.IsVolumeBound
             ? $"   {slot.Panel.OrientationLabel}   {slot.Panel.ProjectionModeLabel} {slot.Panel.ProjectionThicknessMm:F1} mm"
             : string.Empty;
 
-        return $"{slot.Series.Modality}   Series {slot.Series.SeriesNumber}   Image {slot.InstanceIndex + 1}/{total}{projectionText}   {toolText}   {measurementText}{nudgeText}{ballCorrectionText}{polygonAutoOutlineText}{volumeRoiText}{centerlineText}{retrievalText}   {linkedText}   {cursorText}";
+        return $"{slot.Series.Modality}   Series {slot.Series.SeriesNumber}   Image {displayIndex}/{total}{projectionText}   {toolText}   {measurementText}{nudgeText}{ballCorrectionText}{polygonAutoOutlineText}{volumeRoiText}{centerlineText}{retrievalText}   {linkedText}   {cursorText}";
     }
 
     private int GetLinkedViewCount(ViewportSlot sourceSlot)
@@ -3344,8 +3433,8 @@ public partial class StudyViewerWindow : Window
             }
 
             slot.InstanceIndex = Math.Clamp(slot.InstanceIndex, 0, GetSeriesTotalCount(slot.Series) - 1);
-            InstanceRecord current = slot.Series.Instances[Math.Clamp(slot.InstanceIndex, 0, slot.Series.Instances.Count - 1)];
-            if (!IsLocalInstance(current))
+            InstanceRecord? current = GetSafeSeriesInstance(slot.Series, slot.InstanceIndex);
+            if (current is null || !IsLocalInstance(current))
             {
                 slot.Panel.ClearImage();
                 continue;
@@ -3393,6 +3482,8 @@ public partial class StudyViewerWindow : Window
         {
             _remoteRetrievalSession.StudyChanged -= OnRemoteStudyChanged;
         }
+
+        DisposeRenderServerBackends();
     }
 
     private void OnGpuFallbackOccurred(string errorDetail)
@@ -3515,10 +3606,42 @@ public partial class StudyViewerWindow : Window
 
     private static int GetSeriesTotalCount(SeriesRecord series) => Math.Max(series.InstanceCount, series.Instances.Count);
 
-    private static int GetSeriesLoadedCount(SeriesRecord series) => series.Instances.Count(IsLocalInstance);
+    private static int GetVolumeSliceCount(ViewportSlot slot)
+    {
+        if (slot.Volume is null)
+        {
+            return 0;
+        }
+
+        return slot.Panel.BoundVolume == slot.Volume
+            ? Math.Max(1, slot.Panel.VolumeSliceCount)
+            : Math.Max(1, VolumeReslicer.GetSliceCount(slot.Volume, SliceOrientation.Axial));
+    }
+
+    private int GetSeriesLoadedCount(SeriesRecord series)
+    {
+        if (IsRenderServerStudy && TryGetRenderServerSeriesKey(series, out _))
+        {
+            return GetSeriesTotalCount(series);
+        }
+
+        return series.Instances.Count(IsLocalInstance);
+    }
 
     private static bool IsLocalInstance(InstanceRecord instance) =>
-        !string.IsNullOrWhiteSpace(instance.FilePath) && File.Exists(instance.FilePath);
+        !App.RemoteOnlyDebugModeEnabled
+        && !string.IsNullOrWhiteSpace(instance.FilePath)
+        && File.Exists(instance.FilePath);
+
+    private static InstanceRecord? GetSafeSeriesInstance(SeriesRecord? series, int instanceIndex)
+    {
+        if (series is null || series.Instances.Count == 0)
+        {
+            return null;
+        }
+
+        return series.Instances[Math.Clamp(instanceIndex, 0, series.Instances.Count - 1)];
+    }
 
     private static InstanceRecord? GetBestLocalRepresentativeInstance(SeriesRecord series)
     {

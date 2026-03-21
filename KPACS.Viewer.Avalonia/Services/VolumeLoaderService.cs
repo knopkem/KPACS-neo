@@ -30,6 +30,13 @@ public sealed class VolumeLoaderService
     public const int MinSlicesForVolume = 3;
 
     /// <summary>
+    /// Minimum number of readable images required to build a renderable series volume.
+    /// Remote render-server mode uses this lower threshold so single-image and two-image
+    /// series can still be streamed through the common rendering path.
+    /// </summary>
+    public const int MinSlicesForRenderableSeries = 1;
+
+    /// <summary>
     /// Tries to load a series into a 3D volume.
     /// Returns null if the series is not suitable (too few slices, RGB, inconsistent geometry, etc.).
     /// </summary>
@@ -37,21 +44,64 @@ public sealed class VolumeLoaderService
         SeriesRecord series,
         CancellationToken cancellationToken = default)
     {
-        if (series.Instances.Count < MinSlicesForVolume)
-            return null;
-
-        // Only consider instances that have local files
-        var localInstances = series.Instances
-            .Where(inst => !string.IsNullOrWhiteSpace(inst.FilePath) && File.Exists(inst.FilePath))
-            .ToList();
-
-        if (localInstances.Count < MinSlicesForVolume)
-            return null;
-
-        return await Task.Run(() => BuildVolume(localInstances, cancellationToken), cancellationToken);
+        return await TryLoadVolumeAsync(series, MinSlicesForVolume, cancellationToken);
     }
 
-    private static SeriesVolume? BuildVolume(List<InstanceRecord> instances, CancellationToken ct)
+    public async Task<SeriesVolume?> TryLoadVolumeAsync(
+        SeriesRecord series,
+        int minimumSliceCount,
+        CancellationToken cancellationToken = default)
+    {
+        minimumSliceCount = Math.Max(MinSlicesForRenderableSeries, minimumSliceCount);
+
+        if (series.Instances.Count < minimumSliceCount)
+            return null;
+
+        // Only consider instances that have readable files either in the imagebox
+        // or at their original indexed source location.
+        var readableInstances = series.Instances
+            .Select(CreateReadableInstance)
+            .Where(instance => instance is not null)
+            .Select(instance => instance!)
+            .ToList();
+
+        if (readableInstances.Count < minimumSliceCount)
+            return null;
+
+        return await Task.Run(() => BuildVolume(readableInstances, minimumSliceCount, cancellationToken), cancellationToken);
+    }
+
+    public static string? ResolveReadableFilePath(InstanceRecord instance)
+    {
+        if (!string.IsNullOrWhiteSpace(instance.FilePath) && File.Exists(instance.FilePath))
+            return instance.FilePath;
+
+        if (!string.IsNullOrWhiteSpace(instance.SourceFilePath) && File.Exists(instance.SourceFilePath))
+            return instance.SourceFilePath;
+
+        return null;
+    }
+
+    private static InstanceRecord? CreateReadableInstance(InstanceRecord instance)
+    {
+        string? readablePath = ResolveReadableFilePath(instance);
+        if (string.IsNullOrWhiteSpace(readablePath))
+            return null;
+
+        return new InstanceRecord
+        {
+            InstanceKey = instance.InstanceKey,
+            SeriesKey = instance.SeriesKey,
+            SopInstanceUid = instance.SopInstanceUid,
+            SopClassUid = instance.SopClassUid,
+            FilePath = readablePath,
+            SourceFilePath = string.IsNullOrWhiteSpace(instance.SourceFilePath) ? readablePath : instance.SourceFilePath,
+            InstanceNumber = instance.InstanceNumber,
+            FrameCount = instance.FrameCount,
+        };
+    }
+
+    private static SeriesVolume? BuildVolume(List<InstanceRecord> instances, int minimumSliceCount, CancellationToken ct)
     {
         // Phase 1: Load metadata + pixel data for each slice
         var slices = new List<SliceData>(instances.Count);
@@ -67,7 +117,7 @@ public sealed class VolumeLoaderService
             slices.Add(sliceData);
         }
 
-        if (slices.Count < MinSlicesForVolume)
+        if (slices.Count < minimumSliceCount)
             return null;
 
         // Verify all slices have the same dimensions and orientation
@@ -99,23 +149,34 @@ public sealed class VolumeLoaderService
                 slices.RemoveAt(i);
         }
 
-        if (slices.Count < MinSlicesForVolume)
+        if (slices.Count < minimumSliceCount)
             return null;
 
-        // Compute slice spacing from the sorted positions
-        double totalDistance = slices[^1].SortPosition - slices[0].SortPosition;
-        double spacingZ = totalDistance / (slices.Count - 1);
-
-        if (spacingZ <= 0.001)
-            return null;
-
-        // Verify uniform spacing (tolerance: 20% of average spacing)
-        double tolerance = spacingZ * 0.2;
-        for (int i = 1; i < slices.Count; i++)
+        double spacingZ;
+        if (slices.Count <= 1)
         {
-            double gap = slices[i].SortPosition - slices[i - 1].SortPosition;
-            if (Math.Abs(gap - spacingZ) > tolerance)
-                return null; // Non-uniform spacing — not suitable for volume
+            spacingZ = DetermineFallbackSliceSpacing(reference);
+        }
+        else
+        {
+            double totalDistance = slices[^1].SortPosition - slices[0].SortPosition;
+            spacingZ = totalDistance / (slices.Count - 1);
+
+            if (spacingZ <= 0.001)
+            {
+                spacingZ = DetermineFallbackSliceSpacing(reference);
+            }
+
+            if (slices.Count > 2)
+            {
+                double tolerance = spacingZ * 0.2;
+                for (int i = 1; i < slices.Count; i++)
+                {
+                    double gap = slices[i].SortPosition - slices[i - 1].SortPosition;
+                    if (Math.Abs(gap - spacingZ) > tolerance)
+                        return null; // Non-uniform spacing — not suitable for volume
+                }
+            }
         }
 
         // Phase 3: Build the voxel buffer
@@ -183,8 +244,16 @@ public sealed class VolumeLoaderService
         // Determine normal direction: if sort order is reversed relative to the
         // cross product of row × column, flip the normal
         Vector3D computedNormal = reference.RowDirection.Cross(reference.ColumnDirection).Normalize();
-        Vector3D actualDirection = (slices[^1].Origin - slices[0].Origin).Normalize();
-        Vector3D volumeNormal = actualDirection.Dot(computedNormal) >= 0 ? computedNormal : computedNormal * -1;
+        Vector3D volumeNormal;
+        if (slices.Count <= 1)
+        {
+            volumeNormal = computedNormal;
+        }
+        else
+        {
+            Vector3D actualDirection = (slices[^1].Origin - slices[0].Origin).Normalize();
+            volumeNormal = actualDirection.Dot(computedNormal) >= 0 ? computedNormal : computedNormal * -1;
+        }
 
         var sliceFilePaths = slices.Select(s => s.FilePath).ToList();
         var sliceSopInstanceUids = slices.Select(s => s.SopInstanceUid).ToList();
@@ -203,6 +272,15 @@ public sealed class VolumeLoaderService
             reference.AcquisitionNumber,
             sliceFilePaths,
             sliceSopInstanceUids);
+    }
+
+    private static double DetermineFallbackSliceSpacing(SliceData slice)
+    {
+        double fallback = Math.Min(
+            slice.ColumnSpacing > 0 ? slice.ColumnSpacing : double.MaxValue,
+            slice.RowSpacing > 0 ? slice.RowSpacing : double.MaxValue);
+
+        return double.IsFinite(fallback) && fallback > 0.001 ? fallback : 1.0;
     }
 
     private static SliceData? LoadSlice(string filePath)

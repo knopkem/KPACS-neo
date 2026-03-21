@@ -88,6 +88,12 @@ public sealed class VolumeTransferFunction
     /// <summary>The preset that was used to create this TF, if any.</summary>
     public TransferFunctionPreset Preset { get; }
 
+    /// <summary>The active window center used to remap the preset.</summary>
+    public double WindowCenter { get; }
+
+    /// <summary>The active window width used to remap the preset.</summary>
+    public double WindowWidth { get; }
+
     public bool HasColorLookup => _colorRLut is not null && _colorGLut is not null && _colorBLut is not null;
 
     // ------------------------------------------------------------------
@@ -108,6 +114,8 @@ public sealed class VolumeTransferFunction
         MaxValue = maxValue;
         GradientModulationStrength = gradientModulationStrength;
         Preset = preset;
+        WindowCenter = autoColorCenter;
+        WindowWidth = autoColorWidth;
         BuildLut(controlPoints);
 
         if (enableAutoColor)
@@ -211,6 +219,7 @@ public sealed class VolumeTransferFunction
         double maxValue)
     {
         PresetDefinition definition = GetPresetDefinition(preset, minValue, maxValue);
+        (double suggestedCenter, double suggestedWidth) = GetSuggestedWindow(definition.ControlPoints, minValue, maxValue);
         return new VolumeTransferFunction(
             definition.ControlPoints,
             minValue,
@@ -218,8 +227,8 @@ public sealed class VolumeTransferFunction
             definition.GradientModulationStrength,
             definition.Preset,
             enableAutoColor: false,
-            autoColorCenter: 0.0,
-            autoColorWidth: 1.0);
+            autoColorCenter: suggestedCenter,
+            autoColorWidth: Math.Max(1.0, suggestedWidth));
     }
 
     public static VolumeTransferFunction CreateWindowed(

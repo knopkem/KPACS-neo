@@ -188,7 +188,7 @@ public partial class DicomViewPanel
                 outputHeight = Math.Max(1, _imageHeight);
                 if (outputWidth == 1 || outputHeight == 1)
                 {
-                    referenceSlice = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, _volumeSliceIndex);
+                    referenceSlice = _renderBackend!.ExtractSlice(_volumeOrientation, _volumeSliceIndex);
                     outputWidth = Math.Max(1, referenceSlice.Width);
                     outputHeight = Math.Max(1, referenceSlice.Height);
                 }
@@ -197,7 +197,7 @@ public partial class DicomViewPanel
         else if (plane is not null)
         {
             _dvrVolumeCenter = ToVolumeLocalPoint(plane.Center);
-            referenceSlice = VolumeReslicer.ExtractSlice(_volume, plane);
+            referenceSlice = _renderBackend!.ExtractSlice(plane);
             baseForward = ToVolumeLocalDirection(plane.RowDirection.Cross(plane.ColumnDirection)).Normalize();
             baseUp = ToVolumeLocalDirection(plane.ColumnDirection).Normalize();
             outputWidth = Math.Max(1, referenceSlice.Width);
@@ -206,7 +206,7 @@ public partial class DicomViewPanel
         else
         {
             _dvrVolumeCenter = GetDvrSliceCenterMm(_volumeSliceIndex);
-            referenceSlice = VolumeReslicer.ExtractSlice(_volume, _volumeOrientation, _volumeSliceIndex);
+            referenceSlice = _renderBackend!.ExtractSlice(_volumeOrientation, _volumeSliceIndex);
             baseForward = _dvrInitialForward;
             baseUp = _dvrInitialUp;
             outputWidth = Math.Max(1, referenceSlice.Width);
@@ -295,7 +295,7 @@ public partial class DicomViewPanel
             SlabNormal = slabNormal,
             OutputWidth = outputWidth,
             OutputHeight = outputHeight,
-            SamplingStepFactor = highQuality || VolumeComputeBackend.CanUseOpenCl ? 1.0 : 3.5,
+            SamplingStepFactor = highQuality || (_renderBackend?.SupportsHighQualityInteractive ?? VolumeComputeBackend.CanUseOpenCl) ? 1.0 : 3.5,
         };
     }
 
@@ -391,16 +391,17 @@ public partial class DicomViewPanel
     /// </summary>
     private void RenderDvrViewFast()
     {
-        if (_volume is null || _dvrRenderState is null)
+        if (_volume is null || _dvrRenderState is null || _renderBackend is null)
         {
             return;
         }
 
+        SyncViewportStateToBackend();
         bool gpuAvailable = CanUseGpuForCurrentDvr();
         UpdateDvrRenderState(highQuality: gpuAvailable);
 
-        ReslicedImage resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
-            _volume, _dvrRenderState, _dvrTransferFunction);
+        ReslicedImage resliced = _renderBackend.ComputeDirectVolumeRenderingView(
+            _dvrRenderState, _dvrTransferFunction);
         _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         ApplyDvrReslicedGeometry(resliced);
@@ -413,11 +414,12 @@ public partial class DicomViewPanel
     /// </summary>
     private void RenderDvrViewSharp()
     {
-        if (_volume is null)
+        if (_volume is null || _renderBackend is null)
         {
             return;
         }
 
+        SyncViewportStateToBackend();
         UpdateDvrRenderState(highQuality: true);
 
         if (_dvrRenderState is null)
@@ -425,8 +427,8 @@ public partial class DicomViewPanel
             return;
         }
 
-        ReslicedImage resliced = VolumeReslicer.ComputeDirectVolumeRenderingView(
-            _volume, _dvrRenderState, _dvrTransferFunction);
+        ReslicedImage resliced = _renderBackend.ComputeDirectVolumeRenderingView(
+            _dvrRenderState, _dvrTransferFunction);
         _lastRenderBackendLabel = string.IsNullOrWhiteSpace(resliced.RenderBackendLabel) ? "CPU" : resliced.RenderBackendLabel;
 
         ApplyDvrReslicedGeometry(resliced);
@@ -688,7 +690,7 @@ public partial class DicomViewPanel
     private bool TryGetReferenceSliceForExplicitCamera(out ReslicedImage referenceSlice)
     {
         referenceSlice = default!;
-        if (_volume is null)
+        if (_volume is null || _renderBackend is null)
         {
             return false;
         }
@@ -706,8 +708,8 @@ public partial class DicomViewPanel
             return false;
         }
 
-        int midSlice = Math.Max(0, VolumeReslicer.GetSliceCount(_volume, orientation.Value) / 2);
-        referenceSlice = VolumeReslicer.ExtractSlice(_volume, orientation.Value, midSlice);
+        int midSlice = Math.Max(0, _renderBackend.GetSliceCount(orientation.Value) / 2);
+        referenceSlice = _renderBackend.ExtractSlice(orientation.Value, midSlice);
         return true;
     }
 
@@ -859,7 +861,7 @@ public partial class DicomViewPanel
 
     private bool CanUseGpuForCurrentDvr()
     {
-        return VolumeComputeBackend.CanUseOpenCl;
+        return _renderBackend?.SupportsHighQualityInteractive ?? VolumeComputeBackend.CanUseOpenCl;
     }
 
     private SpatialVector3D GetDvrLightDirection(SpatialVector3D forward, SpatialVector3D right, SpatialVector3D up)

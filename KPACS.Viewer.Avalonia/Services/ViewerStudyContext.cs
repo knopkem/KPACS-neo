@@ -6,6 +6,8 @@ public sealed class ViewerStudyContext
 {
     public required StudyDetails StudyDetails { get; init; }
     public RemoteStudyRetrievalSession? RemoteRetrievalSession { get; init; }
+    public RenderServerConnectionInfo? RenderServerConnection { get; init; }
+    public IReadOnlyDictionary<string, long>? RemoteSeriesKeysBySeriesInstanceUid { get; init; }
     public Func<CancellationToken, Task<IReadOnlyList<PriorStudySummary>>>? LoadPriorStudiesAsync { get; init; }
     public Func<PriorStudySummary, Action<StudyDetails>, CancellationToken, Task>? LoadPriorStudyPreviewAsync { get; init; }
     public IReadOnlyList<PriorStudySummary>? InitialPriorStudies { get; init; }
