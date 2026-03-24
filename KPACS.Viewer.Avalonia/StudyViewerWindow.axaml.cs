@@ -170,6 +170,8 @@ public partial class StudyViewerWindow : Window
     {
         _workspaceDockHideTimer.Interval = TimeSpan.FromMilliseconds(WorkspaceDockAutoHideMs);
         _workspaceDockHideTimer.Tick += OnWorkspaceDockHideTimerTick;
+        RefreshCenterlinePanelLayoutModeUi();
+        ApplyCenterlinePanelLayoutMode();
         ShowWorkspaceDock(restartHideTimer: true);
     }
 
@@ -2277,6 +2279,7 @@ public partial class StudyViewerWindow : Window
             return;
         }
 
+        ApplyCenterlinePanelLayoutMode();
         RequestViewportLayoutReset();
     }
 

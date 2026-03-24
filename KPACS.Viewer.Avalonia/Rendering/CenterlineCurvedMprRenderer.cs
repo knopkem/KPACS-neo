@@ -4,14 +4,13 @@ namespace KPACS.Viewer.Rendering;
 
 internal static class CenterlineCurvedMprRenderer
 {
-    private const double DefaultReferenceDotThreshold = 0.92;
-
     public static CurvedMprRenderResult Render(
         SeriesVolume volume,
         CenterlinePath path,
         double fieldOfViewMm,
         int imageHeight,
         double slabThicknessMm,
+        double axialRotationDegrees = 0,
         CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(volume);
@@ -31,7 +30,8 @@ internal static class CenterlineCurvedMprRenderer
         double slab = Math.Max(0, slabThicknessMm);
         int[] centerRows = new int[width];
 
-        IReadOnlyList<CenterlineFrame> frames = BuildFrames(volume, path);
+        double axialRotationRadians = axialRotationDegrees * (Math.PI / 180.0);
+        IReadOnlyList<CenterlineSampleFrame> frames = CenterlineFrameBuilder.BuildFrames(volume, path, axialRotationRadians);
         int slabSampleCount = slab > 0.25 ? Math.Max(3, (int)Math.Ceiling(slab / Math.Max(0.5, Math.Min(volume.SpacingX, volume.SpacingY)))) : 1;
 
         // --- GPU path: pack frames into a flat float buffer and dispatch to OpenCL ---
@@ -53,7 +53,7 @@ internal static class CenterlineCurvedMprRenderer
                 pixels = new short[width * height];
                 Parallel.For(0, width, x =>
                 {
-                    CenterlineFrame frame = frames[x];
+                    CenterlineSampleFrame frame = frames[x];
                     for (int y = 0; y < height; y++)
                     {
                         double offsetMm = ((height - 1) * 0.5 - y) * pixelSpacingMm;
@@ -85,7 +85,7 @@ internal static class CenterlineCurvedMprRenderer
     /// </summary>
     private static short[] TryRenderOnGpu(
         SeriesVolume volume,
-        IReadOnlyList<CenterlineFrame> frames,
+        IReadOnlyList<CenterlineSampleFrame> frames,
         int width,
         int height,
         double pixelSpacingMm,
@@ -102,7 +102,7 @@ internal static class CenterlineCurvedMprRenderer
         for (int i = 0; i < frames.Count; i++)
         {
             int offset = i * 12;
-            CenterlineFrame f = frames[i];
+            CenterlineSampleFrame f = frames[i];
             frameData[offset + 0] = (float)f.PatientPoint.X;
             frameData[offset + 1] = (float)f.PatientPoint.Y;
             frameData[offset + 2] = (float)f.PatientPoint.Z;
@@ -197,82 +197,6 @@ internal static class CenterlineCurvedMprRenderer
         return volume.TryGetVoxelInterpolated(vx, vy, vz, out double value) ? value : 0;
     }
 
-    private static IReadOnlyList<CenterlineFrame> BuildFrames(SeriesVolume volume, CenterlinePath path)
-    {
-        List<CenterlineFrame> frames = new(path.Points.Count);
-        Vector3D previousNormal = new(0, 0, 0);
-        Vector3D referenceUp = Math.Abs(volume.Normal.Dot(path.Points.Count > 1
-            ? (path.Points[1].PatientPoint - path.Points[0].PatientPoint).Normalize()
-            : volume.Normal)) < DefaultReferenceDotThreshold
-            ? volume.Normal
-            : volume.ColumnDirection;
-
-        for (int index = 0; index < path.Points.Count; index++)
-        {
-            Vector3D patientPoint = path.Points[index].PatientPoint;
-            Vector3D tangent = GetTangent(path, index);
-            Vector3D normal = ProjectOntoPlane(previousNormal.Length > 1e-6 ? previousNormal : referenceUp, tangent);
-            if (normal.Length <= 1e-6)
-            {
-                normal = ProjectOntoPlane(volume.Normal, tangent);
-            }
-
-            if (normal.Length <= 1e-6)
-            {
-                normal = ProjectOntoPlane(volume.ColumnDirection, tangent);
-            }
-
-            if (normal.Length <= 1e-6)
-            {
-                normal = Math.Abs(tangent.X) < 0.9 ? new Vector3D(1, 0, 0) : new Vector3D(0, 1, 0);
-                normal = ProjectOntoPlane(normal, tangent);
-            }
-
-            normal = normal.Length > 1e-6 ? normal.Normalize() : new Vector3D(0, 1, 0);
-            Vector3D binormal = tangent.Cross(normal);
-            if (binormal.Length <= 1e-6)
-            {
-                binormal = tangent.Cross(volume.RowDirection);
-            }
-
-            binormal = binormal.Length > 1e-6 ? binormal.Normalize() : new Vector3D(1, 0, 0);
-            normal = binormal.Cross(tangent);
-            normal = normal.Length > 1e-6 ? normal.Normalize() : normal;
-            previousNormal = normal;
-            frames.Add(new CenterlineFrame(patientPoint, tangent, normal, binormal));
-        }
-
-        return frames;
-    }
-
-    private static Vector3D GetTangent(CenterlinePath path, int index)
-    {
-        if (path.Points.Count <= 1)
-        {
-            return new Vector3D(0, 0, 1);
-        }
-
-        Vector3D previous = path.Points[Math.Max(0, index - 1)].PatientPoint;
-        Vector3D next = path.Points[Math.Min(path.Points.Count - 1, index + 1)].PatientPoint;
-        Vector3D tangent = next - previous;
-        if (tangent.Length <= 1e-6 && index > 0)
-        {
-            tangent = path.Points[index].PatientPoint - previous;
-        }
-
-        return tangent.Length > 1e-6 ? tangent.Normalize() : new Vector3D(0, 0, 1);
-    }
-
-    private static Vector3D ProjectOntoPlane(Vector3D vector, Vector3D normal)
-    {
-        if (vector.Length <= 1e-6 || normal.Length <= 1e-6)
-        {
-            return new Vector3D(0, 0, 0);
-        }
-
-        return vector - (normal * vector.Dot(normal));
-    }
-
     private static short ClampToShort(double value)
     {
         if (double.IsNaN(value) || double.IsInfinity(value))
@@ -283,8 +207,6 @@ internal static class CenterlineCurvedMprRenderer
         double rounded = Math.Round(value);
         return (short)Math.Clamp(rounded, short.MinValue, short.MaxValue);
     }
-
-    private readonly record struct CenterlineFrame(Vector3D PatientPoint, Vector3D Tangent, Vector3D Normal, Vector3D Binormal);
 }
 
 internal sealed class CurvedMprRenderResult

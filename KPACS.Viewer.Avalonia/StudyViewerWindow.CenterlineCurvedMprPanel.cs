@@ -1,6 +1,7 @@
 using System.Runtime.InteropServices;
 using Avalonia;
 using Avalonia.Controls;
+using Avalonia.Controls.Primitives;
 using Avalonia.Input;
 using Avalonia.Media;
 using Avalonia.Media.Imaging;
@@ -15,12 +16,14 @@ public partial class StudyViewerWindow
 {
     private const double CenterlineCurvedMprFieldOfViewMm = 90.0;
     private const double CenterlineCurvedMprSlabThicknessMm = 8.0;
-    private const int CenterlineCurvedMprImageHeight = 240;
+    private const int CenterlineCurvedMprImageHeight = 241;
+    private const double CenterlineCurvedMprRotationStepDegrees = 5.0;
     private readonly byte[] _centerlineCurvedMprLutR = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
     private readonly byte[] _centerlineCurvedMprLutG = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
     private readonly byte[] _centerlineCurvedMprLutB = Enumerable.Range(0, 256).Select(static value => (byte)value).ToArray();
     private Point _centerlineCurvedMprOffset;
     private bool _centerlineCurvedMprPinned;
+    private double _centerlineCurvedMprRotationDegrees;
     private WriteableBitmap? _centerlineCurvedMprBitmap;
     private byte[]? _centerlineCurvedMprRenderBuffer;
     private IPointer? _centerlineCurvedMprDragPointer;
@@ -29,6 +32,7 @@ public partial class StudyViewerWindow
     private CancellationTokenSource? _centerlineCurvedMprRenderCancellation;
     private int _centerlineCurvedMprRenderVersion;
     private Guid? _centerlineCurvedMprRenderedPathId;
+    private double _centerlineCurvedMprRenderedRotationDegrees = double.NaN;
     private CurvedMprDisplayOrientation _centerlineCurvedMprDisplayOrientation = CurvedMprDisplayOrientation.Horizontal;
     private const double CenterlineCurvedMprHorizontalDisplayWidth = 620;
     private const double CenterlineCurvedMprHorizontalDisplayHeight = 240;
@@ -42,6 +46,8 @@ public partial class StudyViewerWindow
             CenterlineCurvedMprTitleText is null ||
             CenterlineCurvedMprSummaryText is null ||
             CenterlineCurvedMprStatusText is null ||
+            CenterlineCurvedMprRotationValueText is null ||
+            CenterlineCurvedMprRotationSlider is null ||
             CenterlineCurvedMprHintText is null ||
             CenterlineCurvedMprImage is null ||
             CenterlineCurvedMprStationIndicator is null ||
@@ -63,11 +69,13 @@ public partial class StudyViewerWindow
         CenterlineCurvedMprPinButton.IsChecked = _centerlineCurvedMprPinned;
         CenterlineCurvedMprTitleText.Text = "Curved MPR";
         CenterlineCurvedMprSummaryText.Text = $"{seedSet.Label} · {path.Summary}";
+        CenterlineCurvedMprRotationSlider.Value = _centerlineCurvedMprRotationDegrees;
+        CenterlineCurvedMprRotationValueText.Text = BuildCenterlineCurvedMprRotationLabel();
 
         int stationIndex = GetSelectedCenterlineStationIndex(path);
         UpdateCenterlineCurvedMprStationIndicator(path, stationIndex);
-        CenterlineCurvedMprStatusText.Text = $"Station {stationIndex + 1}/{path.Points.Count} · {path.Points[stationIndex].ArcLengthMm:0.0} / {path.TotalLengthMm:0.0} mm · strip {CenterlineCurvedMprFieldOfViewMm:0} mm · slab {CenterlineCurvedMprSlabThicknessMm:0} mm MIP";
-        CenterlineCurvedMprHintText.Text = $"This first CPR view follows the computed vessel path. Click or drag in the image to move the shared centerline station and keep the orthogonal cross-section synchronized. {BuildSelectedVascularPlanningSummary()}";
+        CenterlineCurvedMprStatusText.Text = BuildCenterlineCurvedMprStatusText(path, stationIndex);
+        CenterlineCurvedMprHintText.Text = $"Rotate around the vessel axis to align the stretched CPR with the anatomy you want to inspect. Click or drag in the image to move the shared centerline station and keep the orthogonal cross-section synchronized. {BuildSelectedVascularPlanningSummary()}";
         ApplyCenterlineCurvedMprPanelOffset();
         ScheduleCenterlineCurvedMprRender(path, volume);
     }
@@ -86,14 +94,19 @@ public partial class StudyViewerWindow
         CenterlineCurvedMprStatusText.Text = string.Empty;
         CenterlineCurvedMprHintText.Text = "Computed curved MPR appears here.";
         _centerlineCurvedMprDisplayOrientation = CurvedMprDisplayOrientation.Horizontal;
+        _centerlineCurvedMprRenderedRotationDegrees = double.NaN;
         ApplyCenterlineCurvedMprDisplayOrientation(_centerlineCurvedMprDisplayOrientation);
         CenterlineCurvedMprImage.Source = null;
         CenterlineCurvedMprStationIndicator.Margin = new Thickness(0, 0, 0, 0);
+        ApplyCenterlinePanelLayoutMode();
     }
 
     private void ScheduleCenterlineCurvedMprRender(CenterlinePath path, SeriesVolume volume)
     {
-        if (_centerlineCurvedMprRenderedPathId == path.Id && CenterlineCurvedMprImage.Source is not null)
+        double rotationDegrees = NormalizeCenterlineCurvedMprRotation(_centerlineCurvedMprRotationDegrees);
+        if (_centerlineCurvedMprRenderedPathId == path.Id &&
+            CenterlineCurvedMprImage.Source is not null &&
+            Math.Abs(_centerlineCurvedMprRenderedRotationDegrees - rotationDegrees) <= 1e-6)
         {
             return;
         }
@@ -103,10 +116,10 @@ public partial class StudyViewerWindow
         CancellationTokenSource cancellation = new();
         _centerlineCurvedMprRenderCancellation = cancellation;
         int version = ++_centerlineCurvedMprRenderVersion;
-        _ = RenderCenterlineCurvedMprAsync(path, volume, version, cancellation.Token);
+        _ = RenderCenterlineCurvedMprAsync(path, volume, version, rotationDegrees, cancellation.Token);
     }
 
-    private async Task RenderCenterlineCurvedMprAsync(CenterlinePath path, SeriesVolume volume, int version, CancellationToken cancellationToken)
+    private async Task RenderCenterlineCurvedMprAsync(CenterlinePath path, SeriesVolume volume, int version, double rotationDegrees, CancellationToken cancellationToken)
     {
         var stopwatch = StartVascularStopwatch();
         CurvedMprRenderResult renderResult;
@@ -119,6 +132,7 @@ public partial class StudyViewerWindow
                     CenterlineCurvedMprFieldOfViewMm,
                     CenterlineCurvedMprImageHeight,
                     CenterlineCurvedMprSlabThicknessMm,
+                    rotationDegrees,
                     cancellationToken),
                 cancellationToken);
         }
@@ -154,15 +168,16 @@ public partial class StudyViewerWindow
             _centerlineCurvedMprDisplayOrientation = renderResult.Orientation;
             ApplyCenterlineCurvedMprDisplayOrientation(_centerlineCurvedMprDisplayOrientation);
             _centerlineCurvedMprRenderedPathId = path.Id;
+            _centerlineCurvedMprRenderedRotationDegrees = rotationDegrees;
 
-            // Update status text with the actual backend that rendered the image.
             string gpuError = VolumeComputeBackend.LastRenderError ?? string.Empty;
             string backendInfo = string.IsNullOrEmpty(gpuError)
                 ? $"[{renderResult.RenderBackendLabel}]"
                 : $"[{renderResult.RenderBackendLabel}] ⚠ {gpuError}";
             if (CenterlineCurvedMprStatusText is not null)
             {
-                CenterlineCurvedMprStatusText.Text += $" · {backendInfo}";
+                int stationIndex = GetSelectedCenterlineStationIndex(path);
+                CenterlineCurvedMprStatusText.Text = $"{BuildCenterlineCurvedMprStatusText(path, stationIndex)} · {backendInfo}";
             }
 
             RecordVascularPerformanceMetric("curved-mpr-update", stopwatch.Elapsed.TotalMilliseconds);
@@ -268,8 +283,25 @@ public partial class StudyViewerWindow
         e.Handled = true;
     }
 
+    private void OnCenterlineCurvedMprRotationSliderValueChanged(object? sender, RangeBaseValueChangedEventArgs e)
+    {
+        ApplyCenterlineCurvedMprRotation(e.NewValue, updateSlider: false);
+    }
+
+    private void OnCenterlineCurvedMprRotationResetClick(object? sender, Avalonia.Interactivity.RoutedEventArgs e)
+    {
+        ApplyCenterlineCurvedMprRotation(0, updateSlider: true);
+
+        e.Handled = true;
+    }
+
     private void OnCenterlineCurvedMprHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (IsCenterlinePanelsTiled)
+        {
+            return;
+        }
+
         if (!CenterlineCurvedMprPanel.IsVisible || !e.GetCurrentPoint(CenterlineCurvedMprDragHandle).Properties.IsLeftButtonPressed)
         {
             return;
@@ -327,6 +359,26 @@ public partial class StudyViewerWindow
         UpdateCenterlineStationFromCurvedMprPointer(e);
     }
 
+    private void OnCenterlineCurvedMprImagePointerWheelChanged(object? sender, PointerWheelEventArgs e)
+    {
+        if (!e.KeyModifiers.HasFlag(KeyModifiers.Shift))
+        {
+            return;
+        }
+
+        double delta = e.Delta.Y;
+        if (Math.Abs(delta) <= double.Epsilon)
+        {
+            return;
+        }
+
+        double steps = Math.Sign(delta) * Math.Max(1, Math.Abs(delta));
+        ApplyCenterlineCurvedMprRotation(
+            _centerlineCurvedMprRotationDegrees + (steps * CenterlineCurvedMprRotationStepDegrees),
+            updateSlider: true);
+        e.Handled = true;
+    }
+
     private void UpdateCenterlineStationFromCurvedMprPointer(PointerEventArgs e)
     {
         if (CenterlineCurvedMprImageHost is null ||
@@ -364,8 +416,18 @@ public partial class StudyViewerWindow
         }
 
         bool isVertical = orientation == CurvedMprDisplayOrientation.Vertical;
-        double displayWidth = isVertical ? CenterlineCurvedMprVerticalDisplayWidth : CenterlineCurvedMprHorizontalDisplayWidth;
-        double displayHeight = isVertical ? CenterlineCurvedMprVerticalDisplayHeight : CenterlineCurvedMprHorizontalDisplayHeight;
+        double displayWidth;
+        double displayHeight;
+        if (IsCenterlinePanelsTiled)
+        {
+            displayWidth = isVertical ? 220 : 520;
+            displayHeight = isVertical ? 420 : 180;
+        }
+        else
+        {
+            displayWidth = isVertical ? CenterlineCurvedMprVerticalDisplayWidth : CenterlineCurvedMprHorizontalDisplayWidth;
+            displayHeight = isVertical ? CenterlineCurvedMprVerticalDisplayHeight : CenterlineCurvedMprHorizontalDisplayHeight;
+        }
 
         CenterlineCurvedMprImage.Width = displayWidth;
         CenterlineCurvedMprImage.Height = displayHeight;
@@ -392,6 +454,57 @@ public partial class StudyViewerWindow
         }
     }
 
+    private string BuildCenterlineCurvedMprStatusText(CenterlinePath path, int stationIndex)
+    {
+        return $"Station {stationIndex + 1}/{path.Points.Count} · {path.Points[stationIndex].ArcLengthMm:0.0} / {path.TotalLengthMm:0.0} mm · strip {CenterlineCurvedMprFieldOfViewMm:0} mm · slab {CenterlineCurvedMprSlabThicknessMm:0} mm MIP · rot {NormalizeCenterlineCurvedMprRotation(_centerlineCurvedMprRotationDegrees):0.#}°";
+    }
+
+    private void ApplyCenterlineCurvedMprRotation(double degrees, bool updateSlider)
+    {
+        double clamped = NormalizeCenterlineCurvedMprRotation(degrees);
+        bool changed = Math.Abs(_centerlineCurvedMprRotationDegrees - clamped) > 1e-6;
+        _centerlineCurvedMprRotationDegrees = clamped;
+
+        if (CenterlineCurvedMprRotationValueText is not null)
+        {
+            CenterlineCurvedMprRotationValueText.Text = BuildCenterlineCurvedMprRotationLabel();
+        }
+
+        if (updateSlider && CenterlineCurvedMprRotationSlider is not null && Math.Abs(CenterlineCurvedMprRotationSlider.Value - clamped) > 1e-6)
+        {
+            CenterlineCurvedMprRotationSlider.Value = clamped;
+        }
+
+        if (!changed)
+        {
+            return;
+        }
+
+        _centerlineCurvedMprRenderedPathId = null;
+        _centerlineCurvedMprRenderedRotationDegrees = double.NaN;
+        RefreshCenterlinePanels();
+        ScheduleMeasurementSessionSave();
+    }
+
+    private string BuildCenterlineCurvedMprRotationLabel() => $"{NormalizeCenterlineCurvedMprRotation(_centerlineCurvedMprRotationDegrees):0.#}°";
+
+    private static double NormalizeCenterlineCurvedMprRotation(double degrees)
+    {
+        double normalized = degrees % 360.0;
+        if (normalized <= -180)
+        {
+            normalized += 360;
+        }
+        else if (normalized > 180)
+        {
+            normalized -= 360;
+        }
+
+        return Math.Round(normalized / CenterlineCurvedMprRotationStepDegrees) * CenterlineCurvedMprRotationStepDegrees;
+    }
+
+    private double GetCenterlineCurvedMprRotationRadians() => NormalizeCenterlineCurvedMprRotation(_centerlineCurvedMprRotationDegrees) * (Math.PI / 180.0);
+
     private void ApplyCenterlineCurvedMprPanelOffset()
     {
         if (CenterlineCurvedMprPanel is null || ViewerContentHost is null)
@@ -400,6 +513,14 @@ public partial class StudyViewerWindow
         }
 
         TranslateTransform transform = EnsureCenterlineCurvedMprPanelTransform();
+        if (IsCenterlinePanelsTiled)
+        {
+            transform.X = 0;
+            transform.Y = 0;
+            ApplyCenterlinePanelLayoutMode();
+            return;
+        }
+
         double panelWidth = CenterlineCurvedMprPanel.Bounds.Width;
         double panelHeight = CenterlineCurvedMprPanel.Bounds.Height;
         double hostWidth = ViewerContentHost.Bounds.Width;

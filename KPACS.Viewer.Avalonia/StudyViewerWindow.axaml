@@ -273,11 +273,11 @@
             </Grid>
         </Border>
 
-          <Grid Grid.Row="2" x:Name="ViewerContentHost"
+                    <Grid Grid.Row="2" x:Name="ViewerContentHost"
               PointerMoved="OnViewerContentPointerMoved"
               PointerEntered="OnViewerContentPointerEntered"
               PointerExited="OnViewerContentPointerExited">
-            <Border Background="#FF101010" Padding="8">
+                        <Border x:Name="ViewerViewportSurface" Background="#FF101010" Padding="8">
                 <Grid>
                     <Grid x:Name="ViewportGrid" ClipToBounds="True" />
                     <Canvas x:Name="DragGhostOverlay" IsHitTestVisible="False" ClipToBounds="False" />
@@ -301,6 +301,7 @@
                                Margin="2,0,2,0" />
                     <WrapPanel Grid.Column="1" Orientation="Horizontal" ItemWidth="104">
                         <Button x:Name="WorkspaceLayoutButton" Classes="workspaceAction" Click="OnWorkspaceLayoutClick" ToolTip.Tip="Viewer layout presets and custom layouts." />
+                        <Button x:Name="WorkspaceCenterlinePanelsLayoutButton" Classes="workspaceAction" Click="OnWorkspaceCenterlinePanelsLayoutClick" ToolTip.Tip="Switch centerline panels between floating overlays and a tiled main-view layout." IsVisible="False" />
                         <Button x:Name="WorkspaceAnatomyButton" Classes="workspaceAction" Click="OnWorkspaceAnatomyClick" ToolTip.Tip="Open the anatomy workspace to define structures, manage learned models, and assign selected 3D ROIs.">
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <TextBlock Text="AN" FontWeight="SemiBold" FontSize="11" />
@@ -349,7 +350,7 @@
                                 <TextBlock Text="Export" FontSize="11" />
                             </StackPanel>
                         </Button>
-                        <Button x:Name="WorkspaceRemoteGpuButton" Classes="workspaceAction" Click="OnWorkspaceRemoteGpuClick" ToolTip.Tip="Connect to a remote K-PACS Render Server for GPU-accelerated rendering. Allows using a powerful GPU on another machine.">
+                        <Button x:Name="WorkspaceRemoteGpuButton" Classes="workspaceAction" Click="OnWorkspaceRemoteGpuClick" ToolTip.Tip="Connect to a remote K-PACS Render Server for GPU-accelerated rendering. Allows using a powerful GPU on another machine." IsVisible="False">
                             <StackPanel Orientation="Horizontal" Spacing="5">
                                 <TextBlock Text="🖧" FontSize="11" />
                                 <TextBlock x:Name="WorkspaceRemoteGpuLabel" Text="Remote GPU" FontSize="11" />
@@ -732,7 +733,7 @@
                     <TranslateTransform />
                 </Border.RenderTransform>
                 <StackPanel Spacing="8">
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
                         <StackPanel x:Name="CenterlineCrossSectionDragHandle"
                                     Spacing="2"
                                     Cursor="SizeAll"
@@ -749,8 +750,16 @@
                                        FontSize="11"
                                        TextWrapping="Wrap" />
                         </StackPanel>
+                            <Button x:Name="CenterlineCrossSectionLayoutModeButton"
+                                  Grid.Column="1"
+                                  Classes="popupAction"
+                                  MinWidth="52"
+                                  Padding="8,3"
+                                  Content="Tile"
+                                  Click="OnWorkspaceCenterlinePanelsLayoutClick"
+                                  ToolTip.Tip="Switch centerline panels between floating overlays and tiled layout." />
                         <ToggleButton x:Name="CenterlineCrossSectionPinButton"
-                                      Grid.Column="1"
+                                      Grid.Column="2"
                                       Classes="iconToggle"
                                       Width="30"
                                       Height="30"
@@ -871,7 +880,7 @@
                     <TranslateTransform />
                 </Border.RenderTransform>
                 <StackPanel Spacing="8">
-                    <Grid ColumnDefinitions="*,Auto" ColumnSpacing="8">
+                    <Grid ColumnDefinitions="*,Auto,Auto" ColumnSpacing="8">
                         <StackPanel x:Name="CenterlineCurvedMprDragHandle"
                                     Spacing="2"
                                     Cursor="SizeAll"
@@ -888,8 +897,16 @@
                                        FontSize="11"
                                        TextWrapping="Wrap" />
                         </StackPanel>
+                            <Button x:Name="CenterlineCurvedMprLayoutModeButton"
+                                  Grid.Column="1"
+                                  Classes="popupAction"
+                                  MinWidth="52"
+                                  Padding="8,3"
+                                  Content="Tile"
+                                  Click="OnWorkspaceCenterlinePanelsLayoutClick"
+                                  ToolTip.Tip="Switch centerline panels between floating overlays and tiled layout." />
                         <ToggleButton x:Name="CenterlineCurvedMprPinButton"
-                                      Grid.Column="1"
+                                      Grid.Column="2"
                                       Classes="iconToggle"
                                       Width="30"
                                       Height="30"
@@ -905,6 +922,40 @@
                                FontSize="10"
                                TextWrapping="Wrap" />
 
+                        <Grid ColumnDefinitions="Auto,*,Auto,Auto"
+                          ColumnSpacing="8"
+                          VerticalAlignment="Center">
+                        <TextBlock Text="Axial rot"
+                               Foreground="#FF9DB3C7"
+                               VerticalAlignment="Center"
+                               FontSize="10" />
+                        <Slider x:Name="CenterlineCurvedMprRotationSlider"
+                            Grid.Column="1"
+                            Minimum="-180"
+                            Maximum="180"
+                            TickFrequency="5"
+                            SmallChange="5"
+                            LargeChange="15"
+                            Value="0"
+                            ValueChanged="OnCenterlineCurvedMprRotationSliderValueChanged"
+                            ToolTip.Tip="Rotate the stretched vessel around the current centerline axis." />
+                        <TextBlock x:Name="CenterlineCurvedMprRotationValueText"
+                               Grid.Column="2"
+                               Width="46"
+                               TextAlignment="Right"
+                               Foreground="#FFDCE9F7"
+                               VerticalAlignment="Center"
+                               FontSize="10"
+                               Text="0°" />
+                        <Button Grid.Column="3"
+                            MinWidth="46"
+                            Padding="8,3"
+                            Classes="popupAction"
+                            Content="Reset"
+                            Click="OnCenterlineCurvedMprRotationResetClick"
+                            ToolTip.Tip="Reset curved MPR axial rotation." />
+                        </Grid>
+
                     <Border Background="#20000000"
                             BorderBrush="#33394B61"
                             BorderThickness="1"
@@ -912,7 +963,8 @@
                             Padding="6">
                         <Grid x:Name="CenterlineCurvedMprImageHost"
                               PointerPressed="OnCenterlineCurvedMprImagePointerPressed"
-                              PointerMoved="OnCenterlineCurvedMprImagePointerMoved">
+                            PointerMoved="OnCenterlineCurvedMprImagePointerMoved"
+                            PointerWheelChanged="OnCenterlineCurvedMprImagePointerWheelChanged">
                             <Image x:Name="CenterlineCurvedMprImage"
                                    Width="620"
                                    Height="240"

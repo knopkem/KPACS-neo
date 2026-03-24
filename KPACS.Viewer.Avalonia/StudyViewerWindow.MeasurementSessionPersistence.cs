@@ -254,10 +254,12 @@ public partial class StudyViewerWindow
             ActiveInstanceIndex = _activeSlot?.InstanceIndex ?? 0,
             CenterlineEditMode = _isCenterlineEditMode,
             CenterlineStationNormalized = Math.Clamp(_centerlineCrossSectionStationNormalized, 0, 1),
+            CenterlinePanelLayoutMode = _centerlinePanelLayoutMode,
             CenterlineCrossSectionPinned = _centerlineCrossSectionPinned,
             CenterlineCrossSectionOffsetX = _centerlineCrossSectionOffset.X,
             CenterlineCrossSectionOffsetY = _centerlineCrossSectionOffset.Y,
             CenterlineCurvedMprPinned = _centerlineCurvedMprPinned,
+            CenterlineCurvedMprRotationDegrees = _centerlineCurvedMprRotationDegrees,
             CenterlineCurvedMprOffsetX = _centerlineCurvedMprOffset.X,
             CenterlineCurvedMprOffsetY = _centerlineCurvedMprOffset.Y,
         };
@@ -272,9 +274,12 @@ public partial class StudyViewerWindow
 
         _isCenterlineEditMode = state.CenterlineEditMode && _selectedCenterlineSeedSetId is not null;
         _centerlineCrossSectionStationNormalized = Math.Clamp(state.CenterlineStationNormalized, 0, 1);
+        _centerlinePanelLayoutMode = state.CenterlinePanelLayoutMode;
+        RefreshCenterlinePanelLayoutModeUi();
         _centerlineCrossSectionPinned = state.CenterlineCrossSectionPinned;
         _centerlineCrossSectionOffset = new Point(state.CenterlineCrossSectionOffsetX, state.CenterlineCrossSectionOffsetY);
         _centerlineCurvedMprPinned = state.CenterlineCurvedMprPinned;
+        _centerlineCurvedMprRotationDegrees = state.CenterlineCurvedMprRotationDegrees;
         _centerlineCurvedMprOffset = new Point(state.CenterlineCurvedMprOffsetX, state.CenterlineCurvedMprOffsetY);
     }
 
@@ -385,10 +390,12 @@ public partial class StudyViewerWindow
         public int ActiveInstanceIndex { get; set; }
         public bool CenterlineEditMode { get; set; }
         public double CenterlineStationNormalized { get; set; }
+        public CenterlinePanelLayoutMode CenterlinePanelLayoutMode { get; set; }
         public bool CenterlineCrossSectionPinned { get; set; }
         public double CenterlineCrossSectionOffsetX { get; set; }
         public double CenterlineCrossSectionOffsetY { get; set; }
         public bool CenterlineCurvedMprPinned { get; set; }
+        public double CenterlineCurvedMprRotationDegrees { get; set; }
         public double CenterlineCurvedMprOffsetX { get; set; }
         public double CenterlineCurvedMprOffsetY { get; set; }
     }

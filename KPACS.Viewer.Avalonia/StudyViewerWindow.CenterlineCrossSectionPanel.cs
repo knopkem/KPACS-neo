@@ -64,15 +64,11 @@ public partial class StudyViewerWindow
         int stationIndex = GetCenterlineStationIndex(path, _centerlineCrossSectionStationNormalized);
         CenterlinePathPoint pathPoint = path.Points[stationIndex];
         var stopwatch = StartVascularStopwatch();
-        SpatialVector3D tangent = GetCenterlineTangent(path, stationIndex);
+        CenterlineSampleFrame frame = CenterlineFrameBuilder.GetFrame(volume, path, stationIndex, GetCenterlineCurvedMprRotationRadians());
 
-        // Try direct GPU cross-section kernel (avoids VolumeSlicePlane construction overhead).
         ReslicedImage resliced;
-        SpatialVector3D referenceUp = Math.Abs(tangent.Dot(volume.Normal)) < 0.92 ? volume.Normal : volume.ColumnDirection;
-        SpatialVector3D csRow = tangent.Cross(referenceUp).Normalize();
-        if (csRow.Length <= 1e-6) csRow = tangent.Cross(volume.RowDirection).Normalize();
-        if (csRow.Length <= 1e-6) csRow = new SpatialVector3D(1, 0, 0);
-        SpatialVector3D csCol = csRow.Cross(tangent).Normalize();
+        SpatialVector3D csRow = frame.Binormal.Length > 1e-6 ? frame.Binormal.Normalize() : new SpatialVector3D(1, 0, 0);
+        SpatialVector3D csCol = frame.Normal.Length > 1e-6 ? frame.Normal.Normalize() : new SpatialVector3D(0, 1, 0);
         double csPixelSpacing = CenterlineCrossSectionFieldOfViewMm / CenterlineCrossSectionImageSize;
 
         if (VolumeComputeBackend.TryRenderCrossSection(
@@ -111,7 +107,7 @@ public partial class StudyViewerWindow
             }
             else
             {
-                VolumeSlicePlane plane = CreateCenterlineCrossSectionPlane(volume, pathPoint.PatientPoint, tangent);
+                VolumeSlicePlane plane = CreateCenterlineCrossSectionPlane(pathPoint.PatientPoint, frame);
                 resliced = VolumeReslicer.ExtractSlice(volume, plane);
             }
         }
@@ -145,6 +141,7 @@ public partial class StudyViewerWindow
     {
         RefreshCenterlineCrossSectionPanel();
         RefreshCenterlineCurvedMprPanel();
+        ApplyCenterlinePanelLayoutMode();
     }
 
     private void HideCenterlineCrossSectionPanel()
@@ -160,6 +157,7 @@ public partial class StudyViewerWindow
         CenterlineCrossSectionStatusText.Text = string.Empty;
         CenterlineCrossSectionHintText.Text = "Computed centerline sections appear here.";
         CenterlineCrossSectionImage.Source = null;
+        ApplyCenterlinePanelLayoutMode();
     }
 
     private bool TryResolveCenterlineCrossSectionContext(
@@ -226,41 +224,11 @@ public partial class StudyViewerWindow
 
     private int GetSelectedCenterlineStationIndex(CenterlinePath path) => GetCenterlineStationIndex(path, _centerlineCrossSectionStationNormalized);
 
-    private static SpatialVector3D GetCenterlineTangent(CenterlinePath path, int index)
+    private static VolumeSlicePlane CreateCenterlineCrossSectionPlane(SpatialVector3D patientPoint, CenterlineSampleFrame frame)
     {
-        if (path.Points.Count <= 1)
-        {
-            return new SpatialVector3D(0, 0, 1);
-        }
-
-        SpatialVector3D current = path.Points[index].PatientPoint;
-        SpatialVector3D previous = path.Points[Math.Max(0, index - 1)].PatientPoint;
-        SpatialVector3D next = path.Points[Math.Min(path.Points.Count - 1, index + 1)].PatientPoint;
-        SpatialVector3D tangent = (next - previous).Length > 1e-6
-            ? (next - previous).Normalize()
-            : (current - previous).Length > 1e-6
-                ? (current - previous).Normalize()
-                : new SpatialVector3D(0, 0, 1);
-        return tangent.Length > 1e-6 ? tangent : new SpatialVector3D(0, 0, 1);
-    }
-
-    private static VolumeSlicePlane CreateCenterlineCrossSectionPlane(SeriesVolume volume, SpatialVector3D patientPoint, SpatialVector3D tangent)
-    {
-        SpatialVector3D referenceUp = Math.Abs(tangent.Dot(volume.Normal)) < 0.92
-            ? volume.Normal
-            : volume.ColumnDirection;
-        SpatialVector3D row = tangent.Cross(referenceUp).Normalize();
-        if (row.Length <= 1e-6)
-        {
-            row = tangent.Cross(volume.RowDirection).Normalize();
-        }
-
-        if (row.Length <= 1e-6)
-        {
-            row = new SpatialVector3D(1, 0, 0);
-        }
-
-        SpatialVector3D column = row.Cross(tangent).Normalize();
+        SpatialVector3D row = frame.Binormal.Length > 1e-6 ? frame.Binormal.Normalize() : new SpatialVector3D(1, 0, 0);
+        SpatialVector3D column = frame.Normal.Length > 1e-6 ? frame.Normal.Normalize() : new SpatialVector3D(0, 1, 0);
+        SpatialVector3D tangent = frame.Tangent.Length > 1e-6 ? frame.Tangent.Normalize() : new SpatialVector3D(0, 0, 1);
         double pixelSpacing = CenterlineCrossSectionFieldOfViewMm / CenterlineCrossSectionImageSize;
 
         return new VolumeSlicePlane
@@ -268,11 +236,11 @@ public partial class StudyViewerWindow
             VolumeCenter = patientPoint,
             RowDirection = row,
             ColumnDirection = column,
-            Normal = tangent.Normalize(),
+            Normal = tangent,
             PixelSpacingX = pixelSpacing,
             PixelSpacingY = pixelSpacing,
-            SliceSpacingMm = Math.Max(0.1, volume.SpacingZ),
-            ScrollStepMm = Math.Max(0.1, volume.SpacingZ),
+            SliceSpacingMm = 0.5,
+            ScrollStepMm = 0.5,
             MinOffsetMm = 0,
             MaxOffsetMm = 0,
             CurrentOffsetMm = 0,
@@ -487,6 +455,11 @@ public partial class StudyViewerWindow
 
     private void OnCenterlineCrossSectionHeaderPointerPressed(object? sender, PointerPressedEventArgs e)
     {
+        if (IsCenterlinePanelsTiled)
+        {
+            return;
+        }
+
         if (!CenterlineCrossSectionPanel.IsVisible || !e.GetCurrentPoint(CenterlineCrossSectionDragHandle).Properties.IsLeftButtonPressed)
         {
             return;
@@ -537,6 +510,14 @@ public partial class StudyViewerWindow
         }
 
         TranslateTransform transform = EnsureCenterlineCrossSectionPanelTransform();
+        if (IsCenterlinePanelsTiled)
+        {
+            transform.X = 0;
+            transform.Y = 0;
+            ApplyCenterlinePanelLayoutMode();
+            return;
+        }
+
         double panelWidth = CenterlineCrossSectionPanel.Bounds.Width;
         double panelHeight = CenterlineCrossSectionPanel.Bounds.Height;
         double hostWidth = ViewerContentHost.Bounds.Width;

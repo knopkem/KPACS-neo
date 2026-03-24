@@ -10,6 +10,10 @@ internal interface ICenterlineExtractionService
 internal sealed class CenterlineExtractionService : ICenterlineExtractionService
 {
     private static readonly NeighborStep[] s_neighborSteps = CreateNeighborSteps();
+    private const double CenterlineResampleSpacingMm = 1.5;
+    private const double CenterlineRecenteringSearchRadiusMm = 8.0;
+    private const double CenterlineRecenteringPlaneHalfThicknessMm = 1.25;
+    private const double CenterlineRecenteringMaxShiftMm = 4.0;
 
     public CenterlineExtractionResult Extract(SegmentationMask3D mask, CenterlineSeedSet seedSet, CancellationToken cancellationToken = default)
     {
@@ -82,8 +86,10 @@ internal sealed class CenterlineExtractionService : ICenterlineExtractionService
             .ToList();
 
         List<Vector3D> smoothedPoints = SmoothPath(patientPoints, iterations: 3);
-        List<Vector3D> resampledPoints = ResamplePath(smoothedPoints, 1.5);
-        if (resampledPoints.Count < 2)
+        List<Vector3D> resampledPoints = ResamplePath(smoothedPoints, CenterlineResampleSpacingMm);
+        List<Vector3D> centeredPoints = RecenterPathToMask(buffer, resampledPoints, passes: 2);
+        List<Vector3D> finalPoints = ResamplePath(centeredPoints, CenterlineResampleSpacingMm);
+        if (finalPoints.Count < 2)
         {
             return CenterlineExtractionResult.Failure("Centerline resampling collapsed the path. Try a cleaner vessel mask.");
         }
@@ -94,14 +100,14 @@ internal sealed class CenterlineExtractionService : ICenterlineExtractionService
             straightDistance += (orderedSeeds[index + 1].PatientPoint - orderedSeeds[index].PatientPoint).Length;
         }
 
-        double totalLength = ComputeLength(resampledPoints);
+        double totalLength = ComputeLength(finalPoints);
         double averageSupport = supportSamples > 0 ? supportAccumulator / supportSamples : 0;
         double supportScore = Math.Clamp(averageSupport / 27.0, 0.0, 1.0);
         double lengthRatio = straightDistance > 1e-3 ? totalLength / straightDistance : 1.0;
         double tortuosityScore = Math.Clamp(1.0 - Math.Max(0, lengthRatio - 1.0) / 3.0, 0.15, 1.0);
         double qualityScore = Math.Clamp((supportScore * 0.7) + (tortuosityScore * 0.3), 0.0, 1.0);
 
-        CenterlinePath path = CreateComputedPath(mask, seedSet, resampledPoints, totalLength, qualityScore);
+        CenterlinePath path = CreateComputedPath(mask, seedSet, finalPoints, totalLength, qualityScore);
         string summary = $"Computed mask centerline ({path.Points.Count} points, {totalLength:0.0} mm, quality {qualityScore:0.00}).";
         path = path with { Summary = summary };
         return CenterlineExtractionResult.Success(path, summary, qualityScore);
@@ -387,6 +393,139 @@ internal sealed class CenterlineExtractionService : ICenterlineExtractionService
         }
 
         return resampled;
+    }
+
+    private static List<Vector3D> RecenterPathToMask(SegmentationMaskBuffer buffer, IReadOnlyList<Vector3D> points, int passes)
+    {
+        if (points.Count < 3 || passes <= 0)
+        {
+            return [.. points];
+        }
+
+        List<Vector3D> current = [.. points];
+        for (int pass = 0; pass < passes; pass++)
+        {
+            List<Vector3D> next = new(current.Count)
+            {
+                current[0]
+            };
+
+            for (int index = 1; index < current.Count - 1; index++)
+            {
+                Vector3D point = current[index];
+                Vector3D tangent = GetPathTangent(current, index);
+                if (TryComputeLocalMaskCentroid(
+                        buffer,
+                        point,
+                        tangent,
+                        CenterlineRecenteringSearchRadiusMm,
+                        CenterlineRecenteringPlaneHalfThicknessMm,
+                        out Vector3D centeredPoint))
+                {
+                    Vector3D shift = centeredPoint - point;
+                    double shiftLength = shift.Length;
+                    if (shiftLength > CenterlineRecenteringMaxShiftMm)
+                    {
+                        shift = shift.Normalize() * CenterlineRecenteringMaxShiftMm;
+                    }
+
+                    next.Add(point + shift);
+                }
+                else
+                {
+                    next.Add(point);
+                }
+            }
+
+            next.Add(current[^1]);
+            current = next;
+        }
+
+        return current;
+    }
+
+    private static bool TryComputeLocalMaskCentroid(
+        SegmentationMaskBuffer buffer,
+        Vector3D patientPoint,
+        Vector3D tangent,
+        double searchRadiusMm,
+        double planeHalfThicknessMm,
+        out Vector3D centeredPoint)
+    {
+        centeredPoint = patientPoint;
+        if (tangent.Length <= 1e-6)
+        {
+            return false;
+        }
+
+        Vector3D tangentUnit = tangent.Normalize();
+        (double vx, double vy, double vz) = PatientToVoxel(buffer.Geometry, patientPoint);
+        int centerX = Math.Clamp((int)Math.Round(vx), 0, buffer.SizeX - 1);
+        int centerY = Math.Clamp((int)Math.Round(vy), 0, buffer.SizeY - 1);
+        int centerZ = Math.Clamp((int)Math.Round(vz), 0, buffer.SizeZ - 1);
+        int radiusX = Math.Max(1, (int)Math.Ceiling(searchRadiusMm / buffer.Geometry.SpacingX));
+        int radiusY = Math.Max(1, (int)Math.Ceiling(searchRadiusMm / buffer.Geometry.SpacingY));
+        int radiusZ = Math.Max(1, (int)Math.Ceiling(searchRadiusMm / buffer.Geometry.SpacingZ));
+
+        Vector3D planarSum = new(0, 0, 0);
+        int sampleCount = 0;
+
+        for (int z = Math.Max(0, centerZ - radiusZ); z <= Math.Min(buffer.SizeZ - 1, centerZ + radiusZ); z++)
+        {
+            for (int y = Math.Max(0, centerY - radiusY); y <= Math.Min(buffer.SizeY - 1, centerY + radiusY); y++)
+            {
+                for (int x = Math.Max(0, centerX - radiusX); x <= Math.Min(buffer.SizeX - 1, centerX + radiusX); x++)
+                {
+                    if (!buffer.Get(x, y, z))
+                    {
+                        continue;
+                    }
+
+                    Vector3D candidatePoint = VoxelToPatient(buffer.Geometry, x, y, z);
+                    Vector3D relative = candidatePoint - patientPoint;
+                    double axialDistance = relative.Dot(tangentUnit);
+                    if (Math.Abs(axialDistance) > planeHalfThicknessMm)
+                    {
+                        continue;
+                    }
+
+                    Vector3D planarOffset = relative - (tangentUnit * axialDistance);
+                    if (planarOffset.Length > searchRadiusMm)
+                    {
+                        continue;
+                    }
+
+                    planarSum += planarOffset;
+                    sampleCount++;
+                }
+            }
+        }
+
+        if (sampleCount < 6)
+        {
+            return false;
+        }
+
+        centeredPoint = patientPoint + (planarSum / sampleCount);
+        return true;
+    }
+
+    private static Vector3D GetPathTangent(IReadOnlyList<Vector3D> points, int index)
+    {
+        if (points.Count <= 1)
+        {
+            return new Vector3D(0, 0, 1);
+        }
+
+        Vector3D previous = points[Math.Max(0, index - 1)];
+        Vector3D next = points[Math.Min(points.Count - 1, index + 1)];
+        Vector3D tangent = next - previous;
+        if (tangent.Length <= 1e-6 && index > 0)
+        {
+            tangent = points[index] - previous;
+        }
+
+        return tangent.Length > 1e-6 ? tangent.Normalize() : new Vector3D(0, 0, 1);
     }
 
     private static double ComputeLength(IReadOnlyList<Vector3D> points)
