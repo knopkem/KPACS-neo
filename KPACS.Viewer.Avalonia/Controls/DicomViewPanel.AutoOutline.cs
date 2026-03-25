@@ -12,6 +12,13 @@ public partial class DicomViewPanel
 {
     public sealed record AutoOutlinedMeasurementInfo(Guid MeasurementId, MeasurementKind Kind, Point SeedPoint, int SensitivityLevel);
     public sealed record AutoOutlineAttemptInfo(MeasurementKind Kind, Point SeedPoint, int SensitivityLevel, bool Succeeded, string Message);
+    public sealed record AutoOutlinePreviewResult(
+        bool Succeeded,
+        AutoOutlineDeveloperSettings Settings,
+        VolumeRoiContour[] Contours,
+        SegmentationMask3D? Mask,
+        string Message,
+        long ElapsedMilliseconds);
     public sealed record AutoOutlineDeveloperSettings(
         bool UseRobustHomogenization = true,
         double TwoDimensionalToleranceScale = 2.6,
@@ -174,8 +181,53 @@ public partial class DicomViewPanel
         return true;
     }
     private AutoOutlineDeveloperSettings _autoOutlineDeveloperSettings = new();
+    private readonly AsyncLocal<AutoOutlineDeveloperSettings?> _autoOutlineDeveloperSettingsOverride = new();
+
+    private AutoOutlineDeveloperSettings CurrentAutoOutlineDeveloperSettings => _autoOutlineDeveloperSettingsOverride.Value ?? _autoOutlineDeveloperSettings;
 
     public AutoOutlineDeveloperSettings GetAutoOutlineDeveloperSettings() => _autoOutlineDeveloperSettings with { };
+
+    public bool TryGetCurrentVolumeRoiAutoOutlineParameters(out Point imagePoint, out int sensitivityLevel)
+    {
+        if (_volumeRoiDraft?.AutoOutlineState is not { } autoOutlineState)
+        {
+            imagePoint = default;
+            sensitivityLevel = 0;
+            return false;
+        }
+
+        imagePoint = autoOutlineState.ImagePoint;
+        sensitivityLevel = autoOutlineState.SensitivityLevel;
+        return true;
+    }
+
+    public AutoOutlinePreviewResult PreviewAutoOutlinedVolumeContours(Point imagePoint, int sensitivityLevel, AutoOutlineDeveloperSettings settings)
+    {
+        AutoOutlineDeveloperSettings normalized = NormalizeAutoOutlineDeveloperSettings(settings);
+        if (_volume is null || SpatialMetadata is null)
+        {
+            return new AutoOutlinePreviewResult(false, normalized, [], null, "A loaded 3D volume is required to preview ROI settings.", 0);
+        }
+
+        var sw = System.Diagnostics.Stopwatch.StartNew();
+        using AutoOutlineDeveloperSettingsOverrideScope _ = PushAutoOutlineDeveloperSettingsOverride(normalized);
+        if (!TryBuildAutoOutlinedVolumeContours(imagePoint, sensitivityLevel, out VolumeRoiContour[] contours, out SegmentationMask3D? segmentationMask, out string failureReason))
+        {
+            sw.Stop();
+            string gpuLog = _lastGpuSegmentLog;
+            string detail = string.IsNullOrWhiteSpace(gpuLog)
+                ? failureReason
+                : $"{failureReason}\n{gpuLog}";
+            return new AutoOutlinePreviewResult(false, normalized, [], null, detail, sw.ElapsedMilliseconds);
+        }
+
+        sw.Stop();
+        string successGpuLog = _lastGpuSegmentLog;
+        string message = string.IsNullOrWhiteSpace(successGpuLog)
+            ? $"Preview generated {contours.Length} contour slice(s)."
+            : $"Preview generated {contours.Length} contour slice(s).\n{successGpuLog}";
+        return new AutoOutlinePreviewResult(true, normalized, contours, segmentationMask, message, sw.ElapsedMilliseconds);
+    }
 
     public bool SetAutoOutlineDeveloperSettings(AutoOutlineDeveloperSettings settings, bool rerunVolumeDraft)
     {
@@ -257,7 +309,7 @@ public partial class DicomViewPanel
             return false;
         }
 
-        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: _autoOutlineDeveloperSettings.PolygonPointBudget)
+        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: CurrentAutoOutlineDeveloperSettings.PolygonPointBudget)
             .Select(point => new Point(point.X + mask.Left, point.Y + mask.Top))
             .ToArray();
         return polygonPoints.Length >= 3;
@@ -278,7 +330,7 @@ public partial class DicomViewPanel
             return false;
         }
 
-        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: _autoOutlineDeveloperSettings.PolygonPointBudget)
+        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: CurrentAutoOutlineDeveloperSettings.PolygonPointBudget)
             .Select(point => new Point(point.X + mask.Left, point.Y + mask.Top))
             .ToArray();
         return polygonPoints.Length >= 3;
@@ -299,7 +351,7 @@ public partial class DicomViewPanel
             return false;
         }
 
-        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: _autoOutlineDeveloperSettings.PolygonPointBudget)
+        polygonPoints = TraceAutoOutlineBoundary(mask, maxPointCount: CurrentAutoOutlineDeveloperSettings.PolygonPointBudget)
             .Select(point => new Point(point.X + mask.Left, point.Y + mask.Top))
             .ToArray();
         return polygonPoints.Length >= 3;
@@ -814,7 +866,7 @@ public partial class DicomViewPanel
         tolerance = ApplyAutoOutlineSensitivity(
             Math.Max(baselineTolerance, Math.Max(stdDev * 2.1, Math.Max((max - min) * 0.48, robustSpread))),
             sensitivityLevel,
-            _autoOutlineDeveloperSettings.TwoDimensionalToleranceScale);
+            CurrentAutoOutlineDeveloperSettings.TwoDimensionalToleranceScale);
         return true;
     }
 
@@ -858,7 +910,7 @@ public partial class DicomViewPanel
         tolerance = ApplyAutoOutlineSensitivity(
             Math.Max(baselineTolerance, Math.Max(stdDev * 2.1, Math.Max((max - min) * 0.48, robustSpread))),
             sensitivityLevel,
-            _autoOutlineDeveloperSettings.TwoDimensionalToleranceScale);
+            CurrentAutoOutlineDeveloperSettings.TwoDimensionalToleranceScale);
         return true;
     }
 
@@ -1766,7 +1818,7 @@ public partial class DicomViewPanel
             return TryGetPixelValue(x, y, out value);
         }
 
-        (double clampLower, double clampUpper) = _autoOutlineDeveloperSettings.UseRobustHomogenization
+        (double clampLower, double clampUpper) = CurrentAutoOutlineDeveloperSettings.UseRobustHomogenization
             ? ComputeRobustHomogenizationBounds(rawSamples, (_modality ?? string.Empty).Trim().ToUpperInvariant())
             : (double.NegativeInfinity, double.PositiveInfinity);
         double weightedSum = 0;
@@ -1824,7 +1876,7 @@ public partial class DicomViewPanel
             return TryGetSlicePixelValue(source, x, y, out value);
         }
 
-        (double clampLower, double clampUpper) = _autoOutlineDeveloperSettings.UseRobustHomogenization
+        (double clampLower, double clampUpper) = CurrentAutoOutlineDeveloperSettings.UseRobustHomogenization
             ? ComputeRobustHomogenizationBounds(rawSamples, source.Modality.Trim().ToUpperInvariant())
             : (double.NegativeInfinity, double.PositiveInfinity);
         double weightedSum = 0;
@@ -2459,10 +2511,10 @@ public partial class DicomViewPanel
         AutoOutlineIntensitySignature candidateSignature,
         AutoOutlineIntensitySignature seedSignature)
     {
-        double meanTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.35, 14.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
-        double medianTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.15, 12.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
-        double p10Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
-        double p90Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double meanTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.35, 14.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double medianTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.15, 12.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double p10Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double p90Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
 
         return Math.Abs(candidateSignature.Mean - referenceSignature.Mean) <= meanTolerance &&
             Math.Abs(candidateSignature.Median - referenceSignature.Median) <= medianTolerance &&
@@ -2475,10 +2527,10 @@ public partial class DicomViewPanel
         AutoOutlineIntensitySignature candidateSignature,
         AutoOutlineIntensitySignature seedSignature)
     {
-        double meanTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.35, 14.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
-        double medianTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.15, 12.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
-        double p10Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
-        double p90Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, _autoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double meanTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.35, 14.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double medianTolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.15, 12.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double p10Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
+        double p90Tolerance = ComputeSignatureTolerance(referenceSignature, seedSignature, 1.55, 16.0, CurrentAutoOutlineDeveloperSettings.SliceSignatureToleranceScale);
 
         double meanPenalty = Math.Abs(candidateSignature.Mean - referenceSignature.Mean) / Math.Max(1.0, meanTolerance);
         double medianPenalty = Math.Abs(candidateSignature.Median - referenceSignature.Median) / Math.Max(1.0, medianTolerance);
@@ -3023,7 +3075,7 @@ public partial class DicomViewPanel
             List<VolumeSliceContourCandidate> currentCandidates = [];
             foreach (AutoOutlineMask componentMask in componentMasks.OrderByDescending(mask => mask.Count))
             {
-                Point[] imagePoints = TraceAutoOutlineBoundary(new AutoOutlineMask(0, 0, componentMask.Pixels, componentMask.Count), maxPointCount: _autoOutlineDeveloperSettings.VolumeContourPointBudget)
+                Point[] imagePoints = TraceAutoOutlineBoundary(new AutoOutlineMask(0, 0, componentMask.Pixels, componentMask.Count), maxPointCount: CurrentAutoOutlineDeveloperSettings.VolumeContourPointBudget)
                     .Select(point => new Point(point.X + componentMask.Left, point.Y + componentMask.Top))
                     .ToArray();
                 if (imagePoints.Length < 3)
@@ -3395,7 +3447,7 @@ public partial class DicomViewPanel
         }
 
         double radiusMultiplier = relaxedPass ? 1.2 : 1.0;
-        double seedNeighborhoodRadiusMm = Math.Max(1.0, _autoOutlineDeveloperSettings.SeedNeighborhoodRadiusMm);
+        double seedNeighborhoodRadiusMm = Math.Max(1.0, CurrentAutoOutlineDeveloperSettings.SeedNeighborhoodRadiusMm);
         int radiusX = Math.Max(1, (int)Math.Round((seedNeighborhoodRadiusMm * radiusMultiplier) / Math.Max(_volume.SpacingX, 0.1)));
         int radiusY = Math.Max(1, (int)Math.Round((seedNeighborhoodRadiusMm * radiusMultiplier) / Math.Max(_volume.SpacingY, 0.1)));
         int radiusZ = Math.Max(1, (int)Math.Round((seedNeighborhoodRadiusMm * 0.7 * radiusMultiplier) / Math.Max(_volume.SpacingZ, 0.1)));
@@ -3663,7 +3715,7 @@ public partial class DicomViewPanel
 
     private double GetVolumeToleranceMultiplier(bool relaxedPass)
     {
-        double multiplier = Math.Max(0.2, _autoOutlineDeveloperSettings.VolumeToleranceScale);
+        double multiplier = Math.Max(0.2, CurrentAutoOutlineDeveloperSettings.VolumeToleranceScale);
         if (IsMrLikeModality())
         {
             multiplier *= AutoOutlineMrToleranceMultiplier;
@@ -3688,6 +3740,30 @@ public partial class DicomViewPanel
             PolygonPointBudget = Math.Clamp(settings.PolygonPointBudget, 12, 128),
             VolumeContourPointBudget = Math.Clamp(settings.VolumeContourPointBudget, 12, 128),
         };
+    }
+
+    private AutoOutlineDeveloperSettingsOverrideScope PushAutoOutlineDeveloperSettingsOverride(AutoOutlineDeveloperSettings settings)
+    {
+        AutoOutlineDeveloperSettings? previous = _autoOutlineDeveloperSettingsOverride.Value;
+        _autoOutlineDeveloperSettingsOverride.Value = settings;
+        return new AutoOutlineDeveloperSettingsOverrideScope(_autoOutlineDeveloperSettingsOverride, previous);
+    }
+
+    private readonly struct AutoOutlineDeveloperSettingsOverrideScope : IDisposable
+    {
+        private readonly AsyncLocal<AutoOutlineDeveloperSettings?> _overrideSlot;
+        private readonly AutoOutlineDeveloperSettings? _previous;
+
+        public AutoOutlineDeveloperSettingsOverrideScope(AsyncLocal<AutoOutlineDeveloperSettings?> overrideSlot, AutoOutlineDeveloperSettings? previous)
+        {
+            _overrideSlot = overrideSlot;
+            _previous = previous;
+        }
+
+        public void Dispose()
+        {
+            _overrideSlot.Value = _previous;
+        }
     }
 
     private HashSet<int> FuseVolumeSeedRegions(Dictionary<int, int> voteCounts, int successfulSeedCount, int seedKey)

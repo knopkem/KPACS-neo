@@ -1345,6 +1345,10 @@
                                         Classes="workspaceAction"
                                         Content="Apply to active viewport"
                                         Click="OnVolumeRoiDeveloperApplyClick" />
+                                <Button x:Name="VolumeRoiDeveloperAutoDetectButton"
+                                    Classes="workspaceAction"
+                                    Content="Auto detect"
+                                    Click="OnVolumeRoiDeveloperAutoDetectClick" />
                                 <Button x:Name="VolumeRoiDeveloperRerunButton"
                                         Classes="workspaceAction"
                                         Content="Re-run latest 3D ROI"
