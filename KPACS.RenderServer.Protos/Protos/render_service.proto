@@ -44,6 +44,8 @@ service StudyBrowserService {
   rpc SearchStudies    (StudySearchRequest)      returns (StudySearchResponse);
   /// Get full details (series + instance counts) for one study.
   rpc GetStudyDetails  (GetStudyDetailsRequest)  returns (StudyDetailsResponse);
+  /// Render one image from a series without creating a render session.
+  rpc GetSeriesImage   (GetSeriesImageRequest)   returns (GetSeriesImageResponse);
 }
 
 /// Interactive rendering — the core pixel-streaming loop.
@@ -155,6 +157,23 @@ message VolumeInfo {
   string frame_of_reference_uid = 19;
   string acquisition_number = 20;
   repeated string slice_sop_instance_uids = 21;
+}
+
+message GetSeriesImageRequest {
+  int64 series_key = 1;
+  int32 instance_index = 2;
+  int32 max_width = 3;
+  int32 max_height = 4;
+  FrameEncoding preferred_encoding = 5;
+}
+
+message GetSeriesImageResponse {
+  bytes frame_data = 1;
+  FrameEncoding encoding = 2;
+  int32 frame_width = 3;
+  int32 frame_height = 4;
+  int32 instance_index = 5;
+  string sop_instance_uid = 6;
 }
 
 // ============================================================================

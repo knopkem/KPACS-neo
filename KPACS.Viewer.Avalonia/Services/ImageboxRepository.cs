@@ -245,6 +245,77 @@ public sealed class ImageboxRepository
         return await GetStudyDetailsAsync((long)scalar, cancellationToken);
     }
 
+    public async Task<SeriesRecord?> GetSeriesDetailsAsync(long seriesKey, CancellationToken cancellationToken = default)
+    {
+        await using var connection = new SqliteConnection(_connectionString);
+        await connection.OpenAsync(cancellationToken);
+
+        SeriesRecord? series = null;
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT sr.series_key, sr.study_key, sr.series_instance_uid, sr.modality,
+                       sr.body_part_examined, sr.series_description, sr.series_number, sr.instance_count
+                FROM series sr
+                WHERE sr.series_key = $seriesKey
+                LIMIT 1;
+                """;
+            command.Parameters.AddWithValue("$seriesKey", seriesKey);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            if (await reader.ReadAsync(cancellationToken))
+            {
+                series = new SeriesRecord
+                {
+                    SeriesKey = reader.GetInt64(0),
+                    StudyKey = reader.GetInt64(1),
+                    SeriesInstanceUid = reader.GetString(2),
+                    Modality = reader.GetString(3),
+                    BodyPart = reader.GetString(4),
+                    SeriesDescription = reader.GetString(5),
+                    SeriesNumber = reader.GetInt32(6),
+                    InstanceCount = reader.GetInt32(7),
+                };
+            }
+        }
+
+        if (series is null)
+        {
+            return null;
+        }
+
+        await using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                SELECT i.instance_key, i.series_key, i.sop_instance_uid, i.sop_class_uid,
+                       i.file_path, i.source_file_path, i.instance_number, i.frame_count
+                FROM instances i
+                WHERE i.series_key = $seriesKey
+                ORDER BY i.instance_number, i.file_path;
+                """;
+            command.Parameters.AddWithValue("$seriesKey", seriesKey);
+
+            await using var reader = await command.ExecuteReaderAsync(cancellationToken);
+            while (await reader.ReadAsync(cancellationToken))
+            {
+                series.Instances.Add(new InstanceRecord
+                {
+                    InstanceKey = reader.GetInt64(0),
+                    SeriesKey = reader.GetInt64(1),
+                    SopInstanceUid = reader.GetString(2),
+                    SopClassUid = reader.GetString(3),
+                    FilePath = reader.GetString(4),
+                    SourceFilePath = reader.GetString(5),
+                    InstanceNumber = reader.GetInt32(6),
+                    FrameCount = reader.GetInt32(7),
+                });
+            }
+        }
+
+        return series;
+    }
+
     public async Task<List<StudyListItem>> FindPriorStudiesAsync(StudyListItem study, int maxResults = 12, CancellationToken cancellationToken = default)
     {
         ArgumentNullException.ThrowIfNull(study);

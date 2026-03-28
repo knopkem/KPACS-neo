@@ -33,6 +33,7 @@ public sealed class VolumeManager
 {
     private readonly ConcurrentDictionary<string, LoadedVolume> _volumes = new();
     private readonly ConcurrentDictionary<string, LoadedVolume> _bySeriesUid = new();
+    private readonly ConcurrentDictionary<string, Task<(LoadedVolume? Volume, string? Error)>> _inflightDatabaseLoads = new(StringComparer.Ordinal);
     private readonly SemaphoreSlim _loadLock = new(1, 1);
     private readonly ILogger<VolumeManager> _logger;
     private readonly ImageboxRepository _repository;
@@ -134,12 +135,10 @@ public sealed class VolumeManager
     public async Task<(LoadedVolume? Volume, string? Error)> LoadVolumeBySeriesKeyAsync(
         long seriesKey, CancellationToken ct)
     {
-        StudyDetails? details = null;
-
+        SeriesRecord? series;
         try
         {
-            // Find the study that owns this series so we can get the full study details.
-            details = await FindStudyBySeriesKeyAsync(seriesKey, ct);
+            series = await _repository.GetSeriesDetailsAsync(seriesKey, ct);
         }
         catch (Exception ex)
         {
@@ -147,14 +146,12 @@ public sealed class VolumeManager
             return (null, "Failed to query imagebox database.");
         }
 
-        if (details is null)
+        if (series is null)
             return (null, $"Series key {seriesKey} not found in imagebox database.");
 
-        var series = details.Series.FirstOrDefault(s => s.SeriesKey == seriesKey);
-        if (series is null || series.Instances.Count == 0)
+        if (series.Instances.Count == 0)
             return (null, $"Series key {seriesKey} has no instances in the database.");
 
-        // Check for reuse by series instance UID.
         string seriesUid = series.SeriesInstanceUid;
         if (!string.IsNullOrWhiteSpace(seriesUid) &&
             _bySeriesUid.TryGetValue(seriesUid, out var existing))
@@ -164,119 +161,127 @@ public sealed class VolumeManager
             return (existing, null);
         }
 
-        // Delegate to the normal loader using the SeriesRecord from the database.
-        await _loadLock.WaitAsync(ct);
+        string loadKey = string.IsNullOrWhiteSpace(seriesUid)
+            ? $"series-key:{seriesKey}"
+            : seriesUid;
+
+        Task<(LoadedVolume? Volume, string? Error)> loadTask = _inflightDatabaseLoads.GetOrAdd(
+            loadKey,
+            _ => LoadVolumeBySeriesRecordAsync(series, seriesKey));
+
         try
         {
-            // Double-check after acquiring lock.
-            if (!string.IsNullOrWhiteSpace(seriesUid) &&
-                _bySeriesUid.TryGetValue(seriesUid, out existing))
-            {
-                existing.AddRef();
-                return (existing, null);
-            }
-
-            // Verify readable file paths exist on disk, allowing indexed source files
-            // when the study has not been fully copied into the imagebox storage yet.
-            var validInstances = series.Instances
-                .Select(instance => new
-                {
-                    Instance = instance,
-                    ReadablePath = VolumeLoaderService.ResolveReadableFilePath(instance)
-                })
-                .Where(item => !string.IsNullOrWhiteSpace(item.ReadablePath))
-                .Select(item => new InstanceRecord
-                {
-                    InstanceKey = item.Instance.InstanceKey,
-                    SeriesKey = item.Instance.SeriesKey,
-                    SopInstanceUid = item.Instance.SopInstanceUid,
-                    SopClassUid = item.Instance.SopClassUid,
-                    FilePath = item.ReadablePath!,
-                    SourceFilePath = string.IsNullOrWhiteSpace(item.Instance.SourceFilePath) ? item.ReadablePath! : item.Instance.SourceFilePath,
-                    InstanceNumber = item.Instance.InstanceNumber,
-                    FrameCount = item.Instance.FrameCount,
-                })
-                .ToList();
-
-            if (validInstances.Count < VolumeLoaderService.MinSlicesForRenderableSeries)
-                return (null, $"Not enough DICOM files on disk for series key {seriesKey} " +
-                    $"(found {validInstances.Count} of {series.Instances.Count} registered files, " +
-                    $"need {VolumeLoaderService.MinSlicesForRenderableSeries}).");
-
-            var seriesRecord = new SeriesRecord
-            {
-                SeriesKey = series.SeriesKey,
-                SeriesInstanceUid = series.SeriesInstanceUid,
-                Modality = series.Modality,
-                SeriesDescription = series.SeriesDescription,
-                SeriesNumber = series.SeriesNumber,
-            };
-            foreach (var inst in validInstances)
-                seriesRecord.Instances.Add(inst);
-
-            var loader = new VolumeLoaderService();
-            var volume = await loader.TryLoadVolumeAsync(seriesRecord, VolumeLoaderService.MinSlicesForRenderableSeries, ct);
-
-            if (volume is null)
-                return (null, "Failed to build volume from database series — may be RGB, inconsistent geometry, or too few slices.");
-
-            var loaded = new LoadedVolume
-            {
-                SeriesInstanceUid = volume.SeriesInstanceUid,
-                SourcePath = seriesRecord.Instances.FirstOrDefault()?.FilePath ?? string.Empty,
-                Volume = volume,
-            };
-            loaded.AddRef();
-
-            _volumes.TryAdd(loaded.VolumeId, loaded);
-            if (!string.IsNullOrWhiteSpace(volume.SeriesInstanceUid))
-                _bySeriesUid.TryAdd(volume.SeriesInstanceUid, loaded);
-
-            _logger.LogInformation(
-                "Volume {VolumeId} loaded from DB series key {SeriesKey}: {SizeX}x{SizeY}x{SizeZ}",
-                loaded.VolumeId, seriesKey, volume.SizeX, volume.SizeY, volume.SizeZ);
-
-            // Pre-compute gradient volume in background for DVR.
-            _ = Task.Run(() =>
-            {
-                try
-                {
-                    loaded.GradientVolume = VolumeGradientVolume.Create(volume);
-                    _logger.LogInformation("Gradient volume computed for {VolumeId}", loaded.VolumeId);
-                }
-                catch (Exception ex)
-                {
-                    _logger.LogWarning(ex, "Gradient volume computation failed for {VolumeId}", loaded.VolumeId);
-                }
-            }, CancellationToken.None);
-
-            return (loaded, null);
+            return await loadTask.WaitAsync(ct);
         }
         finally
         {
-            _loadLock.Release();
+            if (loadTask.IsCompleted)
+            {
+                _inflightDatabaseLoads.TryRemove(new KeyValuePair<string, Task<(LoadedVolume? Volume, string? Error)>>(loadKey, loadTask));
+            }
         }
     }
 
-    /// <summary>
-    /// Finds the StudyDetails that contains the given series key.
-    /// We search all studies and match — this is rare (only at volume load time).
-    /// </summary>
-    private async Task<StudyDetails?> FindStudyBySeriesKeyAsync(long seriesKey, CancellationToken ct)
+    private async Task<(LoadedVolume? Volume, string? Error)> LoadVolumeBySeriesRecordAsync(SeriesRecord series, long seriesKey)
     {
-        // Search all studies (no filter) and find which one contains the series key.
-        // This is suboptimal but ImageboxRepository doesn't have a "get study by series key" method.
-        // For a production system we'd add that query. For now, the study count is small enough.
-        var studies = await _repository.SearchStudiesAsync(new StudyQuery(), ct);
-
-        foreach (var study in studies)
+        string seriesUid = series.SeriesInstanceUid;
+        if (!string.IsNullOrWhiteSpace(seriesUid) &&
+            _bySeriesUid.TryGetValue(seriesUid, out LoadedVolume? existing))
         {
-            var details = await _repository.GetStudyDetailsAsync(study.StudyKey, ct);
-            if (details?.Series.Any(s => s.SeriesKey == seriesKey) == true)
-                return details;
+            existing.AddRef();
+            return (existing, null);
         }
 
-        return null;
+        List<InstanceRecord> validInstances = series.Instances
+            .Select(instance => new
+            {
+                Instance = instance,
+                ReadablePath = VolumeLoaderService.ResolveReadableFilePath(instance)
+            })
+            .Where(item => !string.IsNullOrWhiteSpace(item.ReadablePath))
+            .Select(item => new InstanceRecord
+            {
+                InstanceKey = item.Instance.InstanceKey,
+                SeriesKey = item.Instance.SeriesKey,
+                SopInstanceUid = item.Instance.SopInstanceUid,
+                SopClassUid = item.Instance.SopClassUid,
+                FilePath = item.ReadablePath!,
+                SourceFilePath = string.IsNullOrWhiteSpace(item.Instance.SourceFilePath) ? item.ReadablePath! : item.Instance.SourceFilePath,
+                InstanceNumber = item.Instance.InstanceNumber,
+                FrameCount = item.Instance.FrameCount,
+            })
+            .ToList();
+
+        if (validInstances.Count < VolumeLoaderService.MinSlicesForRenderableSeries)
+        {
+            return (null, $"Not enough DICOM files on disk for series key {seriesKey} " +
+                $"(found {validInstances.Count} of {series.Instances.Count} registered files, " +
+                $"need {VolumeLoaderService.MinSlicesForRenderableSeries}).");
+        }
+
+        var seriesRecord = new SeriesRecord
+        {
+            SeriesKey = series.SeriesKey,
+            StudyKey = series.StudyKey,
+            SeriesInstanceUid = series.SeriesInstanceUid,
+            Modality = series.Modality,
+            BodyPart = series.BodyPart,
+            SeriesDescription = series.SeriesDescription,
+            SeriesNumber = series.SeriesNumber,
+            InstanceCount = series.InstanceCount,
+        };
+        foreach (InstanceRecord instance in validInstances)
+        {
+            seriesRecord.Instances.Add(instance);
+        }
+
+        var loader = new VolumeLoaderService();
+        SeriesVolume? volume = await loader.TryLoadVolumeAsync(seriesRecord, VolumeLoaderService.MinSlicesForRenderableSeries, CancellationToken.None);
+
+        if (volume is null)
+        {
+            return (null, "Failed to build volume from database series — may be RGB, inconsistent geometry, or too few slices.");
+        }
+
+        if (!string.IsNullOrWhiteSpace(seriesUid) &&
+            _bySeriesUid.TryGetValue(seriesUid, out existing))
+        {
+            existing.AddRef();
+            return (existing, null);
+        }
+
+        var loaded = new LoadedVolume
+        {
+            SeriesInstanceUid = volume.SeriesInstanceUid,
+            SourcePath = seriesRecord.Instances.FirstOrDefault()?.FilePath ?? string.Empty,
+            Volume = volume,
+        };
+        loaded.AddRef();
+
+        _volumes.TryAdd(loaded.VolumeId, loaded);
+        if (!string.IsNullOrWhiteSpace(volume.SeriesInstanceUid))
+        {
+            _bySeriesUid.TryAdd(volume.SeriesInstanceUid, loaded);
+        }
+
+        _logger.LogInformation(
+            "Volume {VolumeId} loaded from DB series key {SeriesKey}: {SizeX}x{SizeY}x{SizeZ}",
+            loaded.VolumeId, seriesKey, volume.SizeX, volume.SizeY, volume.SizeZ);
+
+        _ = Task.Run(() =>
+        {
+            try
+            {
+                loaded.GradientVolume = VolumeGradientVolume.Create(volume);
+                _logger.LogInformation("Gradient volume computed for {VolumeId}", loaded.VolumeId);
+            }
+            catch (Exception ex)
+            {
+                _logger.LogWarning(ex, "Gradient volume computation failed for {VolumeId}", loaded.VolumeId);
+            }
+        }, CancellationToken.None);
+
+        return (loaded, null);
     }
 
     public LoadedVolume? GetVolume(string volumeId)

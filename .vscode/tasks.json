@@ -11,6 +11,18 @@
 			],
 			"isBackground": false,
 			"group": "build"
+		},
+		{
+			"label": "Start Render Server",
+			"type": "shell",
+			"command": "dotnet",
+			"args": [
+				"run",
+				"--project",
+				"KPACS.RenderServer/KPACS.RenderServer.csproj"
+			],
+			"isBackground": true,
+			"group": "build"
 		}
 	]
 }

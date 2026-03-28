@@ -8,6 +8,7 @@ using Avalonia.Input;
 using Avalonia.Interactivity;
 using Avalonia.Layout;
 using Avalonia.Media;
+using Avalonia.Media.Imaging;
 using Avalonia.Threading;
 using FellowOakDicom;
 using KPACS.Viewer.Controls;
@@ -569,6 +570,15 @@ public partial class StudyViewerWindow : Window
                 return;
             }
 
+            if (IsRenderServerStudy && slot.Series is not null && TryGetRenderServerSeriesKey(slot.Series, out _))
+            {
+                LogRemoteViewerDiagnostic(slot, $"Remote volume cached for {DescribeSeriesForLog(slot.Series)} but no remote backend is attached; blocking local fallback and re-requesting remote load.");
+                slot.Panel.ClearImage();
+                _ = EnsureRenderServerBackendLoadedForSlotAsync(slot, slot.Series, showFailureToast: false);
+                UpdateSecondaryCaptureIndicator(slot);
+                return;
+            }
+
             ApplySlotOverlayStudyInfo(slot);
             bool isCurrentBoundVolume = slot.Panel.BoundVolume == slot.Volume;
             SliceOrientation orientation = isCurrentBoundVolume
@@ -618,8 +628,17 @@ public partial class StudyViewerWindow : Window
         if (instance is null || !IsLocalInstance(instance))
         {
             slot.CurrentSpatialMetadata = null;
-            slot.Panel.ClearImage();
-            RequestSlotPriority(slot, exactFocusOnly: preferExactRemoteFocus);
+            if (IsRenderServerStudy && TryGetRenderServerSeriesKey(slot.Series, out _))
+            {
+                ApplySlotOverlayStudyInfo(slot);
+                QueueRenderServerSlotImageLoad(slot, slot.Series, slot.InstanceIndex, refreshThumbnailStrip);
+            }
+            else
+            {
+                slot.Panel.ClearImage();
+                RequestSlotPriority(slot, exactFocusOnly: preferExactRemoteFocus);
+            }
+
             if (refreshThumbnailStrip && ReferenceEquals(slot, _activeSlot))
             {
                 RefreshThumbnailStrip(slot.Series);
@@ -1098,6 +1117,13 @@ public partial class StudyViewerWindow : Window
 
     private void ShowGpuInitStatusToast()
     {
+        if (IsRenderServerStudy)
+        {
+            string remoteGpu = _context.RenderServerConnection?.Capabilities?.GpuDeviceName ?? "Remote render server";
+            ShowToast($"Remote rendering active: {remoteGpu}", ToastSeverity.Success, TimeSpan.FromSeconds(8));
+            return;
+        }
+
         VolumeComputeBackendStatus status = VolumeComputeBackend.CurrentStatus;
         string fallbackNote = VolumeComputeBackend.CpuFallbackDisabled ? " ⛔ CPU fallback is DISABLED" : "";
         if (status.IsAccelerated)
@@ -1166,15 +1192,7 @@ public partial class StudyViewerWindow : Window
             .ToList();
         if (IsRenderServerStudy)
         {
-            foreach (var slot in slotsToLoad)
-            {
-                if (slot.Series is null)
-                {
-                    continue;
-                }
-
-                await EnsureRenderServerBackendLoadedForSlotAsync(slot, slot.Series);
-            }
+            await LoadRenderServerVolumesForSlotsAsync(slotsToLoad);
 
             return;
         }
@@ -1220,6 +1238,11 @@ public partial class StudyViewerWindow : Window
 
     private void ApplyVolumeToSlot(ViewportSlot slot, SeriesVolume volume)
     {
+        string backendKind = IsRenderServerStudy && slot.Series is not null && TryGetCachedRemoteRenderBackend(slot.Series, out RemoteRenderBackend? backend) && backend is not null
+            ? $"remote/{backend.Label}"
+            : "local";
+        LogRemoteViewerDiagnostic(slot, $"Applying volume via {backendKind}. Size={volume.SizeX}x{volume.SizeY}x{volume.SizeZ} for {DescribeSeriesForLog(slot.Series)}.");
+
         // Preserve current view state and approximate slice position
         DicomViewPanel.DisplayState? viewState = slot.Panel.IsImageLoaded
             ? BuildVolumeTransitionDisplayState(slot.Panel.CaptureDisplayState(), volume)
@@ -1410,6 +1433,8 @@ public partial class StudyViewerWindow : Window
             bool isRemoteSeries = IsRenderServerStudy && TryGetRenderServerSeriesKey(series, out _);
             bool isActiveSeries = activeSeries is not null && string.Equals(activeSeries.SeriesInstanceUid, series.SeriesInstanceUid, StringComparison.Ordinal);
             bool isSecondaryCaptureSeries = HasManagedSecondaryCapture(series);
+            WriteableBitmap? remoteThumbnail = null;
+            bool hasRemoteThumbnail = isRemoteSeries && TryGetRenderServerThumbnail(series, out remoteThumbnail) && remoteThumbnail is not null;
 
             var border = new Border
             {
@@ -1426,24 +1451,52 @@ public partial class StudyViewerWindow : Window
                 RowDefinitions = new RowDefinitions("*,Auto"),
             };
 
-            var thumbPanel = new DicomViewPanel
-            {
-                Width = 98,
-                Height = 58,
-                ShowOverlay = false,
-                ShowToolboxButton = false,
-                IsHitTestVisible = false,
-            };
+            Control thumbnailControl;
             if (localRepresentative is not null)
             {
+                var thumbPanel = new DicomViewPanel
+                {
+                    Width = 98,
+                    Height = 58,
+                    ShowOverlay = false,
+                    ShowToolboxButton = false,
+                    IsHitTestVisible = false,
+                };
                 thumbPanel.LoadFile(localRepresentative.FilePath);
+                thumbnailControl = thumbPanel;
+            }
+            else if (hasRemoteThumbnail)
+            {
+                thumbnailControl = new Image
+                {
+                    Width = 98,
+                    Height = 58,
+                    Source = remoteThumbnail,
+                    Stretch = Stretch.Uniform,
+                    IsHitTestVisible = false,
+                };
             }
             else
             {
-                if (!isRemoteSeries)
+                var thumbPanel = new DicomViewPanel
+                {
+                    Width = 98,
+                    Height = 58,
+                    ShowOverlay = false,
+                    ShowToolboxButton = false,
+                    IsHitTestVisible = false,
+                };
+
+                if (isRemoteSeries)
+                {
+                    QueueRenderServerThumbnail(series);
+                }
+                else
                 {
                     RequestSeriesThumbnail(series, representativeIndex);
                 }
+
+                thumbnailControl = thumbPanel;
             }
 
             var label = new TextBlock
@@ -1454,9 +1507,9 @@ public partial class StudyViewerWindow : Window
                 Margin = new Thickness(0, 4, 0, 0),
             };
 
-            grid.Children.Add(thumbPanel);
+            grid.Children.Add(thumbnailControl);
 
-            if (isRemoteSeries && localRepresentative is null)
+            if (isRemoteSeries && localRepresentative is null && !hasRemoteThumbnail)
             {
                 grid.Children.Add(new Border
                 {
@@ -1470,6 +1523,25 @@ public partial class StudyViewerWindow : Window
                         HorizontalAlignment = HorizontalAlignment.Center,
                         VerticalAlignment = VerticalAlignment.Center,
                         FontSize = 13,
+                        FontWeight = FontWeight.SemiBold,
+                    },
+                });
+            }
+            else if (isRemoteSeries)
+            {
+                grid.Children.Add(new Border
+                {
+                    Background = new SolidColorBrush(Color.Parse("#B21C3558")),
+                    CornerRadius = new CornerRadius(8),
+                    Padding = new Thickness(5, 1),
+                    HorizontalAlignment = HorizontalAlignment.Right,
+                    VerticalAlignment = VerticalAlignment.Top,
+                    Margin = new Thickness(0, 4, 4, 0),
+                    Child = new TextBlock
+                    {
+                        Text = "☁",
+                        Foreground = Brushes.White,
+                        FontSize = 11,
                         FontWeight = FontWeight.SemiBold,
                     },
                 });
@@ -1938,6 +2010,7 @@ public partial class StudyViewerWindow : Window
     private void AssignSeriesToSlot(ViewportSlot slot, SeriesRecord series)
     {
         ShowSeriesLoadingToast(series, _isShowingCurrentStudy ? "Loading series into viewport" : "Loading comparison series into viewport");
+        LogRemoteViewerDiagnostic(slot, $"Assigning {DescribeSeriesForLog(series)}. RenderServerStudy={IsRenderServerStudy}. CachedVolume={_volumeCache.ContainsKey(series.SeriesInstanceUid)}.");
 
         slot.Series = series;
         slot.Volume = _volumeCache.TryGetValue(series.SeriesInstanceUid, out var vol) ? vol : null;
@@ -1958,6 +2031,7 @@ public partial class StudyViewerWindow : Window
     {
         if (IsRenderServerStudy && TryGetRenderServerSeriesKey(series, out _))
         {
+            LogRemoteViewerDiagnostic(slot, $"Requesting remote backend for {DescribeSeriesForLog(series)}.");
             await EnsureRenderServerBackendLoadedForSlotAsync(slot, series);
             return;
         }
@@ -1980,15 +2054,19 @@ public partial class StudyViewerWindow : Window
         {
             SeriesVolume? volume = await volumeLoader.TryLoadVolumeAsync(series);
             _volumeCache[seriesUid] = volume;
+            LogRemoteViewerDiagnostic(slot, volume is null
+                ? $"Local volume load unavailable for {DescribeSeriesForLog(series)}."
+                : $"Local volume load succeeded for {DescribeSeriesForLog(series)}.");
 
             if (volume is not null && ReferenceEquals(slot.Series, series))
             {
                 await Dispatcher.UIThread.InvokeAsync(() => ApplyVolumeToSlot(slot, volume));
             }
         }
-        catch
+        catch (Exception ex)
         {
             _volumeCache[seriesUid] = null;
+            LogRemoteViewerDiagnostic(slot, $"Local volume load failed for {DescribeSeriesForLog(series)}: {ex.GetType().Name} {ex.Message}");
         }
     }
 
@@ -3439,7 +3517,15 @@ public partial class StudyViewerWindow : Window
             InstanceRecord? current = GetSafeSeriesInstance(slot.Series, slot.InstanceIndex);
             if (current is null || !IsLocalInstance(current))
             {
-                slot.Panel.ClearImage();
+                if (IsRenderServerStudy && TryGetRenderServerSeriesKey(slot.Series, out _))
+                {
+                    LoadSlot(slot);
+                }
+                else
+                {
+                    slot.Panel.ClearImage();
+                }
+
                 continue;
             }
 
@@ -3667,6 +3753,39 @@ public partial class StudyViewerWindow : Window
     }
 
     private static string GetBestThumbnailPath(SeriesRecord series) => GetBestLocalRepresentativeInstance(series)?.FilePath ?? string.Empty;
+
+    private void LogRemoteViewerDiagnostic(ViewportSlot? slot, string message)
+    {
+        if (string.IsNullOrWhiteSpace(message))
+        {
+            return;
+        }
+
+        App.LogRuntimeDiagnostic("REMOTE-VIEWER", $"Viewer{_viewerNumber} {DescribeSlotForLog(slot)} {message}");
+    }
+
+    private string DescribeSlotForLog(ViewportSlot? slot)
+    {
+        if (slot is null)
+        {
+            return "slot=<none>";
+        }
+
+        int slotIndex = _slots.IndexOf(slot);
+        return slotIndex >= 0 ? $"slot={slotIndex + 1}" : "slot=<detached>";
+    }
+
+    private static string DescribeSeriesForLog(SeriesRecord? series)
+    {
+        if (series is null)
+        {
+            return "series=<none>";
+        }
+
+        string uid = series.SeriesInstanceUid ?? string.Empty;
+        string uidSuffix = uid.Length <= 12 ? uid : uid[^12..];
+        return $"series={series.Modality.Trim()} S{Math.Max(1, series.SeriesNumber)} count={Math.Max(series.InstanceCount, series.Instances.Count)} uid=*{uidSuffix}";
+    }
 
     private MouseWheelMode GetMouseWheelModeForAction() =>
         MouseWheelMode.StackScroll;

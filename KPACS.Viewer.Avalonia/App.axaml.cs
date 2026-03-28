@@ -17,6 +17,17 @@ public partial class App : Application
     private static readonly Lock RuntimeDiagnosticsSyncLock = new();
     private static string _runtimeDiagnosticsLogPath = string.Empty;
 
+    public static string RuntimeDiagnosticsLogPath
+    {
+        get
+        {
+            lock (RuntimeDiagnosticsSyncLock)
+            {
+                return _runtimeDiagnosticsLogPath;
+            }
+        }
+    }
+
     public ImageboxPaths Paths { get; private set; } = null!;
     public ImageboxRepository Repository { get; private set; } = null!;
     public BackgroundJobService BackgroundJobs { get; private set; } = null!;
@@ -131,7 +142,8 @@ public partial class App : Application
 
     private static void OnTaskSchedulerUnobservedTaskException(object? sender, UnobservedTaskExceptionEventArgs e)
     {
-        LogRuntimeException("TASK", e.Exception, unhandled: true);
+        LogRuntimeException("TASK", e.Exception, unhandled: false);
+        e.SetObserved();
     }
 
     public static void LogRuntimeException(string source, Exception exception, bool unhandled = false)

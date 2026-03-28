@@ -110,7 +110,9 @@ public sealed class RemoteRenderBackend : IRenderBackend
         string? clientName = null,
         CancellationToken ct = default)
     {
+        App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"ConnectAsync start server={serverUrl} seriesKey={seriesKey} client={clientName ?? Environment.MachineName}.");
         var channel = RenderServerGrpcClientFactory.CreateChannel(serverUrl);
+        string? sessionId = null;
 
         try
         {
@@ -125,7 +127,7 @@ public sealed class RemoteRenderBackend : IRenderBackend
                     MaxViewports = 1,
                 }, cancellationToken: ct);
 
-            string sessionId = sessionResponse.SessionId;
+            sessionId = sessionResponse.SessionId;
 
             // Load volume by series key
             var loadResponse = await volumeClient.LoadVolumeAsync(
@@ -141,14 +143,45 @@ public sealed class RemoteRenderBackend : IRenderBackend
             // Build a lightweight proxy SeriesVolume with metadata only (no voxel data).
             var proxyVolume = CreateProxyVolume(volumeInfo);
 
+            App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"ConnectAsync success seriesKey={seriesKey} session={sessionId} volume={volumeId} gpu={sessionResponse.Capabilities?.GpuDeviceName ?? "unknown"}.");
+
             return new RemoteRenderBackend(channel, sessionId, volumeId, volumeInfo, proxyVolume,
                 sessionResponse.Capabilities);
         }
-        catch
+        catch (Exception ex)
         {
+            if (!string.IsNullOrWhiteSpace(sessionId))
+            {
+                try
+                {
+                    var sessionClient = new SessionService.SessionServiceClient(channel);
+                    await sessionClient.DestroySessionAsync(
+                        new DestroySessionRequest { SessionId = sessionId },
+                        cancellationToken: CancellationToken.None);
+                }
+                catch
+                {
+                }
+            }
+
             channel.Dispose();
+            App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"ConnectAsync failed seriesKey={seriesKey}: {ex.GetType().Name} {ex.Message}");
             throw;
         }
+    }
+
+    public static async Task<ReslicedImage> RenderSeriesPreviewAsync(
+        string serverUrl,
+        long seriesKey,
+        int outputWidth,
+        int outputHeight,
+        string? clientName = null,
+        CancellationToken ct = default)
+    {
+        using RemoteRenderBackend backend = await ConnectAsync(serverUrl, seriesKey, clientName, ct);
+        int sliceCount = Math.Max(1, backend.GetSliceCount(LocalSliceOrientation.Axial));
+        int sliceIndex = Math.Clamp(sliceCount / 2, 0, Math.Max(0, sliceCount - 1));
+        return await backend.RenderSnapshotAsync(LocalSliceOrientation.Axial, sliceIndex, outputWidth, outputHeight, ct);
     }
 
     /// <summary>
@@ -176,6 +209,14 @@ public sealed class RemoteRenderBackend : IRenderBackend
 
     /// <inheritdoc />
     public string Label => $"Remote GPU ({Capabilities?.GpuDeviceName ?? "unknown"})";
+
+    private string BuildFrameBackendLabel(double renderTimeMs)
+    {
+        string projectionLabel = string.IsNullOrWhiteSpace(LastServerBackend)
+            ? string.Empty
+            : $" · {LastServerBackend}";
+        return $"{Label}{projectionLabel} · {renderTimeMs:F0} ms";
+    }
 
     /// <inheritdoc />
     public bool SupportsHighQualityInteractive => true; // GPU server renders at full quality
@@ -327,6 +368,27 @@ public sealed class RemoteRenderBackend : IRenderBackend
         return ExecuteRender(viewportState, LocalSliceOrientation.Axial, 0);
     }
 
+    public async Task<ReslicedImage> RenderSnapshotAsync(
+        LocalSliceOrientation orientation,
+        int sliceIndex,
+        int outputWidth,
+        int outputHeight,
+        CancellationToken ct = default)
+    {
+        App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"RenderSnapshot start session={_sessionId} volume={_volumeId} orientation={orientation} slice={sliceIndex} output={outputWidth}x{outputHeight}.");
+        int clampedSliceIndex = Math.Clamp(sliceIndex, 0, Math.Max(0, GetSliceCount(orientation) - 1));
+        var viewportState = BuildViewportState(
+            RenderMode.Mpr,
+            orientation,
+            clampedSliceIndex,
+            0,
+            LocalProjectionMode.Mpr);
+        viewportState.OutputWidth = Math.Max(1, outputWidth);
+        viewportState.OutputHeight = Math.Max(1, outputHeight);
+
+        return await ExecuteRenderAsync(viewportState, orientation, clampedSliceIndex, ct);
+    }
+
     // ==============================================================================================
     //  Remote-specific hooks
     // ==============================================================================================
@@ -366,6 +428,7 @@ public sealed class RemoteRenderBackend : IRenderBackend
     /// <inheritdoc />
     public void Dispose()
     {
+        App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"Dispose session={_sessionId} volume={_volumeId}.");
         try
         {
             _sessionClient.DestroySession(new DestroySessionRequest { SessionId = _sessionId });
@@ -465,7 +528,7 @@ public sealed class RemoteRenderBackend : IRenderBackend
                 PixelSpacingX = pixelSpacingX > 0 ? pixelSpacingX : _proxyVolume.SpacingX,
                 PixelSpacingY = pixelSpacingY > 0 ? pixelSpacingY : _proxyVolume.SpacingY,
                 SpatialMetadata = GetSliceSpatialMetadata(orientation, sliceIndex),
-                RenderBackendLabel = $"Remote ({response.RenderTimeMs:F0}ms)",
+                RenderBackendLabel = BuildFrameBackendLabel(response.RenderTimeMs),
             };
         }
         catch (Exception ex)
@@ -483,7 +546,7 @@ public sealed class RemoteRenderBackend : IRenderBackend
                 Height = h,
                 PixelSpacingX = _proxyVolume.SpacingX,
                 PixelSpacingY = _proxyVolume.SpacingY,
-                RenderBackendLabel = "Remote (error)",
+                RenderBackendLabel = $"{Label} · error",
             };
         }
     }
@@ -627,4 +690,74 @@ public sealed class RemoteRenderBackend : IRenderBackend
     /// Extracts tilt-around-row from a VolumeSlicePlane.
     /// </summary>
     private static double GetTiltAroundRow(VolumeSlicePlane plane) => 0; // TODO: extract from plane geometry
+
+    private async Task<ReslicedImage> ExecuteRenderAsync(
+        ViewportState viewportState,
+        LocalSliceOrientation orientation,
+        int sliceIndex,
+        CancellationToken ct)
+    {
+        try
+        {
+            RenderSnapshotResponse response = await _renderClient.RenderSnapshotAsync(
+                new RenderSnapshotRequest
+                {
+                    SessionId = _sessionId,
+                    VolumeId = _volumeId,
+                    ViewportState = viewportState,
+                    OutputWidth = viewportState.OutputWidth,
+                    OutputHeight = viewportState.OutputHeight,
+                    PreferredEncoding = FrameEncoding.RawBgra32,
+                    Quality = 95,
+                },
+                cancellationToken: ct);
+
+            LastRenderTimeMs = response.RenderTimeMs;
+            LastServerBackend = response.Metadata?.ProjectionModeLabel ?? string.Empty;
+
+            int width = response.FrameWidth;
+            int height = response.FrameHeight;
+            byte[] bgraPixels = DecodeBgraFrame(response.FrameData, response.Encoding, width, height);
+
+            double pixelSpacingX = response.Metadata?.PixelSpacingX ?? _proxyVolume.SpacingX;
+            double pixelSpacingY = response.Metadata?.PixelSpacingY ?? _proxyVolume.SpacingY;
+
+            App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"ExecuteRenderAsync success session={_sessionId} volume={_volumeId} orientation={orientation} slice={sliceIndex} output={width}x{height} renderMs={response.RenderTimeMs:F1} backend={response.Metadata?.ProjectionModeLabel ?? "n/a"}.");
+
+            return new ReslicedImage
+            {
+                Pixels = [],
+                BgraPixels = bgraPixels,
+                Width = width,
+                Height = height,
+                PixelSpacingX = pixelSpacingX > 0 ? pixelSpacingX : _proxyVolume.SpacingX,
+                PixelSpacingY = pixelSpacingY > 0 ? pixelSpacingY : _proxyVolume.SpacingY,
+                SpatialMetadata = GetSliceSpatialMetadata(orientation, sliceIndex),
+                RenderBackendLabel = BuildFrameBackendLabel(response.RenderTimeMs),
+            };
+        }
+        catch (OperationCanceledException)
+        {
+            App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"ExecuteRenderAsync cancelled session={_sessionId} volume={_volumeId} orientation={orientation} slice={sliceIndex}.");
+            throw;
+        }
+        catch (Exception ex)
+        {
+            Console.Error.WriteLine($"[RemoteRenderBackend] Async render failed: {ex.Message}");
+            App.LogRuntimeDiagnostic("REMOTE-BACKEND", $"ExecuteRenderAsync failed session={_sessionId} volume={_volumeId} orientation={orientation} slice={sliceIndex}: {ex.GetType().Name} {ex.Message}");
+
+            int width = Math.Max(1, viewportState.OutputWidth);
+            int height = Math.Max(1, viewportState.OutputHeight);
+            return new ReslicedImage
+            {
+                Pixels = [],
+                BgraPixels = new byte[width * height * 4],
+                Width = width,
+                Height = height,
+                PixelSpacingX = _proxyVolume.SpacingX,
+                PixelSpacingY = _proxyVolume.SpacingY,
+                RenderBackendLabel = $"{Label} · error",
+            };
+        }
+    }
 }

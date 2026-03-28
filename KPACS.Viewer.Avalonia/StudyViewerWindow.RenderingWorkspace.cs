@@ -135,7 +135,7 @@ public partial class StudyViewerWindow
                 ? "This viewport is loaded, but no 3D volume is available yet. Select a CT/MR volume viewport to use DVR controls."
                 : "Select a viewport with a loaded volume to configure 3D rendering.";
         RenderingWorkspaceTargetText.Text = BuildRenderingWorkspaceTargetText(slot, hasImage, hasVolume);
-        RenderingWorkspaceBackendText.Text = BuildRenderingBackendText(panel, hasVolume, _renderingBackendPreference);
+        RenderingWorkspaceBackendText.Text = BuildRenderingBackendText(slot, panel, hasVolume, _renderingBackendPreference);
         RenderingWorkspaceBenchmarkText.Text = hasVolume
             ? string.IsNullOrWhiteSpace(_renderingBenchmarkSummary)
                 ? "Run the benchmark to compare the current view on CPU and OpenCL. Warm-up runs are excluded from the timing."
@@ -281,8 +281,27 @@ public partial class StudyViewerWindow
         return $"Target viewport: {seriesLabel}{modality} · {dataKind}";
     }
 
-    private static string BuildRenderingBackendText(DicomViewPanel? panel, bool hasVolume, VolumeComputePreference preference)
+    private string BuildRenderingBackendText(ViewportSlot? slot, DicomViewPanel? panel, bool hasVolume, VolumeComputePreference preference)
     {
+        bool isRemoteSeries = IsRenderServerStudy && slot?.Series is not null && TryGetRenderServerSeriesKey(slot.Series, out _);
+
+        if (panel?.RenderBackend?.IsRemote == true)
+        {
+            string remoteRuntime = $"Selection: Remote render server · Runtime: {panel.RenderBackend.Label}";
+            return hasVolume
+                ? $"Last frame: {panel.LastRenderBackendLabel} · {remoteRuntime}"
+                : remoteRuntime;
+        }
+
+        if (isRemoteSeries)
+        {
+            string remoteGpu = _context.RenderServerConnection?.Capabilities?.GpuDeviceName ?? "remote GPU";
+            string remoteRuntime = $"Selection: Remote render server · Runtime: {remoteGpu}";
+            return hasVolume || panel?.IsImageLoaded == true
+                ? $"Last frame: {panel?.LastRenderBackendLabel ?? "Remote image"} · {remoteRuntime}"
+                : remoteRuntime;
+        }
+
         VolumeComputeBackendStatus status = VolumeComputeBackend.CurrentStatus;
         string runtime = $"Selection: {GetRenderingBackendPreferenceLabel(preference)} · Runtime: {status.DisplayName} · Device: {status.DeviceName}";
         string detail = string.IsNullOrWhiteSpace(status.Detail) ? string.Empty : $" · {status.Detail}";

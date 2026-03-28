@@ -664,6 +664,67 @@ public partial class DicomViewPanel : UserControl
         }
     }
 
+    public void LoadRemoteRenderedImage(byte[] bgraPixels, int width, int height, string sourceId = "")
+    {
+        LastError = null;
+
+        _renderBackend?.Dispose();
+        _renderBackend = null;
+        _volume = null;
+        _rawPixelData = null;
+        _volumeSlicePixels = null;
+        _projectionPointer = null;
+        _isProjectionThicknessDragging = false;
+        _planeTiltAroundColumn = 0;
+        _planeTiltAroundRow = 0;
+        _planeOffsetMm = 0;
+        _bitmapOverlays.Clear();
+
+        _imageWidth = Math.Max(1, width);
+        _imageHeight = Math.Max(1, height);
+        _bitsAllocated = 8;
+        _bitsStored = 8;
+        _samplesPerPixel = 1;
+        _planarConfiguration = 0;
+        _isSigned = false;
+        _rescaleSlope = 1.0;
+        _rescaleIntercept = 0.0;
+        _windowCenter = 127;
+        _windowWidth = 255;
+        _defaultWindowCenter = _windowCenter;
+        _defaultWindowWidth = _windowWidth;
+        _lastRenderBackendLabel = "Remote image";
+        _isMonochrome1 = false;
+        _photometricInterpretation = "RGB";
+        _frameCount = 1;
+        _fileName = sourceId ?? string.Empty;
+        SpatialMetadata = null;
+        _volumeSliceBgraPixels = [.. bgraPixels];
+
+        SetColorLutInternal(_colorScheme);
+
+        _displayBitmap = null;
+        DicomImage.Source = null;
+        ApplyDisplayImageSize();
+        DicomImage.InvalidateMeasure();
+
+        PlaceholderText.IsVisible = false;
+
+        RenderImage();
+
+        _fitToWindow = true;
+        _pendingInitialFitToWindow = true;
+        ApplyInitialFitToWindow();
+        Set3DCursorOverlay(null);
+        SetReferenceLineOverlay(null, null);
+        ResetMeasurementStateForNewImage();
+
+        UpdateOverlay();
+        ImageLoaded?.Invoke();
+        WindowChanged?.Invoke();
+        ZoomChanged?.Invoke();
+    }
+
     private static bool TryGetDefaultWindowPreset(DicomDataset dataset, out double center, out double width)
     {
         if (TryReadWindowPreset(dataset, out center, out width))
